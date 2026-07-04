@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/domain" },
+    { "path": "./packages/storage" },
+    { "path": "./packages/github" },
+    { "path": "./packages/ai" },
+    { "path": "./packages/search" },
+    { "path": "./packages/worker" }
+  ]
+}
