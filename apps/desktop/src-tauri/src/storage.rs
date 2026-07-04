@@ -28,6 +28,12 @@ pub struct RepositoryListPage {
     pub offset: usize,
 }
 
+pub struct RepositoryListFilters<'a> {
+    pub keyword: Option<&'a str>,
+    pub language: Option<&'a str>,
+    pub tag_id: Option<&'a str>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryListItem {
@@ -94,6 +100,11 @@ struct AnnotationRow {
     note_markdown: String,
     reading_status: String,
     updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct RepositoryLanguageRow {
+    language: String,
 }
 
 impl AppStorage {
@@ -272,9 +283,11 @@ ON CONFLICT(repo_id) DO UPDATE SET
         &self,
         limit: usize,
         offset: usize,
+        filters: RepositoryListFilters<'_>,
     ) -> Result<RepositoryListPage, String> {
         let normalized_limit = limit.clamp(1, 1000);
-        let total_count = self.count_active_repositories()?;
+        let where_clause = build_repository_filter_clause(&filters);
+        let total_count = self.count_active_repositories(&where_clause)?;
         let sql = format!(
             r#"
 .mode json
@@ -295,16 +308,19 @@ SELECT
   CASE WHEN rr.repo_id IS NULL THEN 0 ELSE 1 END AS has_readme
 FROM repositories r
 LEFT JOIN repo_readmes rr ON rr.repo_id = r.id
-WHERE r.sync_status = 'active'
+LEFT JOIN annotations a ON a.repo_id = r.id
+WHERE {where_clause}
 ORDER BY r.starred_at DESC
 LIMIT {limit} OFFSET {offset};
 "#,
+            where_clause = where_clause,
             limit = normalized_limit,
             offset = offset,
         );
-        let output = self.query_sql(&sql)?;
-        let rows = serde_json::from_str::<Vec<RepositoryListRow>>(output.trim())
-            .map_err(|error| format!("SQLite 仓库列表解析失败：{error}"))?;
+        let rows = parse_json_rows::<RepositoryListRow>(
+            &self.query_sql(&sql)?,
+            "SQLite 仓库列表解析失败",
+        )?;
         let items = rows
             .into_iter()
             .map(RepositoryListItem::try_from)
@@ -316,6 +332,24 @@ LIMIT {limit} OFFSET {offset};
             limit: normalized_limit,
             offset,
         })
+    }
+
+    pub fn list_repository_languages(&self) -> Result<Vec<String>, String> {
+        let sql = r#"
+.mode json
+SELECT DISTINCT language
+FROM repositories
+WHERE sync_status = 'active'
+  AND language IS NOT NULL
+  AND TRIM(language) != ''
+ORDER BY language COLLATE NOCASE ASC;
+"#;
+        let rows = parse_json_rows::<RepositoryLanguageRow>(
+            &self.query_sql(sql)?,
+            "SQLite 语言列表解析失败",
+        )?;
+
+        Ok(rows.into_iter().map(|row| row.language).collect())
     }
 
     pub fn list_tags(&self, account_id: &str) -> Result<Vec<TagItem>, String> {
@@ -569,13 +603,18 @@ WHERE id = {repository_id} AND account_id = {account_id};
         self.execute_sql(&sql)
     }
 
-    fn count_active_repositories(&self) -> Result<usize, String> {
-        let output = self.query_sql(
+    fn count_active_repositories(&self, where_clause: &str) -> Result<usize, String> {
+        let sql = format!(
             r#"
 .mode list
-SELECT COUNT(*) FROM repositories WHERE sync_status = 'active';
+SELECT COUNT(DISTINCT r.id)
+FROM repositories r
+LEFT JOIN annotations a ON a.repo_id = r.id
+WHERE {where_clause};
 "#,
-        )?;
+            where_clause = where_clause,
+        );
+        let output = self.query_sql(&sql)?;
 
         output
             .trim()
@@ -620,6 +659,30 @@ impl TryFrom<RepositoryListRow> for RepositoryListItem {
             has_readme: row.has_readme == 1,
         })
     }
+}
+
+fn build_repository_filter_clause(filters: &RepositoryListFilters<'_>) -> String {
+    let mut clauses = vec!["r.sync_status = 'active'".to_owned()];
+
+    if let Some(keyword) = normalize_optional_text(filters.keyword) {
+        let pattern = sql_like_pattern(keyword);
+        clauses.push(format!(
+            "(r.full_name LIKE {pattern} ESCAPE '\\' OR r.description LIKE {pattern} ESCAPE '\\' OR r.language LIKE {pattern} ESCAPE '\\' OR r.topics_json LIKE {pattern} ESCAPE '\\' OR a.note_md LIKE {pattern} ESCAPE '\\')"
+        ));
+    }
+
+    if let Some(language) = normalize_optional_text(filters.language) {
+        clauses.push(format!("r.language = {}", sql_text(language)));
+    }
+
+    if let Some(tag_id) = normalize_optional_text(filters.tag_id) {
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM repo_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.repo_id = r.id AND t.account_id = r.account_id AND rt.tag_id = {})",
+            sql_text(tag_id),
+        ));
+    }
+
+    clauses.join(" AND ")
 }
 
 fn execute_sqlite(database_path: &Path, sql: &str) -> Result<String, String> {
@@ -679,6 +742,10 @@ fn next_local_id(prefix: &str) -> Result<String, String> {
     Ok(format!("{prefix}_{timestamp}"))
 }
 
+fn normalize_optional_text(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 fn normalize_required_text(value: &str, error_message: &str) -> Result<String, String> {
     let normalized = value.trim();
 
@@ -696,6 +763,15 @@ fn normalize_reading_status(value: &str) -> Result<&'static str, String> {
         "later" => Ok("later"),
         _ => Err("阅读状态只能是 unread、read 或 later".to_owned()),
     }
+}
+
+fn sql_like_pattern(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+
+    sql_text(&format!("%{escaped}%"))
 }
 
 fn sql_text(value: &str) -> String {

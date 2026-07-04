@@ -35,6 +35,9 @@ struct ReadmeFetchSummary {
 struct RepositoryListRequest {
     limit: Option<usize>,
     offset: Option<usize>,
+    keyword: Option<String>,
+    language: Option<String>,
+    tag_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -176,10 +179,28 @@ fn list_repositories(
     let request = request.unwrap_or(RepositoryListRequest {
         limit: Some(1000),
         offset: Some(0),
+        keyword: None,
+        language: None,
+        tag_id: None,
     });
     let storage = AppStorage::from_app_handle(&app_handle)?;
 
-    storage.list_repository_page(request.limit.unwrap_or(1000), request.offset.unwrap_or(0))
+    storage.list_repository_page(
+        request.limit.unwrap_or(1000),
+        request.offset.unwrap_or(0),
+        storage::RepositoryListFilters {
+            keyword: request.keyword.as_deref(),
+            language: request.language.as_deref(),
+            tag_id: request.tag_id.as_deref(),
+        },
+    )
+}
+
+#[tauri::command]
+fn list_repository_languages(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+
+    storage.list_repository_languages()
 }
 
 #[tauri::command]
@@ -274,6 +295,7 @@ pub fn run() {
             sync_github_stars,
             fetch_repository_readmes,
             list_repositories,
+            list_repository_languages,
             list_tags,
             create_tag,
             update_tag,

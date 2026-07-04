@@ -42,6 +42,7 @@ export type ReadmeDocument = {
 export type AiRepositoryDocument = {
   repoId: RepositoryId;
   summaryZh: string;
+  readmeZh: string | null;
   keywords: string[];
   suggestedTags: string[];
   model: string;

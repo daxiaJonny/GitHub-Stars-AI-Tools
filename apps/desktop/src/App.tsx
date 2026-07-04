@@ -57,6 +57,12 @@ type RepositoryListPage = {
   offset: number;
 };
 
+type RepositoryFilters = {
+  keyword: string;
+  language: string;
+  tagId: string;
+};
+
 type TagItem = {
   id: string;
   accountId: string;
@@ -95,6 +101,12 @@ const initialAuthState: GitHubAuthState = {
   user: null,
 };
 
+const emptyRepositoryFilters: RepositoryFilters = {
+  keyword: '',
+  language: '',
+  tagId: '',
+};
+
 export function App() {
   const [status, setStatus] = useState<BackendStatus | null>(null);
   const [authState, setAuthState] = useState<GitHubAuthState>(initialAuthState);
@@ -110,6 +122,8 @@ export function App() {
   const [syncSummary, setSyncSummary] = useState<StarSyncSummary | null>(null);
   const [readmeSummary, setReadmeSummary] = useState<ReadmeFetchSummary | null>(null);
   const [repositoryPage, setRepositoryPage] = useState<RepositoryListPage | null>(null);
+  const [repositoryLanguages, setRepositoryLanguages] = useState<string[]>([]);
+  const [repositoryFilters, setRepositoryFilters] = useState<RepositoryFilters>(emptyRepositoryFilters);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<string | null>(null);
   const [tags, setTags] = useState<TagItem[]>([]);
   const [annotation, setAnnotation] = useState<RepositoryAnnotationView | null>(null);
@@ -139,7 +153,8 @@ export function App() {
         setError(reason instanceof Error ? reason.message : String(reason));
       });
 
-    loadRepositories();
+    loadRepositories(emptyRepositoryFilters);
+    loadRepositoryLanguages();
   }, []);
 
   useEffect(() => {
@@ -157,7 +172,6 @@ export function App() {
 
   useEffect(() => {
     if (!selectedRepository) {
-      setTags([]);
       setAnnotation(null);
       setNoteDraft('');
       setReadingStatusDraft('unread');
@@ -167,12 +181,18 @@ export function App() {
     loadAnnotationWorkspace(selectedRepository);
   }, [selectedRepository?.id, selectedRepository?.accountId]);
 
-  async function loadRepositories() {
+  async function loadRepositories(nextFilters = repositoryFilters) {
     setIsLoadingRepositories(true);
 
     try {
       const page = await invoke<RepositoryListPage>('list_repositories', {
-        request: { limit: 1000, offset: 0 },
+        request: {
+          limit: 1000,
+          offset: 0,
+          keyword: optionalRequestText(nextFilters.keyword),
+          language: optionalRequestText(nextFilters.language),
+          tagId: optionalRequestText(nextFilters.tagId),
+        },
       });
       setRepositoryPage(page);
     } catch (reason) {
@@ -180,6 +200,29 @@ export function App() {
     } finally {
       setIsLoadingRepositories(false);
     }
+  }
+
+  async function loadRepositoryLanguages() {
+    try {
+      const languages = await invoke<string[]>('list_repository_languages');
+      setRepositoryLanguages(languages);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function applyRepositoryFilters(nextFilters: RepositoryFilters) {
+    setRepositoryFilters(nextFilters);
+    await loadRepositories(nextFilters);
+  }
+
+  async function resetRepositoryFilters() {
+    setRepositoryFilters(emptyRepositoryFilters);
+    await loadRepositories(emptyRepositoryFilters);
+  }
+
+  async function refreshRepositoryWorkspace() {
+    await Promise.all([loadRepositories(repositoryFilters), loadRepositoryLanguages()]);
   }
 
   async function loadAnnotationWorkspace(repository: RepositoryListItem) {
@@ -249,7 +292,7 @@ export function App() {
       const summary = await invoke<StarSyncSummary>('sync_github_stars');
       setSyncSummary(summary);
       setReadmeSummary(null);
-      await loadRepositories();
+      await refreshRepositoryWorkspace();
       setAuthMessage(`已同步 ${summary.syncedCount} 个 Star 项目。`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -266,7 +309,7 @@ export function App() {
     try {
       const summary = await invoke<ReadmeFetchSummary>('fetch_repository_readmes');
       setReadmeSummary(summary);
-      await loadRepositories();
+      await refreshRepositoryWorkspace();
       setAuthMessage(`README 已处理 ${summary.totalCount} 个仓库。`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -362,6 +405,11 @@ export function App() {
         },
       });
       setTags((currentTags) => currentTags.filter((item) => item.id !== tag.id));
+      if (repositoryFilters.tagId === tag.id) {
+        await resetRepositoryFilters();
+      } else {
+        await loadRepositories(repositoryFilters);
+      }
       setAnnotation((currentAnnotation) =>
         currentAnnotation
           ? { ...currentAnnotation, tags: currentAnnotation.tags.filter((item) => item.id !== tag.id) }
@@ -401,6 +449,9 @@ export function App() {
         },
       });
       setAnnotation(nextAnnotation);
+      if (repositoryFilters.tagId === tag.id) {
+        await loadRepositories(repositoryFilters);
+      }
       setAnnotationMessage('仓库标签已更新。');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -481,7 +532,7 @@ export function App() {
               <p className="eyebrow compact">Star 工作台</p>
               <h2>已同步项目</h2>
             </div>
-            <button className="secondary-button compact-button" disabled={isLoadingRepositories} onClick={loadRepositories} type="button">
+            <button className="secondary-button compact-button" disabled={isLoadingRepositories} onClick={refreshRepositoryWorkspace} type="button">
               {isLoadingRepositories ? '正在刷新…' : '刷新列表'}
             </button>
           </div>
@@ -489,10 +540,12 @@ export function App() {
           <RepositoryWorkspace
             annotation={annotation}
             annotationMessage={annotationMessage}
+            filters={repositoryFilters}
             isLoading={isLoadingRepositories}
             isLoadingAnnotation={isLoadingAnnotation}
             isSavingAnnotation={isSavingAnnotation}
             isSavingTag={isSavingTag}
+            languages={repositoryLanguages}
             newTagColor={newTagColor}
             newTagName={newTagName}
             noteDraft={noteDraft}
@@ -500,9 +553,11 @@ export function App() {
             readingStatusDraft={readingStatusDraft}
             selectedRepository={selectedRepository}
             tags={tags}
+            onApplyFilters={applyRepositoryFilters}
             onCreateTag={handleCreateTag}
             onDeleteTag={handleDeleteTag}
             onRenameTag={handleRenameTag}
+            onResetFilters={resetRepositoryFilters}
             onSaveAnnotation={handleSaveAnnotation}
             onSelectRepository={setSelectedRepositoryId}
             onSetNewTagColor={setNewTagColor}
@@ -620,10 +675,12 @@ function StatusCard(props: { label: string; value: string }) {
 function RepositoryWorkspace(props: {
   annotation: RepositoryAnnotationView | null;
   annotationMessage: string | null;
+  filters: RepositoryFilters;
   isLoading: boolean;
   isLoadingAnnotation: boolean;
   isSavingAnnotation: boolean;
   isSavingTag: boolean;
+  languages: string[];
   newTagColor: string;
   newTagName: string;
   noteDraft: string;
@@ -631,9 +688,11 @@ function RepositoryWorkspace(props: {
   readingStatusDraft: ReadingStatus;
   selectedRepository: RepositoryListItem | null;
   tags: TagItem[];
+  onApplyFilters: (filters: RepositoryFilters) => void;
   onCreateTag: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteTag: (tag: TagItem) => void;
   onRenameTag: (tag: TagItem) => void;
+  onResetFilters: () => void;
   onSaveAnnotation: () => void;
   onSelectRepository: (repositoryId: string) => void;
   onSetNewTagColor: (value: string) => void;
@@ -646,11 +705,43 @@ function RepositoryWorkspace(props: {
     return <p className="empty-state">正在读取本地 Star 列表…</p>;
   }
 
-  if (!props.page || props.page.items.length === 0) {
+  const hasActiveFilters = Boolean(props.filters.keyword || props.filters.language || props.filters.tagId);
+
+  if (!props.page) {
     return (
-      <div className="empty-state">
-        <strong>还没有同步的 Star 项目</strong>
-        <p>连接 GitHub 后先点击“同步 Stars”，这里会展示仓库名称、语言、Topics、Star 数和 README 状态。</p>
+      <div className="repo-workspace">
+        <RepositoryFilterBar
+          filters={props.filters}
+          isLoading={props.isLoading}
+          languages={props.languages}
+          tags={props.tags}
+          onApplyFilters={props.onApplyFilters}
+          onResetFilters={props.onResetFilters}
+        />
+        <p className="empty-state">正在等待本地 Star 列表。</p>
+      </div>
+    );
+  }
+
+  if (props.page.items.length === 0) {
+    return (
+      <div className="repo-workspace">
+        <RepositoryFilterBar
+          filters={props.filters}
+          isLoading={props.isLoading}
+          languages={props.languages}
+          tags={props.tags}
+          onApplyFilters={props.onApplyFilters}
+          onResetFilters={props.onResetFilters}
+        />
+        <div className="empty-state">
+          <strong>{hasActiveFilters ? '没有匹配的 Star 项目' : '还没有同步的 Star 项目'}</strong>
+          <p>
+            {hasActiveFilters
+              ? '可以调整关键词、语言或标签筛选条件后重新查询。'
+              : '连接 GitHub 后先点击“同步 Stars”，这里会展示仓库名称、语言、Topics、Star 数和 README 状态。'}
+          </p>
+        </div>
       </div>
     );
   }
@@ -658,8 +749,16 @@ function RepositoryWorkspace(props: {
   return (
     <div className="repo-workspace split">
       <div className="repo-list-panel">
+        <RepositoryFilterBar
+          filters={props.filters}
+          isLoading={props.isLoading}
+          languages={props.languages}
+          tags={props.tags}
+          onApplyFilters={props.onApplyFilters}
+          onResetFilters={props.onResetFilters}
+        />
         <div className="repo-toolbar">
-          <span>共 {props.page.totalCount} 个项目</span>
+          <span>匹配 {props.page.totalCount} 个项目</span>
           <span>当前显示 {props.page.items.length} 个</span>
         </div>
         <div className="repo-list" role="list">
@@ -697,6 +796,84 @@ function RepositoryWorkspace(props: {
         onToggleRepositoryTag={props.onToggleRepositoryTag}
       />
     </div>
+  );
+}
+
+function RepositoryFilterBar(props: {
+  filters: RepositoryFilters;
+  isLoading: boolean;
+  languages: string[];
+  tags: TagItem[];
+  onApplyFilters: (filters: RepositoryFilters) => void;
+  onResetFilters: () => void;
+}) {
+  const [draftFilters, setDraftFilters] = useState<RepositoryFilters>(props.filters);
+  const hasActiveFilters = Boolean(props.filters.keyword || props.filters.language || props.filters.tagId);
+
+  useEffect(() => {
+    setDraftFilters(props.filters);
+  }, [props.filters]);
+
+  function updateDraftFilter<Key extends keyof RepositoryFilters>(key: Key, value: RepositoryFilters[Key]) {
+    setDraftFilters((currentFilters) => ({ ...currentFilters, [key]: value }));
+  }
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    props.onApplyFilters(draftFilters);
+  }
+
+  function handleReset() {
+    setDraftFilters(emptyRepositoryFilters);
+    props.onResetFilters();
+  }
+
+  return (
+    <form className="filter-bar" onSubmit={handleSubmit}>
+      <label htmlFor="repository-keyword">
+        <span>关键词</span>
+        <input
+          id="repository-keyword"
+          value={draftFilters.keyword}
+          placeholder="搜索名称、描述、Topics 或笔记"
+          onChange={(event) => updateDraftFilter('keyword', event.target.value)}
+        />
+      </label>
+      <label htmlFor="repository-language">
+        <span>语言</span>
+        <select
+          id="repository-language"
+          value={draftFilters.language}
+          onChange={(event) => updateDraftFilter('language', event.target.value)}
+        >
+          <option value="">全部语言</option>
+          {props.languages.map((language) => (
+            <option key={language} value={language}>{language}</option>
+          ))}
+        </select>
+      </label>
+      <label htmlFor="repository-tag">
+        <span>标签</span>
+        <select
+          id="repository-tag"
+          value={draftFilters.tagId}
+          onChange={(event) => updateDraftFilter('tagId', event.target.value)}
+        >
+          <option value="">全部标签</option>
+          {props.tags.map((tag) => (
+            <option key={tag.id} value={tag.id}>{tag.name}</option>
+          ))}
+        </select>
+      </label>
+      <div className="filter-actions">
+        <button className="primary-button" disabled={props.isLoading} type="submit">
+          {props.isLoading ? '正在搜索…' : '搜索'}
+        </button>
+        <button className="secondary-button" disabled={props.isLoading || !hasActiveFilters} type="button" onClick={handleReset}>
+          重置
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -869,6 +1046,12 @@ function AnnotationPanel(props: {
       </button>
     </aside>
   );
+}
+
+function optionalRequestText(value: string) {
+  const normalized = value.trim();
+
+  return normalized.length > 0 ? normalized : null;
 }
 
 function formatDate(value: string) {

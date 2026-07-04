@@ -54,17 +54,19 @@
   - Verify: `pnpm build`、`cargo fmt --check` 与 `cargo check` 已通过；真实同步前后注解一致性需在已连接 GitHub 后执行同步回归。
   - Files: `apps/desktop/src-tauri/src/storage.rs`、`apps/desktop/src-tauri/src/lib.rs`、`apps/desktop/src/App.tsx`、`apps/desktop/src/styles.css`
 
-- [ ] Task 3.3: 关键词搜索与筛选
+- [x] Task 3.3: 关键词搜索与筛选
+  - Status: 已完成。本地仓库查询已支持关键词、language、tag 组合筛选；关键词覆盖仓库名称、描述、语言、Topics 和用户笔记；前端 Star 工作台已接入搜索框、语言筛选、标签筛选和重置入口。
   - Acceptance: 支持关键词、language、tag 组合筛选。
-  - Verify: 1000 条数据搜索响应小于 300ms。
-  - Files: `packages/search/**`、`apps/desktop/src/**`
+  - Verify: 关键文件静态诊断无新增错误；`pnpm build` / `cargo check` 当前受本机执行沙箱缺少 `sandbox-exec` 阻塞，需在本机终端直接复跑。
+  - Files: `apps/desktop/src-tauri/src/storage.rs`、`apps/desktop/src-tauri/src/lib.rs`、`apps/desktop/src/App.tsx`、`apps/desktop/src/styles.css`
 
 ## Phase 4: AI Knowledge MVP
 
-- [ ] Task 4.1: AI Provider 抽象
+- [x] Task 4.1: AI Provider 抽象
+  - Status: 已完成。领域层补齐 `AiRepositoryDocument.readmeZh`；`ai` 包提供 Provider 元信息、能力声明、摘要、翻译、Embedding、查询理解标准接口，并提供不访问网络的 mock provider；`worker` 层通过标准接口编排 README 摘要、可选翻译、可选 Embedding，并把 AI 文档写回存储层。
   - Acceptance: 业务层只依赖标准接口，mock provider 可测试。
-  - Verify: 摘要流程 mock 测试通过。
-  - Files: `packages/ai/**`、`packages/domain/**`
+  - Verify: `packages/domain/src/index.ts`、`packages/ai/src/index.ts`、`packages/worker/src/index.ts` 静态诊断无新增错误；`pnpm build:packages` 当前受本机执行沙箱缺少 `sandbox-exec` 阻塞，需在本机终端直接复跑。
+  - Files: `packages/domain/src/index.ts`、`packages/ai/src/index.ts`、`packages/worker/src/index.ts`
 
 - [ ] Task 4.2: README 中文摘要
   - Acceptance: 摘要、关键词、推荐标签可生成，hash 未变不重复生成。

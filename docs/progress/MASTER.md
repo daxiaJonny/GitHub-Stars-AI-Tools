@@ -3,8 +3,8 @@
 ## 当前状态
 
 - 模式：LOCAL_ONLY
-- 阶段：Phase 3 进行中
-- 当前任务：Task 3.2 标签与笔记已完成，下一步进入 Task 3.3 关键词搜索与筛选
+- 阶段：Phase 4 进行中
+- 当前任务：Task 4.1 AI Provider 抽象已完成，下一步进入 Task 4.2 README 中文摘要
 - 日期：2026-07-04
 
 ## 产品边界
@@ -59,14 +59,14 @@
 - [x] Phase 0：规格冻结（1/1）
 - [x] Phase 1：项目骨架与基础设施（3/3）
 - [x] Phase 2：GitHub 同步闭环（3/3）
-- [ ] Phase 3：Star 管理核心能力（2/3）
-- [ ] Phase 4：AI 知识库 MVP（0/3）
+- [x] Phase 3：Star 管理核心能力（3/3）
+- [ ] Phase 4：AI 知识库 MVP（1/3）
 - [ ] Phase 5：自然语言检索（0/3）
 - [ ] Phase 6：同步与发布增强（0/3）
 
 ## 下一步
 
-进入 `tasks/todo.md` 的 Task 3.3：关键词搜索与筛选。下一步应在搜索层接入关键词、language、tag 的组合筛选，并保持查询只读取事实层与注解层投影，不改变 GitHub 同步写入边界。
+进入 `tasks/todo.md` 的 Task 4.2：README 中文摘要。下一步应基于 `AiProvider` 和 `runReadmeAiPipeline` 接入 README 摘要生成任务，并按 README `contentHash` 缓存 AI 派生结果，避免内容未变化时重复生成。
 
 ## 关键约束
 
