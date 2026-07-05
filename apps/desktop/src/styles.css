@@ -1,36 +1,71 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/geist";
 
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  /* 基础色：轻微暖灰底，提升舒适度 */
+  --background: oklch(0.985 0.002 90);
+  --foreground: oklch(0.18 0.008 90);
+
+  /* 表面层：纯白卡片，清晰分层 */
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0.18 0.008 90);
+
+  /* 弹出层 */
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.48 0 0);
-  --accent: oklch(0.95 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.91 0 0);
-  --input: oklch(0.91 0 0);
-  --ring: oklch(0.62 0 0);
+  --popover-foreground: oklch(0.18 0.008 90);
+
+  /* 主色：知识蓝，传递专业与可靠 */
+  --primary: oklch(0.48 0.14 240);
+  --primary-foreground: oklch(0.99 0 0);
+
+  /* 次要色：灰蓝，低调但有层次 */
+  --secondary: oklch(0.96 0.008 240);
+  --secondary-foreground: oklch(0.32 0.05 240);
+
+  /* 弱化色 */
+  --muted: oklch(0.97 0.005 90);
+  --muted-foreground: oklch(0.52 0.015 90);
+
+  /* 强调色：稍深的主色调 */
+  --accent: oklch(0.95 0.02 240);
+  --accent-foreground: oklch(0.28 0.08 240);
+
+  /* 成功色：柔和绿 */
+  --success: oklch(0.55 0.15 145);
+  --success-foreground: oklch(0.99 0 0);
+
+  /* 警告色：琥珀 */
+  --warning: oklch(0.68 0.16 75);
+  --warning-foreground: oklch(0.18 0.008 90);
+
+  /* 危险色：柔和红 */
+  --destructive: oklch(0.58 0.22 25);
+  --destructive-foreground: oklch(0.99 0 0);
+
+  /* 边框与输入 */
+  --border: oklch(0.92 0.005 90);
+  --input: oklch(0.96 0.005 90);
+  --ring: oklch(0.48 0.14 240);
+
+  /* 圆角 */
   --radius: 0.5rem;
-  color: hsl(var(--foreground));
-  background: hsl(var(--background));
-  font-family: "Geist Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  /* 阴影系统 */
+  --shadow-xs: 0 1px 2px oklch(0.18 0.008 90 / 0.05);
+  --shadow-sm: 0 1px 3px oklch(0.18 0.008 90 / 0.08), 0 1px 2px oklch(0.18 0.008 90 / 0.04);
+  --shadow-md: 0 4px 6px oklch(0.18 0.008 90 / 0.07), 0 2px 4px oklch(0.18 0.008 90 / 0.04);
+  --shadow-lg: 0 10px 15px oklch(0.18 0.008 90 / 0.08), 0 4px 6px oklch(0.18 0.008 90 / 0.04);
+
+  color: oklch(var(--foreground));
+  background: oklch(var(--background));
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 * {
@@ -39,7 +74,6 @@
 
 body {
   margin: 0;
-  min-width: 1180px;
   min-height: 100vh;
 }
 
@@ -51,11 +85,38 @@ textarea {
   font: inherit;
 }
 
+/* 焦点状态优化 */
+:focus-visible {
+  outline: 2px solid oklch(var(--ring));
+  outline-offset: 2px;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: oklch(var(--muted));
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: oklch(var(--muted-foreground) / 0.3);
+  border-radius: 4px;
+  border: 2px solid oklch(var(--muted));
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(var(--muted-foreground) / 0.5);
+}
+
 .rail-section {
   display: grid;
-  gap: 14px;
-  padding: 14px 0;
-  border-bottom: 1px solid hsl(var(--border));
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid oklch(var(--border));
 }
 
 .rail-section:first-child {
@@ -64,36 +125,55 @@ textarea {
 
 .rail-section:last-child {
   border-bottom: 0;
+  padding-bottom: 0;
 }
 
 .rail-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: hsl(var(--foreground));
+  color: oklch(var(--foreground));
   font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .tag-chip {
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid hsl(var(--border));
-  border-radius: 6px;
-  color: hsl(var(--foreground));
-  background: var(--tag-color, hsl(var(--background)));
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1.5px solid oklch(var(--border));
+  border-radius: 8px;
+  color: oklch(var(--foreground));
+  background: var(--tag-color, oklch(var(--background)));
   cursor: pointer;
   font-size: 12px;
   font-weight: 500;
+  transition: all 150ms ease-out;
+  box-shadow: var(--shadow-xs);
 }
 
 .tag-chip.selected {
-  border-color: hsl(var(--foreground));
-  box-shadow: inset 0 0 0 1px hsl(var(--foreground));
+  border-color: oklch(var(--primary));
+  background: oklch(var(--primary) / 0.1);
+  color: oklch(var(--primary));
+  box-shadow: 0 0 0 1px oklch(var(--primary)), var(--shadow-sm);
 }
 
 .tag-chip:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
+  opacity: 0.5;
+}
+
+.tag-chip:hover:not(:disabled):not(.selected) {
+  border-color: oklch(var(--muted-foreground) / 0.3);
+  background: oklch(var(--muted));
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+.tag-chip:focus-visible {
+  outline: 2px solid oklch(var(--ring));
+  outline-offset: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {

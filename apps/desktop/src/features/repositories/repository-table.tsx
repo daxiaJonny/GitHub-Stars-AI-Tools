@@ -1,4 +1,4 @@
-import { Check, Circle, ExternalLink, RefreshCw } from 'lucide-react';
+import { Archive, Check, Circle, ExternalLink, RefreshCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -22,13 +22,14 @@ export function RepositoryTable(props: RepositoryTableProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-14 items-center justify-between border-b px-5">
+      <div className="flex h-14 items-center justify-between border-b bg-muted/20 px-6">
         <div>
-          <h1 className="text-sm font-semibold">仓库索引</h1>
+          <h1 className="text-sm font-semibold tracking-tight">仓库索引</h1>
           <p className="text-xs text-muted-foreground">{buildRepositoryPanelSubtitle(props.page, props.isLoading)}</p>
         </div>
-        <Button size="icon" variant="outline" className="size-8 rounded-md" disabled={props.isLoading} onClick={props.onRefresh}>
-          <RefreshCw className="size-4" />
+        <Button size="sm" variant="outline" className="h-8 rounded-lg shadow-sm" disabled={props.isLoading} onClick={props.onRefresh}>
+          <RefreshCw className={props.isLoading ? 'size-4 animate-spin' : 'size-4'} />
+          刷新
         </Button>
       </div>
 
@@ -43,15 +44,15 @@ export function RepositoryTable(props: RepositoryTableProps) {
       {props.page && props.page.items.length > 0 ? (
         <ScrollArea className="min-h-0 flex-1">
           <Table>
-            <TableHeader className="sticky top-0 z-10 bg-background">
+            <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
               <TableRow>
-                <TableHead className="w-[270px] pl-5">Repository</TableHead>
-                <TableHead>Description</TableHead>
-                <TableHead>Language</TableHead>
-                <TableHead>Stars</TableHead>
-                <TableHead>Updated</TableHead>
-                <TableHead>Tags</TableHead>
-                <TableHead className="pr-5">README</TableHead>
+                <TableHead className="w-[280px] pl-6 font-semibold">仓库</TableHead>
+                <TableHead className="font-semibold">描述</TableHead>
+                <TableHead className="font-semibold">语言</TableHead>
+                <TableHead className="font-semibold">Stars</TableHead>
+                <TableHead className="font-semibold">更新</TableHead>
+                <TableHead className="font-semibold">Topics</TableHead>
+                <TableHead className="pr-6 font-semibold">README</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -87,41 +88,45 @@ function RepositoryRow(props: {
   return (
     <TableRow
       data-state={props.isSelected ? 'selected' : undefined}
-      className="cursor-pointer"
+      className="cursor-pointer align-top transition-colors hover:bg-muted/50"
       onClick={() => props.onSelectRepository(props.repository.id)}
     >
-      <TableCell className="pl-5">
+      <TableCell className="pl-6">
         <div className="flex min-w-0 items-start gap-3">
-          <button className="mt-0.5 text-muted-foreground" type="button" aria-label={`整理 ${props.repository.fullName}`}>
-            {props.isSelected ? <Check className="size-4 text-foreground" /> : <Circle className="size-4" />}
+          <button
+            className="mt-0.5 grid size-6 place-items-center rounded-lg text-muted-foreground transition-all hover:bg-primary/10 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            type="button"
+            aria-label={`选择 ${props.repository.fullName}`}
+          >
+            {props.isSelected ? <Check className="size-4 text-primary" /> : <Circle className="size-4" />}
           </button>
           <div className="min-w-0">
             <a
-              className="inline-flex max-w-[230px] items-center gap-1 truncate text-sm font-medium text-foreground hover:underline"
+              className="inline-flex max-w-[230px] items-center gap-1.5 truncate text-sm font-medium text-foreground transition-colors hover:text-primary hover:underline"
               href={props.repository.htmlUrl}
               target="_blank"
               rel="noreferrer"
               onClick={(event) => event.stopPropagation()}
             >
               {props.repository.fullName}
-              <ExternalLink className="size-3" />
+              <ExternalLink className="size-3.5" />
             </a>
             {explanation ? <p className="mt-1 truncate text-xs text-muted-foreground">{explanation.explanationZh}</p> : null}
           </div>
         </div>
       </TableCell>
-      <TableCell className="max-w-[360px] truncate text-muted-foreground">{props.repository.description ?? '暂无描述'}</TableCell>
-      <TableCell>{props.repository.language ?? '—'}</TableCell>
-      <TableCell>★ {compactNumber(props.repository.starsCount)}</TableCell>
-      <TableCell>{formatDate(props.repository.pushedAt ?? props.repository.starredAt)}</TableCell>
+      <TableCell className="max-w-[360px] truncate text-sm text-muted-foreground">{props.repository.description ?? '暂无描述'}</TableCell>
+      <TableCell className="text-sm">{props.repository.language ?? '—'}</TableCell>
+      <TableCell className="text-sm font-medium">★ {compactNumber(props.repository.starsCount)}</TableCell>
+      <TableCell className="text-sm text-muted-foreground">{formatDate(props.repository.pushedAt ?? props.repository.starredAt)}</TableCell>
       <TableCell>
         <div className="flex max-w-[220px] flex-wrap gap-1.5">
-          {shownTopics.length > 0 ? shownTopics.map((topic) => <Badge key={topic} variant="secondary" className="rounded-md font-normal">{topic}</Badge>) : <span className="text-muted-foreground">—</span>}
-          {hiddenTopicCount > 0 ? <Badge variant="outline" className="rounded-md font-normal">+{hiddenTopicCount}</Badge> : null}
+          {shownTopics.length > 0 ? shownTopics.map((topic) => <Badge key={topic} variant="secondary" className="rounded-lg font-normal shadow-sm">{topic}</Badge>) : <span className="text-sm text-muted-foreground">—</span>}
+          {hiddenTopicCount > 0 ? <Badge variant="outline" className="rounded-lg font-normal shadow-sm">+{hiddenTopicCount}</Badge> : null}
         </div>
       </TableCell>
-      <TableCell className="pr-5">
-        <Badge variant={props.repository.hasReadme ? 'default' : 'outline'} className="rounded-md font-normal">
+      <TableCell className="pr-6">
+        <Badge variant={props.repository.hasReadme ? 'default' : 'outline'} className="rounded-lg font-medium shadow-sm">
           {props.repository.hasReadme ? '已缓存' : '待抓取'}
         </Badge>
       </TableCell>
@@ -133,7 +138,7 @@ function RepositorySkeleton() {
   return (
     <div className="grid gap-2 p-5">
       {Array.from({ length: 9 }).map((_, index) => (
-        <span key={index} className="h-10 animate-pulse rounded-md bg-muted" />
+        <span key={index} className="h-11 animate-pulse rounded-md bg-muted" />
       ))}
     </div>
   );
@@ -141,9 +146,12 @@ function RepositorySkeleton() {
 
 function EmptyState(props: { title: string; body: string }) {
   return (
-    <div className="m-5 grid place-items-center rounded-md border border-dashed p-10 text-center">
-      <strong className="text-sm">{props.title}</strong>
-      <p className="mt-2 max-w-sm text-sm text-muted-foreground">{props.body}</p>
+    <div className="m-6 grid min-h-80 place-items-center rounded-lg border border-dashed bg-muted/20 p-10 text-center shadow-sm">
+      <div>
+        <Archive className="mx-auto mb-4 size-8 text-muted-foreground" />
+        <strong className="block text-sm font-semibold">{props.title}</strong>
+        <p className="mt-2 max-w-sm text-sm text-muted-foreground leading-relaxed">{props.body}</p>
+      </div>
     </div>
   );
 }

@@ -34,22 +34,22 @@ export function RepositoryFilterBar(props: RepositoryFilterBarProps) {
   }
 
   return (
-    <form className="grid grid-cols-[minmax(260px,1fr)_190px_190px_auto_auto] items-center gap-3" onSubmit={handleSubmit}>
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+    <form className="flex items-center gap-3" onSubmit={handleSubmit}>
+      <div className="relative flex-1 min-w-[320px]">
+        <Search className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input
-          className="h-10 rounded-md pl-9"
+          className="h-10 rounded-lg pl-10 pr-12 shadow-sm transition-shadow focus-visible:shadow-md"
           value={draftFilters.keyword}
-          placeholder="Search name / description / topics / notes"
+          placeholder="搜索名称、描述、Topics、笔记"
           onChange={(event) => setDraftFilters((current) => ({ ...current, keyword: event.target.value }))}
         />
-        <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+        <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded border bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground shadow-sm">
           ⌘K
         </kbd>
       </div>
 
       <Select value={draftFilters.language || 'all'} onValueChange={(value) => setDraftFilters((current) => ({ ...current, language: value === 'all' ? '' : value }))}>
-        <SelectTrigger className="h-10 w-full rounded-md">
+        <SelectTrigger className="h-10 w-[180px] rounded-lg shadow-sm">
           <SelectValue placeholder="全部语言" />
         </SelectTrigger>
         <SelectContent>
@@ -61,7 +61,7 @@ export function RepositoryFilterBar(props: RepositoryFilterBarProps) {
       </Select>
 
       <Select value={draftFilters.tagId || 'all'} onValueChange={(value) => setDraftFilters((current) => ({ ...current, tagId: value === 'all' ? '' : value }))}>
-        <SelectTrigger className="h-10 w-full rounded-md">
+        <SelectTrigger className="h-10 w-[180px] rounded-lg shadow-sm">
           <SelectValue placeholder="全部标签" />
         </SelectTrigger>
         <SelectContent>
@@ -72,11 +72,11 @@ export function RepositoryFilterBar(props: RepositoryFilterBarProps) {
         </SelectContent>
       </Select>
 
-      <Button className="h-10 rounded-md" disabled={props.isLoading} type="submit">
+      <Button className="h-10 rounded-lg shadow-sm" disabled={props.isLoading} type="submit">
         <Search className="size-4" />
         {props.isLoading ? '搜索中' : '搜索'}
       </Button>
-      <Button className="h-10 rounded-md" disabled={props.isLoading || !hasActiveFilters} type="button" variant="outline" onClick={handleReset}>
+      <Button className="h-10 rounded-lg shadow-sm" disabled={props.isLoading || !hasActiveFilters} type="button" variant="outline" onClick={handleReset}>
         <Filter className="size-4" />
         重置
       </Button>
