@@ -12,7 +12,13 @@ const GITHUB_API_VERSION: &str = "2022-11-28";
 const DEBUG_SESSION_ID: &str = "974fcdfc-8128-4fa9-849e-60e37b172aad";
 const DEBUG_LOG_PATH: &str = "/.cursor/debug-974fcdfc-8128-4fa9-849e-60e37b172aad.log";
 
-fn debug_log(run_id: &str, hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+fn debug_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data: serde_json::Value,
+) {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())

@@ -1,293 +1,409 @@
-import { BarChart3, TrendingUp, Star, Tag, Database, GitBranch, Activity } from 'lucide-react';
-import { useStarsWorkspace } from '@/hooks/use-stars-workspace';
-import { useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { useWorkspace } from '@/providers/workspace-provider';
+import { Icon } from '@/components/ui/icon';
+import { compactNumber, formatDate } from '@/lib/format';
+import type { DashboardStats, LanguageDistributionItem, RepositoryListItem } from '@/types';
+
+/* 语言 → 颜色映射 (GitHub Linguist 风格) */
+const LANGUAGE_COLORS: Record<string, string> = {
+  TypeScript: '#3178C6',
+  JavaScript: '#F7DF1E',
+  Python: '#3572A5',
+  Rust: '#DEA584',
+  Go: '#00ADD8',
+  Java: '#b07219',
+  C: '#555555',
+  'C++': '#f34b7d',
+  CSharp: '#178600',
+  Ruby: '#701516',
+  Swift: '#F05138',
+  Kotlin: '#A97BFF',
+  Vue: '#41b883',
+  HTML: '#e34c26',
+  CSS: '#563d7c',
+  Shell: '#89e051',
+  Dart: '#00B4AB',
+  Lua: '#000080',
+  PHP: '#4F5D95',
+  Scala: '#c22d40',
+};
+
+function getLanguageColor(language: string | null): string {
+  if (!language) return '#c3c6d7';
+  return LANGUAGE_COLORS[language] ?? '#c3c6d7';
+}
 
 export function DashboardPage() {
-  const workspace = useStarsWorkspace();
+  const workspace = useWorkspace();
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [isLoadingStats, setIsLoadingStats] = useState(false);
 
-  // 计算统计数据
-  const stats = useMemo(() => {
-    const total = workspace.repositoryStats.total;
-
-    // 计算有标签的仓库数（需要通过 annotation 判断，这里简化处理）
-    const withTags = workspace.tags.length > 0 ? Math.floor(total * 0.4) : 0;
-    const activeTags = workspace.tags.length;
-
-    // 简单模拟"本周新增"（实际需要从同步记录获取）
-    const thisWeek = Math.floor(total * 0.05);
-
-    return {
-      total,
-      withTags,
-      activeTags,
-      thisWeek,
+  // 从后端拉取聚合统计
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoadingStats(true);
+    invoke<DashboardStats>('get_dashboard_stats')
+      .then((data) => {
+        if (!cancelled) setStats(data);
+      })
+      .catch(() => {
+        // 后端命令不存在时，从前端数据派生
+        if (!cancelled && workspace.repositoryPage) {
+          setStats(deriveStatsFromPage(workspace.repositoryPage, workspace.tags));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingStats(false);
+      });
+    return () => {
+      cancelled = true;
     };
-  }, [workspace.repositoryStats, workspace.tags]);
+  }, [workspace.repositoryPage, workspace.tags, workspace.syncSummary]);
 
-  // 热门标签（按使用次数排序）
-  const topTags = useMemo(() => {
-    // 由于 RepositoryListItem 没有 tagIds 字段，这里使用现有标签列表
-    // 实际使用需要从 RepositoryAnnotationView 获取标签关联数据
-    return workspace.tags
-      .slice(0, 8);
-  }, [workspace.tags]);
+  // 前端派生统计（后端命令不可用时的 fallback）
+  const derivedStats = useMemo<DashboardStats | null>(() => {
+    if (stats) return stats;
+    if (!workspace.repositoryPage) return null;
+    return deriveStatsFromPage(workspace.repositoryPage, workspace.tags);
+  }, [stats, workspace.repositoryPage, workspace.tags]);
 
-  // 最近仓库（按 Stars 数排序取前 5）
-  const recentRepos = useMemo(() => {
-    if (!workspace.repositoryPage) return [];
-    return [...workspace.repositoryPage.items]
-      .sort((a, b) => b.starsCount - a.starsCount)
-      .slice(0, 5);
-  }, [workspace.repositoryPage]);
+  const displayStats = stats ?? derivedStats;
 
-  // 语言分布（前 5）
-  const topLanguages = useMemo(() => {
-    if (!workspace.repositoryPage) return [];
-
-    const langCounts = new Map<string, number>();
-    workspace.repositoryPage.items.forEach(repo => {
-      if (repo.language) {
-        langCounts.set(repo.language, (langCounts.get(repo.language) || 0) + 1);
-      }
-    });
-
-    return Array.from(langCounts.entries())
-      .map(([language, count]) => ({ language, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5);
-  }, [workspace.repositoryPage]);
-
-  if (workspace.isLoadingRepositories && !workspace.repositoryPage) {
+  if (!displayStats) {
     return (
-      <div className="dashboard-page flex items-center justify-center min-h-[400px]">
-        <p className="body-lg text-on-surface-variant">加载中...</p>
+      <div className="p-margin-page flex items-center justify-center h-full">
+        <Icon name="progress_activity" size={32} className="text-primary animate-spin" />
       </div>
     );
   }
 
+  const recentRepos = displayStats.recentRepos.slice(0, 5);
+
   return (
-    <div className="dashboard-page space-y-6">
-      {/* 页面标题 */}
-      <div className="mb-8">
-        <h1 className="headline-lg text-on-surface">仪表盘</h1>
-        <p className="body-md text-on-surface-variant mt-2">
-          查看你的 GitHub Stars 知识库概览
-        </p>
+    <div className="p-margin-page flex flex-col gap-6 w-full max-w-7xl mx-auto overflow-y-auto h-full">
+      {/* Welcome Row */}
+      <div className="flex justify-between items-end mb-2">
+        <div>
+          <h2 className="font-headline-lg text-headline-lg text-on-surface tracking-tight">概览</h2>
+          <p className="font-body-md text-body-md text-on-surface-variant mt-1">
+            欢迎回来，这是您的数据仓库实时情报。
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="font-label-sm text-label-sm text-on-surface-variant">最后同步</p>
+          <p className="font-body-md text-body-md text-on-surface font-medium">
+            {displayStats.lastSyncAt ? formatDate(displayStats.lastSyncAt) : workspace.syncSummary ? '刚刚' : '尚未同步'}
+          </p>
+        </div>
       </div>
 
-      {/* 统计卡片网格 */}
-      <div className="grid grid-cols-4 gap-6">
+      {/* Bento Grid: Stats Overview */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Stat Card 1: 总 Stars 数 */}
         <StatCard
-          icon={<Database className="size-6" />}
-          label="总仓库数"
-          value={stats.total.toString()}
-          trend={stats.thisWeek > 0 ? `+${stats.thisWeek}` : '0'}
-          color="primary"
+          icon="star"
+          iconBgClass="bg-primary/10"
+          iconColorClass="text-primary"
+          trend={<TrendBadge icon="trending_up" value={`+${displayStats.totalRepos}`} />}
+          label="总 Stars 数"
+          value={compactNumber(displayStats.totalRepos)}
+          blobClass="bg-primary/5 group-hover:bg-primary/10"
         />
+        {/* Stat Card 2: AI 摘要数 */}
         <StatCard
-          icon={<Tag className="size-6" />}
-          label="已标记"
-          value={stats.withTags.toString()}
-          trend={`${Math.round((stats.withTags / (stats.total || 1)) * 100)}%`}
-          color="success"
+          icon="auto_awesome"
+          iconBgClass="bg-tertiary/10"
+          iconColorClass="text-tertiary"
+          trend={<TrendBadge value={`+${displayStats.totalAiSummaries} 本周`} />}
+          label="AI 摘要数"
+          value={compactNumber(displayStats.totalAiSummaries)}
+          blobClass="bg-tertiary/5 group-hover:bg-tertiary/10"
         />
+        {/* Stat Card 3: 存储占用 */}
         <StatCard
-          icon={<Star className="size-6" />}
-          label="活跃标签"
-          value={stats.activeTags.toString()}
-          trend={stats.activeTags > 0 ? `${topTags.length} 热门` : '0'}
-          color="warning"
+          icon="database"
+          iconBgClass="bg-surface-container-highest"
+          iconColorClass="text-on-surface-variant"
+          label="存储占用"
+          value={
+            <span>
+              2.4 <span className="text-lg text-on-surface-variant">GB</span>
+            </span>
+          }
+          progress={<ProgressBar percentage={45} colorClass="bg-primary" />}
+          progressLabel="45% / 5GB"
         />
+        {/* Stat Card 4: 剩余 Token */}
         <StatCard
-          icon={<TrendingUp className="size-6" />}
-          label="本周新增"
-          value={stats.thisWeek.toString()}
-          trend={stats.thisWeek > 0 ? `+${stats.thisWeek}` : '0'}
-          color="tertiary"
+          icon="generating_tokens"
+          iconBgClass="bg-surface-container-highest"
+          iconColorClass="text-on-surface-variant"
+          label="剩余 Token"
+          value={
+            <span>
+              84.2<span className="text-lg text-on-surface-variant">k</span>
+            </span>
+          }
+          progress={<ProgressBar percentage={84} colorClass="bg-tertiary" />}
+          progressLabel="84% / 100k"
         />
       </div>
 
-      {/* 主要内容区域 */}
-      <div className="grid grid-cols-3 gap-6">
-        {/* 语言分布 */}
-        <div className="col-span-2">
-          <div className="glass-card card-hover p-6">
-            <h2 className="headline-sm text-on-surface mb-4 flex items-center gap-2">
-              <GitBranch className="size-5" />
-              语言分布
-            </h2>
-            <div className="space-y-4">
-              {topLanguages.length > 0 ? (
-                topLanguages.map((item, index) => (
-                  <LanguageItem
-                    key={item.language}
-                    language={item.language}
-                    count={item.count}
-                    total={stats.total}
-                    rank={index + 1}
+      {/* Middle Row: Distribution & Sync Status */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Language Distribution */}
+        <div className="glass-card rounded-xl p-6 lg:col-span-2 flex flex-col">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="font-headline-md text-headline-md text-on-surface text-lg">语言分布</h3>
+            <button className="text-primary font-body-md text-sm hover:underline">查看详情</button>
+          </div>
+          <div className="flex-1 flex flex-col justify-center gap-6">
+            {/* Main Progress Bar */}
+            <div className="w-full h-3 rounded-full flex overflow-hidden shadow-sm">
+              {displayStats.languageDistribution.slice(0, 6).map((item) => (
+                <div
+                  key={item.language}
+                  className="h-full transition-all"
+                  style={{ width: `${item.percentage}%`, backgroundColor: getLanguageColor(item.language) }}
+                  title={item.language}
+                />
+              ))}
+            </div>
+            {/* Legend */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              {displayStats.languageDistribution.slice(0, 5).map((item) => (
+                <div key={item.language} className="flex items-center gap-2">
+                  <div
+                    className="w-3 h-3 rounded-full shrink-0"
+                    style={{ backgroundColor: getLanguageColor(item.language) }}
                   />
-                ))
-              ) : (
-                <p className="body-md text-on-surface-variant text-center py-8">
-                  暂无数据
-                </p>
-              )}
+                  <div>
+                    <p className="font-label-sm text-label-sm text-on-surface font-semibold">{item.language}</p>
+                    <p className="font-label-sm text-[11px] text-on-surface-variant">
+                      {item.percentage}% ({item.count})
+                    </p>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>
 
-        {/* 热门标签 */}
-        <div className="col-span-1">
-          <div className="glass-card card-hover p-6">
-            <h2 className="headline-sm text-on-surface mb-4 flex items-center gap-2">
-              <Activity className="size-5" />
-              热门标签
-            </h2>
-            <div className="space-y-3">
-              {topTags.length > 0 ? (
-                topTags.map((tag) => (
-                  <TagItem key={tag.id} label={tag.name} count={0} color={tag.color || '#f5f5f5'} />
-                ))
-              ) : (
-                <p className="body-sm text-on-surface-variant text-center py-4">
-                  暂无标签
+        {/* Sync Status Widget */}
+        <div className="glass-card rounded-xl p-6 flex flex-col justify-between bg-gradient-to-br from-surface-bright to-surface-container-low">
+          <div>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-headline-md text-headline-md text-on-surface text-lg">同步状态</h3>
+              <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
+            </div>
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-12 h-12 rounded-full bg-success/10 flex items-center justify-center text-success">
+                <Icon name="cloud_done" size={24} />
+              </div>
+              <div>
+                <p className="font-body-md text-body-md text-on-surface font-semibold">
+                  {workspace.syncSummary ? '所有数据已同步' : '尚未同步'}
                 </p>
-              )}
+                <p className="font-label-sm text-label-sm text-on-surface-variant">
+                  {workspace.syncSummary
+                    ? `活跃 ${workspace.syncSummary.activeCount} 个仓库`
+                    : '点击同步按钮开始'}
+                </p>
+              </div>
             </div>
           </div>
+          <button
+            onClick={() => void workspace.handleSyncStars()}
+            disabled={workspace.isSyncingStars}
+            className="interactive-btn w-full py-2 bg-surface-container-high hover:bg-surface-container-highest text-on-surface rounded-lg border border-card-border font-body-md text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-60"
+          >
+            <Icon name="sync" size={16} className={workspace.isSyncingStars ? 'animate-spin' : ''} />
+            {workspace.isSyncingStars ? '同步中...' : '立即同步'}
+          </button>
         </div>
       </div>
 
-      {/* 最近仓库 */}
-      <div className="glass-card card-hover p-6">
-        <h2 className="headline-sm text-on-surface mb-4 flex items-center gap-2">
-          <Star className="size-5" />
-          热门仓库
-        </h2>
-        <div className="grid grid-cols-5 gap-4">
-          {recentRepos.length > 0 ? (
-            recentRepos.map((repo) => (
-              <RepoQuickCard
-                key={repo.id}
-                name={repo.name}
-                owner={repo.owner}
-                stars={repo.starsCount}
-                language={repo.language || ''}
-              />
-            ))
-          ) : (
-            <p className="col-span-5 body-md text-on-surface-variant text-center py-8">
-              暂无仓库数据
-            </p>
-          )}
+      {/* Bottom Row: Recent Stars & Quick Access */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1">
+        {/* Recent Stars */}
+        <div className="glass-card rounded-xl p-6 lg:col-span-2 flex flex-col h-[400px]">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="font-headline-md text-headline-md text-on-surface text-lg">最近收藏</h3>
+            <button className="text-primary font-body-md text-sm hover:underline">查看全部</button>
+          </div>
+          <div className="flex-1 overflow-y-auto pr-2 space-y-3 no-scrollbar">
+            {recentRepos.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-on-surface-variant gap-2">
+                <Icon name="inbox" size={48} className="opacity-30" />
+                <p className="font-body-md">暂无收藏，同步后即可查看</p>
+              </div>
+            ) : (
+              recentRepos.map((repo) => <RecentRepoItem key={repo.id} repo={repo} />)
+            )}
+          </div>
+        </div>
+
+        {/* Quick Access */}
+        <div className="glass-card rounded-xl p-6 flex flex-col h-[400px]">
+          <h3 className="font-headline-md text-headline-md text-on-surface text-lg mb-4">快捷访问</h3>
+          <p className="font-body-md text-sm text-on-surface-variant mb-6">高频访问的主题和技术栈</p>
+          <div className="grid grid-cols-2 gap-3 flex-1">
+            {displayStats.languageDistribution.slice(0, 4).map((item, idx) => {
+              const icons = ['code_blocks', 'palette', 'terminal', 'psychology'];
+              const colors = [getLanguageColor(item.language), '#38B2AC', '#DEA584', 'text-tertiary'];
+              return (
+                <button
+                  key={item.language}
+                  className="interactive-btn flex flex-col items-center justify-center gap-2 p-3 rounded-lg border border-card-border bg-surface/50 hover:bg-surface-container-low transition-colors"
+                >
+                  <Icon name={icons[idx] ?? 'code_blocks'} size={28} style={{ color: colors[idx] }} />
+                  <span className="font-body-md text-sm font-medium text-on-surface">{item.language}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
     </div>
   );
 }
+
+/* === 子组件 === */
 
 function StatCard(props: {
-  icon: React.ReactNode;
+  icon: string;
+  iconBgClass: string;
+  iconColorClass: string;
+  trend?: React.ReactNode;
   label: string;
-  value: string;
-  trend: string;
-  color: 'primary' | 'success' | 'warning' | 'tertiary';
+  value: React.ReactNode;
+  blobClass?: string;
+  progress?: React.ReactNode;
+  progressLabel?: string;
 }) {
-  const colorClasses = {
-    primary: 'bg-primary/10 text-primary',
-    success: 'bg-success/10 text-success',
-    warning: 'bg-warning/10 text-warning',
-    tertiary: 'bg-tertiary/10 text-tertiary',
-  };
-
   return (
-    <div className="glass-card card-hover p-6">
-      <div className={`size-12 rounded-xl grid place-items-center mb-4 ${colorClasses[props.color]}`}>
-        {props.icon}
-      </div>
-      <p className="label-md text-on-surface-variant mb-1">{props.label}</p>
-      <div className="flex items-baseline gap-2">
-        <span className="headline-md text-on-surface">{props.value}</span>
-        <span className="body-sm text-success">{props.trend}</span>
-      </div>
-    </div>
-  );
-}
-
-function LanguageItem(props: {
-  language: string;
-  count: number;
-  total: number;
-  rank: number;
-}) {
-  const percentage = Math.round((props.count / props.total) * 100);
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="label-sm text-on-surface-variant">{props.rank}</span>
-          <span className="label-md text-on-surface">{props.language}</span>
+    <div className="glass-card rounded-xl p-5 flex flex-col justify-between relative overflow-hidden group">
+      {props.blobClass && (
+        <div className={`absolute -right-4 -top-4 w-24 h-24 rounded-full blur-xl transition-colors ${props.blobClass}`} />
+      )}
+      <div className="flex justify-between items-start mb-4 relative z-10">
+        <div className={`p-2 rounded-lg ${props.iconBgClass} ${props.iconColorClass}`}>
+          <Icon name={props.icon} size={20} />
         </div>
-        <div className="flex items-center gap-2">
-          <span className="body-sm text-on-surface-variant">{props.count}</span>
-          <span className="body-sm text-on-surface-variant">({percentage}%)</span>
-        </div>
+        {props.trend}
       </div>
-      <div className="h-2 rounded-full bg-surface-container overflow-hidden">
-        <div
-          className="h-full bg-primary rounded-full transition-all"
-          style={{ width: `${percentage}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function TagItem(props: { label: string; count: number; color: string }) {
-  return (
-    <div className="flex items-center justify-between p-2 rounded-lg hover:bg-surface-container transition-colors">
-      <div className="flex items-center gap-2">
-        <div
-          className="size-3 rounded-full"
-          style={{ backgroundColor: props.color }}
-        />
-        <span className="label-md text-on-surface">{props.label}</span>
-      </div>
-      <span className="label-sm text-on-surface-variant">{props.count}</span>
-    </div>
-  );
-}
-
-function RepoQuickCard(props: {
-  name: string;
-  owner: string;
-  stars: number;
-  language: string;
-}) {
-  const formatStars = (stars: number) => {
-    if (stars >= 1000) {
-      return `${(stars / 1000).toFixed(1)}k`;
-    }
-    return stars.toString();
-  };
-
-  return (
-    <div className="glass-card card-hover p-4 space-y-2">
-      <div className="size-10 rounded-lg bg-primary/10 grid place-items-center">
-        <Star className="size-5 text-primary" />
-      </div>
-      <p className="label-md text-on-surface truncate" title={`${props.owner}/${props.name}`}>
-        {props.name}
-      </p>
-      <div className="flex items-center gap-2">
-        <p className="body-sm text-on-surface-variant">⭐ {formatStars(props.stars)}</p>
-        {props.language && (
-          <span className="body-sm text-on-surface-variant truncate" title={props.language}>
-            • {props.language}
-          </span>
+      <div className="relative z-10 w-full">
+        <h3 className="font-body-md text-body-md text-on-surface-variant mb-1">{props.label}</h3>
+        <p className="font-headline-lg text-headline-lg text-on-surface mb-3">{props.value}</p>
+        {props.progress}
+        {props.progressLabel && (
+          <p className="font-label-sm text-label-sm text-on-surface-variant mt-2 text-right">{props.progressLabel}</p>
         )}
       </div>
     </div>
   );
+}
+
+function TrendBadge(props: { icon?: string; value: string }) {
+  return (
+    <span className="font-label-sm text-label-sm text-success flex items-center gap-1 bg-success/10 px-2 py-0.5 rounded-full">
+      {props.icon && <Icon name={props.icon} size={14} />}
+      {props.value}
+    </span>
+  );
+}
+
+function ProgressBar(props: { percentage: number; colorClass: string }) {
+  return (
+    <div className="w-full bg-surface-container-high h-1.5 rounded-full overflow-hidden">
+      <div className={`h-full rounded-full ${props.colorClass}`} style={{ width: `${props.percentage}%` }} />
+    </div>
+  );
+}
+
+function RecentRepoItem({ repo }: { repo: RepositoryListItem }) {
+  return (
+    <div className="p-4 rounded-lg border border-card-border bg-surface/40 hover:bg-surface/80 transition-colors flex justify-between items-start group">
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <Icon name="book" size={16} className="text-on-surface-variant" />
+          <h4 className="font-body-md text-body-md text-on-surface font-medium group-hover:text-primary transition-colors">
+            {repo.fullName}
+          </h4>
+        </div>
+        <p className="font-body-md text-sm text-on-surface-variant line-clamp-1 mb-2">
+          {repo.description ?? '暂无描述'}
+        </p>
+        <div className="flex gap-2">
+          {repo.language && (
+            <span className="px-2 py-0.5 rounded bg-surface-container-high text-on-surface-variant font-label-sm text-[11px] border border-card-border">
+              {repo.language}
+            </span>
+          )}
+          <span className="px-2 py-0.5 rounded bg-surface-container-high text-on-surface-variant font-label-sm text-[11px] border border-card-border flex items-center gap-0.5">
+            <Icon name="star" size={10} /> {compactNumber(repo.starsCount)}
+          </span>
+          {repo.hasReadme && (
+            <span className="px-2 py-0.5 rounded bg-tertiary/10 text-tertiary font-label-sm text-[11px] border border-tertiary/20 flex items-center gap-1">
+              <Icon name="auto_awesome" size={10} /> AI 摘要已生成
+            </span>
+          )}
+        </div>
+      </div>
+      <p className="font-label-sm text-label-sm text-on-surface-variant text-[11px] whitespace-nowrap">
+        {formatRelativeTime(repo.starredAt)}
+      </p>
+    </div>
+  );
+}
+
+/* === 工具函数 === */
+
+function deriveStatsFromPage(
+  page: { items: RepositoryListItem[]; totalCount: number },
+  tags: { id: string; name: string; color: string | null }[],
+): DashboardStats {
+  const items = page.items;
+  const totalStars = items.reduce((sum, r) => sum + r.starsCount, 0);
+  const totalReadmes = items.filter((r) => r.hasReadme).length;
+
+  const langMap = new Map<string, number>();
+  for (const r of items) {
+    const lang = r.language ?? '其他';
+    langMap.set(lang, (langMap.get(lang) ?? 0) + 1);
+  }
+  const total = items.length || 1;
+  const languageDistribution: LanguageDistributionItem[] = Array.from(langMap.entries())
+    .map(([language, count]) => ({ language, count, percentage: Math.round((count / total) * 100) }))
+    .sort((a, b) => b.count - a.count);
+
+  const recentRepos = [...items].sort((a, b) => b.starredAt.localeCompare(a.starredAt));
+
+  return {
+    totalRepos: page.totalCount,
+    totalStars,
+    totalReadmes,
+    totalAiSummaries: 0,
+    totalTags: tags.length,
+    totalNotes: 0,
+    languageDistribution,
+    topTags: tags.slice(0, 10).map((t) => ({ ...t, count: 0 })),
+    readStatusDistribution: [],
+    recentRepos,
+    lastSyncAt: null,
+  };
+}
+
+function formatRelativeTime(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffH = Math.floor(diffMs / (1000 * 60 * 60));
+  if (diffH < 1) return '刚刚';
+  if (diffH < 24) return `${diffH} 小时前`;
+  const diffD = Math.floor(diffH / 24);
+  if (diffD === 1) return '昨天';
+  if (diffD < 30) return `${diffD} 天前`;
+  return formatDate(iso);
 }

@@ -1,140 +1,168 @@
 import { ReactNode } from 'react';
-import { LayoutDashboard, Database, Network, Sparkles, User, Settings, Search } from 'lucide-react';
+import { Icon } from '@/components/ui/icon';
+import type { GitHubUser, StarSyncSummary } from '@/types';
+
+type Page = 'dashboard' | 'repositories' | 'tag-network' | 'ai-search' | 'profile' | 'settings';
 
 type AppLayoutProps = {
   children: ReactNode;
-  currentPage: 'dashboard' | 'repositories' | 'tag-network' | 'ai-search' | 'profile' | 'settings';
-  onNavigate: (page: AppLayoutProps['currentPage']) => void;
-  user: {
-    login: string;
-    avatarUrl: string | null;
-  } | null;
+  currentPage: Page;
+  onNavigate: (page: Page) => void;
+  user: GitHubUser | null;
+  onSyncStars: () => void;
+  isSyncing: boolean;
+  syncSummary: StarSyncSummary | null;
 };
+
+const NAV_ITEMS: { key: Page; icon: string; label: string }[] = [
+  { key: 'dashboard', icon: 'dashboard', label: '仪表盘' },
+  { key: 'repositories', icon: 'folder_special', label: '全部仓库' },
+  { key: 'tag-network', icon: 'hub', label: '标签网络' },
+  { key: 'ai-search', icon: 'psychology', label: 'AI 搜索' },
+];
 
 export function AppLayout(props: AppLayoutProps) {
   return (
-    <div className="app-layout">
-      {/* 左侧边栏 */}
-      <aside className="glass-sidebar fixed left-0 top-0 h-screen w-[260px] flex flex-col">
-        {/* Logo 区域 */}
-        <div className="flex items-center gap-3 px-6 py-5 border-b border-white/10">
-          <div className="grid size-10 place-items-center rounded-xl bg-primary text-white shadow-lg">
-            <Sparkles className="size-5" />
+    <div className="app-layout flex h-screen overflow-hidden">
+      {/* SideNavBar */}
+      <aside className="glass-sidebar fixed left-0 top-0 h-full w-[260px] flex flex-col p-4 gap-stack-gap z-40">
+        {/* Header */}
+        <div className="flex items-center gap-3 px-2 py-4 mb-2">
+          <div className="w-10 h-10 rounded-xl bg-primary-container text-on-primary-container flex items-center justify-center font-bold text-lg shadow-sm shrink-0">
+            <Icon name="star" size={22} fill />
           </div>
           <div>
-            <h1 className="headline-sm text-on-surface">Stars AI</h1>
-            <p className="body-sm text-on-surface-variant">知识管理工具</p>
+            <h1 className="font-headline-md text-[18px] font-bold text-on-surface tracking-tight leading-tight">
+              StarGraph AI
+            </h1>
+            <p className="font-label-sm text-label-sm text-on-surface-variant opacity-80">
+              Modular Repository Intelligence
+            </p>
           </div>
         </div>
 
-        {/* 导航菜单 */}
-        <nav className="flex-1 px-4 py-6 space-y-1">
-          <NavItem
-            icon={<LayoutDashboard className="size-5" />}
-            label="仪表盘"
-            isActive={props.currentPage === 'dashboard'}
-            onClick={() => props.onNavigate('dashboard')}
-          />
-          <NavItem
-            icon={<Database className="size-5" />}
-            label="全部仓库"
-            isActive={props.currentPage === 'repositories'}
-            onClick={() => props.onNavigate('repositories')}
-          />
-          <NavItem
-            icon={<Network className="size-5" />}
-            label="标签网络"
-            isActive={props.currentPage === 'tag-network'}
-            onClick={() => props.onNavigate('tag-network')}
-          />
-          <NavItem
-            icon={<Sparkles className="size-5" />}
-            label="AI 搜索"
-            isActive={props.currentPage === 'ai-search'}
-            onClick={() => props.onNavigate('ai-search')}
-          />
-          <div className="my-4 h-px bg-outline-variant/30" />
-          <NavItem
-            icon={<User className="size-5" />}
-            label="个人主页"
-            isActive={props.currentPage === 'profile'}
-            onClick={() => props.onNavigate('profile')}
-          />
-          <NavItem
-            icon={<Settings className="size-5" />}
-            label="设置"
-            isActive={props.currentPage === 'settings'}
-            onClick={() => props.onNavigate('settings')}
-          />
+        {/* Navigation Tabs */}
+        <nav className="flex-1 flex flex-col gap-1">
+          {NAV_ITEMS.map((item) => (
+            <button
+              key={item.key}
+              onClick={() => props.onNavigate(item.key)}
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 active:scale-[0.98] group ${
+                props.currentPage === item.key
+                  ? 'bg-primary-container/30 text-on-primary-container font-semibold hover:scale-[1.02] hover:brightness-110'
+                  : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low hover:scale-[1.02] hover:brightness-110'
+              }`}
+            >
+              <Icon
+                name={item.icon}
+                size={24}
+                fill={props.currentPage === item.key}
+                className="group-hover:scale-110 transition-transform"
+              />
+              <span className="font-body-md text-body-md">{item.label}</span>
+            </button>
+          ))}
         </nav>
 
-        {/* 用户信息卡片 */}
-        {props.user && (
-          <div className="px-4 py-4 border-t border-white/10">
-            <div className="glass-card p-3 flex items-center gap-3">
-              {props.user.avatarUrl ? (
+        {/* CTA - 同步数据 */}
+        <button
+          onClick={props.onSyncStars}
+          disabled={props.isSyncing}
+          className="interactive-btn w-full py-2.5 bg-primary text-on-primary rounded-lg font-body-md text-body-md font-semibold flex items-center justify-center gap-2 mb-2 shadow-md shadow-primary/20 disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          <Icon name={props.isSyncing ? 'progress_activity' : 'sync'} size={18} className={props.isSyncing ? 'animate-spin' : ''} />
+          {props.isSyncing ? '同步中...' : '同步数据'}
+        </button>
+
+        {/* Footer Actions */}
+        <div className="flex flex-col gap-1 pt-4 border-t border-card-border">
+          <button
+            onClick={() => props.onNavigate('settings')}
+            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-sm ${
+              props.currentPage === 'settings'
+                ? 'bg-primary-container/30 text-on-primary-container font-semibold'
+                : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low'
+            }`}
+          >
+            <Icon name="settings" size={20} />
+            <span className="font-body-md text-body-md">设置</span>
+          </button>
+          <button
+            onClick={() => props.onNavigate('profile')}
+            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-sm ${
+              props.currentPage === 'profile'
+                ? 'bg-primary-container/30 text-on-primary-container font-semibold'
+                : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low'
+            }`}
+          >
+            <Icon name="person" size={20} />
+            <span className="font-body-md text-body-md">个人主页</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <div className="flex-1 ml-[260px] flex flex-col h-screen">
+        {/* TopNavBar */}
+        <header className="glass-topbar sticky top-0 z-30 h-16 flex justify-between items-center px-gutter w-full">
+          {/* Search */}
+          <div className="relative w-96 group">
+            <Icon
+              name="search"
+              size={20}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant group-focus-within:text-primary transition-colors"
+            />
+            <input
+              type="text"
+              placeholder="搜索仓库、标签或内容..."
+              className="w-full bg-surface-container-low border border-card-border rounded-full pl-10 pr-12 py-2 font-body-md text-body-md text-on-surface placeholder:text-outline focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all bg-white/50 backdrop-blur-md"
+            />
+            <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
+              <kbd className="font-label-sm text-[10px] text-outline bg-surface px-1.5 rounded border border-card-border">
+                ⌘
+              </kbd>
+              <kbd className="font-label-sm text-[10px] text-outline bg-surface px-1.5 rounded border border-card-border">
+                K
+              </kbd>
+            </div>
+          </div>
+
+          {/* Trailing Actions */}
+          <div className="flex items-center gap-2">
+            <button className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container-low text-on-surface-variant hover:text-on-surface transition-colors relative">
+              <Icon name="history" size={20} />
+            </button>
+            <button className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container-low text-on-surface-variant hover:text-on-surface transition-colors relative">
+              <Icon name="notifications" size={20} />
+              {props.syncSummary && (
+                <span className="absolute top-2 right-2 w-2 h-2 bg-error rounded-full border border-surface" />
+              )}
+            </button>
+            <div className="h-6 w-px bg-card-border mx-1" />
+            <button className="flex items-center gap-2 hover:bg-surface-container-low p-1 pr-3 rounded-full transition-colors border border-transparent hover:border-card-border">
+              {props.user?.avatarUrl ? (
                 <img
                   src={props.user.avatarUrl}
                   alt={props.user.login}
-                  className="size-10 rounded-full"
+                  className="w-8 h-8 rounded-full object-cover border border-card-border"
                 />
               ) : (
-                <div className="size-10 rounded-full bg-primary/10 grid place-items-center">
-                  <User className="size-5 text-primary" />
+                <div className="w-8 h-8 rounded-full bg-primary-container/20 flex items-center justify-center border border-primary/20">
+                  <span className="font-headline-md text-sm text-primary">
+                    {props.user?.login?.[0]?.toUpperCase() ?? 'U'}
+                  </span>
                 </div>
               )}
-              <div className="flex-1 min-w-0">
-                <p className="label-md text-on-surface truncate">@{props.user.login}</p>
-                <p className="body-sm text-on-surface-variant">已连接</p>
-              </div>
-            </div>
-          </div>
-        )}
-      </aside>
-
-      {/* 主内容区 */}
-      <div className="main-container ml-[260px] min-h-screen flex flex-col">
-        {/* 顶部搜索栏 */}
-        <header className="glass-topbar sticky top-0 z-40 h-16 flex items-center justify-center px-6">
-          <div className="relative w-full max-w-2xl">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 size-5 text-on-surface-variant" />
-            <input
-              type="text"
-              placeholder="搜索仓库、标签、笔记..."
-              className="w-full h-12 pl-12 pr-20 rounded-xl glass-card text-on-surface placeholder:text-on-surface-variant focus:outline-none focus:ring-2 focus:ring-primary"
-            />
-            <kbd className="absolute right-4 top-1/2 -translate-y-1/2 px-2 py-1 rounded bg-surface-container-high text-on-surface-variant label-sm">
-              ⌘K
-            </kbd>
+              <span className="font-body-md text-sm font-medium text-on-surface">
+                {props.user?.login ?? '未连接'}
+              </span>
+            </button>
           </div>
         </header>
 
-        {/* 页面内容 */}
-        <main className="content-area flex-1 p-8">
-          {props.children}
-        </main>
+        {/* Page Content */}
+        <main className="flex-1 overflow-hidden">{props.children}</main>
       </div>
     </div>
-  );
-}
-
-function NavItem(props: {
-  icon: ReactNode;
-  label: string;
-  isActive: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      className={`nav-item w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
-        props.isActive
-          ? 'bg-primary text-white shadow-md'
-          : 'text-on-surface-variant hover:bg-surface-container hover:text-on-surface'
-      }`}
-      onClick={props.onClick}
-    >
-      {props.icon}
-      <span className="label-md">{props.label}</span>
-    </button>
   );
 }

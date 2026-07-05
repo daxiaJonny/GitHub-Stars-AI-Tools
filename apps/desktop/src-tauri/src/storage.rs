@@ -1099,6 +1099,320 @@ WHERE {where_clause};
             .map_err(|_| "SQLite 仓库数量解析失败".to_owned())
     }
 
+    // === 聚合统计方法 ===
+
+    /// 仪表盘统计数据：总数、语言分布、标签统计、最近仓库
+    pub fn get_dashboard_stats(&self) -> Result<DashboardStatsData, String> {
+        let total_repos = self.count_active_repositories("r.sync_status = 'active'")?;
+
+        let total_stars = self
+            .query_sql(
+                r#"
+.mode list
+SELECT COALESCE(SUM(r.stars_count), 0) FROM repositories r WHERE r.sync_status = 'active';
+"#,
+            )?
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
+
+        let total_readmes = self
+            .query_sql(
+                r#"
+.mode list
+SELECT COUNT(*) FROM repo_readmes;
+"#,
+            )?
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
+
+        let total_ai_summaries = self
+            .query_sql(
+                r#"
+.mode list
+SELECT COUNT(*) FROM repo_ai_documents;
+"#,
+            )?
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
+
+        let total_tags = self
+            .query_sql(
+                r#"
+.mode list
+SELECT COUNT(*) FROM tags;
+"#,
+            )?
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
+
+        let total_notes = self
+            .query_sql(
+                r#"
+.mode list
+SELECT COUNT(*) FROM annotations WHERE note_md != '';
+"#,
+            )?
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
+
+        // 语言分布
+        let lang_sql = r#"
+.mode json
+SELECT language, COUNT(*) as count
+FROM repositories
+WHERE sync_status = 'active' AND language IS NOT NULL
+GROUP BY language
+ORDER BY count DESC
+LIMIT 10;
+"#;
+        let lang_rows =
+            parse_json_rows::<LanguageCountRow>(&self.query_sql(lang_sql)?, "语言分布查询失败")?;
+        let lang_total: usize = lang_rows.iter().map(|r| r.count).sum::<usize>().max(1);
+        let language_distribution: Vec<LanguageDistributionItem> = lang_rows
+            .into_iter()
+            .map(|r| LanguageDistributionItem {
+                language: r.language.unwrap_or_else(|| "其他".to_owned()),
+                count: r.count,
+                percentage: ((r.count as f64 / lang_total as f64) * 100.0).round() as u32,
+            })
+            .collect();
+
+        // 最近仓库 (5个)
+        let recent = self.list_repository_page(
+            5,
+            0,
+            RepositoryListFilters {
+                keyword: None,
+                language: None,
+                tag_id: None,
+            },
+        )?;
+        let recent_repos = recent.items;
+
+        Ok(DashboardStatsData {
+            total_repos,
+            total_stars,
+            total_readmes,
+            total_ai_summaries,
+            total_tags,
+            total_notes,
+            language_distribution,
+            recent_repos,
+            last_sync_at: None,
+        })
+    }
+
+    /// 标签网络数据：节点（标签+仓库数）和边（共现关系）
+    pub fn get_tag_network_data(&self) -> Result<TagNetworkData, String> {
+        // 获取所有标签及其关联仓库数
+        let tag_sql = r#"
+.mode json
+SELECT t.id, t.name, t.color, COUNT(rt.repo_id) as repo_count
+FROM tags t
+LEFT JOIN repo_tags rt ON rt.tag_id = t.id
+GROUP BY t.id
+ORDER BY repo_count DESC;
+"#;
+        let tag_rows =
+            parse_json_rows::<TagNodeRow>(&self.query_sql(tag_sql)?, "标签网络节点查询失败")?;
+        let nodes: Vec<TagNetworkNode> = tag_rows
+            .into_iter()
+            .map(|r| TagNetworkNode {
+                id: r.id,
+                name: r.name,
+                color: r.color,
+                repo_count: r.repo_count,
+            })
+            .collect();
+
+        // 标签共现边（同一仓库上的标签对）
+        let edge_sql = r#"
+.mode json
+SELECT a.tag_id as source, b.tag_id as target, COUNT(*) as weight
+FROM repo_tags a
+JOIN repo_tags b ON a.repo_id = b.repo_id AND a.tag_id < b.tag_id
+GROUP BY a.tag_id, b.tag_id
+ORDER BY weight DESC
+LIMIT 100;
+"#;
+        let edge_rows =
+            parse_json_rows::<TagEdgeRow>(&self.query_sql(edge_sql)?, "标签网络边查询失败")?;
+        let edges: Vec<TagNetworkEdge> = edge_rows
+            .into_iter()
+            .map(|r| TagNetworkEdge {
+                source: r.source,
+                target: r.target,
+                weight: r.weight,
+            })
+            .collect();
+
+        let total_repos = self.count_active_repositories("r.sync_status = 'active'")?;
+        let total_tags = nodes.len();
+        let total_links = edges.len();
+
+        Ok(TagNetworkData {
+            nodes,
+            edges,
+            total_repos,
+            total_tags,
+            total_links,
+        })
+    }
+
+    /// 个人主页统计：语言分布、月度趋势、最近收藏
+    pub fn get_profile_stats(&self, account_id: &str) -> Result<ProfileStatsData, String> {
+        let total_stars = self
+            .query_sql(
+                r#"
+.mode list
+SELECT COALESCE(SUM(r.stars_count), 0) FROM repositories r WHERE r.sync_status = 'active';
+"#,
+            )?
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
+
+        let total_notes = self
+            .query_sql(&format!(
+                r#"
+.mode list
+SELECT COUNT(*) FROM annotations WHERE note_md != '' AND account_id = {};
+"#,
+                sql_text(account_id)
+            ))?
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
+
+        let total_ai_words = self
+            .query_sql(
+                r#"
+.mode list
+SELECT COALESCE(SUM(LENGTH(summary_zh)), 0) FROM repo_ai_documents;
+"#,
+            )?
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
+
+        // 语言分布 (雷达图)
+        let lang_sql = r#"
+.mode json
+SELECT language, COUNT(*) as count
+FROM repositories
+WHERE sync_status = 'active' AND language IS NOT NULL
+GROUP BY language
+ORDER BY count DESC
+LIMIT 6;
+"#;
+        let lang_rows =
+            parse_json_rows::<LanguageCountRow>(&self.query_sql(lang_sql)?, "语言分布查询失败")?;
+        let lang_total: usize = lang_rows.iter().map(|r| r.count).sum::<usize>().max(1);
+        let language_breakdown: Vec<LanguageBreakdownItem> = lang_rows
+            .into_iter()
+            .map(|r| LanguageBreakdownItem {
+                language: r.language.unwrap_or_else(|| "其他".to_owned()),
+                count: r.count,
+                percentage: ((r.count as f64 / lang_total as f64) * 100.0).round() as u32,
+            })
+            .collect();
+
+        // 月度趋势 (近12个月)
+        let trend_sql = r#"
+.mode json
+SELECT strftime('%Y-%m', starred_at) as month, COUNT(*) as count
+FROM repositories
+WHERE sync_status = 'active'
+  AND starred_at >= date('now', '-12 months', 'start of month')
+GROUP BY month
+ORDER BY month;
+"#;
+        let trend_rows =
+            parse_json_rows::<MonthTrendRow>(&self.query_sql(trend_sql)?, "月度趋势查询失败")?;
+        let monthly_trend: Vec<MonthlyTrendItem> = trend_rows
+            .into_iter()
+            .map(|r| MonthlyTrendItem {
+                month: r.month,
+                count: r.count,
+            })
+            .collect();
+
+        // 最近收藏
+        let recent = self.list_repository_page(
+            3,
+            0,
+            RepositoryListFilters {
+                keyword: None,
+                language: None,
+                tag_id: None,
+            },
+        )?;
+
+        Ok(ProfileStatsData {
+            total_stars,
+            total_notes,
+            total_ai_words,
+            language_breakdown,
+            monthly_trend,
+            recent_repos: recent.items,
+        })
+    }
+
+    /// 保存 AI 文档（摘要、关键词、建议标签）
+    pub fn save_repository_ai_document(
+        &self,
+        repository_id: &str,
+        summary_zh: &str,
+        readme_zh: Option<&str>,
+        keywords: &[String],
+        suggested_tags: &[String],
+        model: &str,
+        prompt_version: &str,
+        source_hash: &str,
+    ) -> Result<(), String> {
+        let keywords_json =
+            serde_json::to_string(keywords).map_err(|e| format!("关键词序列化失败：{e}"))?;
+        let suggested_tags_json = serde_json::to_string(suggested_tags)
+            .map_err(|e| format!("建议标签序列化失败：{e}"))?;
+        let timestamp = self.current_database_timestamp()?;
+        let readme_zh_sql = match readme_zh {
+            Some(text) => sql_text(text),
+            None => "NULL".to_owned(),
+        };
+
+        let sql = format!(
+            r#"
+INSERT INTO repo_ai_documents (repo_id, summary_zh, readme_zh, keywords_json, suggested_tags_json, model, prompt_version, source_hash, generated_at)
+VALUES ({repo_id}, {summary}, {readme_zh}, {keywords}, {suggested}, {model}, {prompt_version}, {source_hash}, {timestamp})
+ON CONFLICT(repo_id) DO UPDATE SET
+  summary_zh = excluded.summary_zh,
+  readme_zh = excluded.readme_zh,
+  keywords_json = excluded.keywords_json,
+  suggested_tags_json = excluded.suggested_tags_json,
+  model = excluded.model,
+  prompt_version = excluded.prompt_version,
+  source_hash = excluded.source_hash,
+  generated_at = excluded.generated_at;
+"#,
+            repo_id = sql_text(repository_id),
+            summary = sql_text(summary_zh),
+            readme_zh = readme_zh_sql,
+            keywords = sql_text(&keywords_json),
+            suggested = sql_text(&suggested_tags_json),
+            model = sql_text(model),
+            prompt_version = sql_text(prompt_version),
+            source_hash = sql_text(source_hash),
+            timestamp = sql_text(&timestamp),
+        );
+
+        self.execute_sql(&sql)
+    }
+
     fn migrate(&self) -> Result<(), String> {
         self.execute_sql(INITIAL_SCHEMA_SQL)
     }
@@ -1110,6 +1424,112 @@ WHERE {where_clause};
     fn query_sql(&self, sql: &str) -> Result<String, String> {
         execute_sqlite(&self.database_path, sql)
     }
+}
+
+// === 聚合统计返回类型 ===
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardStatsData {
+    pub total_repos: usize,
+    pub total_stars: u64,
+    pub total_readmes: usize,
+    pub total_ai_summaries: usize,
+    pub total_tags: usize,
+    pub total_notes: usize,
+    pub language_distribution: Vec<LanguageDistributionItem>,
+    pub recent_repos: Vec<RepositoryListItem>,
+    pub last_sync_at: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageDistributionItem {
+    pub language: String,
+    pub count: usize,
+    pub percentage: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagNetworkData {
+    pub nodes: Vec<TagNetworkNode>,
+    pub edges: Vec<TagNetworkEdge>,
+    pub total_repos: usize,
+    pub total_tags: usize,
+    pub total_links: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagNetworkNode {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub repo_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagNetworkEdge {
+    pub source: String,
+    pub target: String,
+    pub weight: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileStatsData {
+    pub total_stars: u64,
+    pub total_notes: usize,
+    pub total_ai_words: usize,
+    pub language_breakdown: Vec<LanguageBreakdownItem>,
+    pub monthly_trend: Vec<MonthlyTrendItem>,
+    pub recent_repos: Vec<RepositoryListItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageBreakdownItem {
+    pub language: String,
+    pub count: usize,
+    pub percentage: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonthlyTrendItem {
+    pub month: String,
+    pub count: usize,
+}
+
+// === 内部查询行类型 ===
+
+#[derive(Deserialize)]
+struct LanguageCountRow {
+    language: Option<String>,
+    count: usize,
+}
+
+#[derive(Deserialize)]
+struct TagNodeRow {
+    id: String,
+    name: String,
+    color: Option<String>,
+    repo_count: usize,
+}
+
+#[derive(Deserialize)]
+struct TagEdgeRow {
+    source: String,
+    target: String,
+    weight: usize,
+}
+
+#[derive(Deserialize)]
+struct MonthTrendRow {
+    month: String,
+    count: usize,
 }
 
 impl TryFrom<RepositoryListRow> for RepositoryListItem {

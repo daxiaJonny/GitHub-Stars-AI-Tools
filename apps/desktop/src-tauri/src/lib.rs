@@ -330,6 +330,69 @@ fn set_repository_tags(
     )
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveAiDocumentRequest {
+    repository_id: String,
+    summary_zh: String,
+    readme_zh: Option<String>,
+    keywords: Vec<String>,
+    suggested_tags: Vec<String>,
+    model: String,
+    prompt_version: String,
+    source_hash: String,
+}
+
+#[tauri::command]
+fn get_dashboard_stats(
+    app_handle: tauri::AppHandle,
+) -> Result<storage::DashboardStatsData, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    storage.get_dashboard_stats()
+}
+
+#[tauri::command]
+fn get_tag_network_data(app_handle: tauri::AppHandle) -> Result<storage::TagNetworkData, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    storage.get_tag_network_data()
+}
+
+#[tauri::command]
+fn get_profile_stats(
+    app_handle: tauri::AppHandle,
+    request: Option<ListTagsRequest>,
+) -> Result<storage::ProfileStatsData, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    // 使用传入的 account_id 或尝试从 auth state 获取
+    let account_id = match request {
+        Some(req) => req.account_id,
+        None => {
+            let token = auth::require_github_token()?;
+            let user = auth::verify_github_token(&token)?;
+            user.id.to_string()
+        }
+    };
+    storage.get_profile_stats(&account_id)
+}
+
+#[tauri::command]
+fn save_repository_ai_document(
+    app_handle: tauri::AppHandle,
+    request: SaveAiDocumentRequest,
+) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    storage.save_repository_ai_document(
+        &request.repository_id,
+        &request.summary_zh,
+        request.readme_zh.as_deref(),
+        &request.keywords,
+        &request.suggested_tags,
+        &request.model,
+        &request.prompt_version,
+        &request.source_hash,
+    )
+}
+
 #[tauri::command]
 fn export_annotation_gist(
     app_handle: tauri::AppHandle,
@@ -396,6 +459,10 @@ pub fn run() {
             set_repository_tags,
             export_annotation_gist,
             import_annotation_gist,
+            get_dashboard_stats,
+            get_tag_network_data,
+            get_profile_stats,
+            save_repository_ai_document,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用运行失败");
