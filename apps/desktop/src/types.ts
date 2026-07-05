@@ -143,5 +143,97 @@ export type RepositorySearchExplanationView = {
   reasons: SearchMatchReasonView[];
   citations: SearchCitationView[];
 };
+
+/* ===========================================================================
+ * 仪表盘统计类型
+ * =========================================================================*/
+export type LanguageDistributionItem = {
+  language: string;
+  count: number;
+  percentage: number;
+};
+
+export type DashboardStats = {
+  totalRepos: number;
+  totalStars: number;
+  totalReadmes: number;
+  totalAiSummaries: number;
+  totalTags: number;
+  totalNotes: number;
+  languageDistribution: LanguageDistributionItem[];
+  topTags: { id: string; name: string; color: string | null; count: number }[];
+  readStatusDistribution: { status: ReadingStatus; count: number }[];
+  recentRepos: RepositoryListItem[];
+  lastSyncAt: string | null;
+};
+
+/* ===========================================================================
+ * 标签网络类型
+ * =========================================================================*/
+export type TagNetworkNode = {
+  id: string;
+  name: string;
+  color: string | null;
+  repoCount: number;
+};
+
+export type TagNetworkEdge = {
+  source: string;
+  target: string;
+  weight: number;
+};
+
+export type TagNetworkData = {
+  nodes: TagNetworkNode[];
+  edges: TagNetworkEdge[];
+  totalRepos: number;
+  totalTags: number;
+  totalLinks: number;
+};
+
+export type TagGroup = {
+  id: string;
+  name: string;
+  color: string;
+  tags: { id: string; name: string; count: number }[];
+  repoCount: number;
+};
+
+/* ===========================================================================
+ * AI 搜索结果类型
+ * =========================================================================*/
+export type AiSearchResult = {
+  repository: RepositoryListItem;
+  score: number;
+  explanationZh: string;
+  reasons: SearchMatchReasonView[];
+  keywords: string[];
+  aiSummary: string | null;
+};
+
+export type AiSearchResponse = {
+  query: string;
+  mode: 'keyword' | 'natural_language' | 'hybrid';
+  results: AiSearchResult[];
+  totalCount: number;
+};
+
+/* ===========================================================================
+ * 个人主页统计类型
+ * =========================================================================*/
+export type ProfileStats = {
+  totalStars: number;
+  totalNotes: number;
+  totalAiWords: number;
+  languageBreakdown: { language: string; count: number; percentage: number }[];
+  monthlyTrend: { month: string; count: number }[];
+  recentCollections: { repository: RepositoryListItem; noteSummary: string | null; noteCount: number }[];
+  accountInfo: {
+    login: string;
+    avatarUrl: string | null;
+    joinedAt: string | null;
+  };
+};
+
 export type { AppSettings, ThemeSettings, SyncSettings, AISettings, GeneralSettings } from './types-settings';
 export { DEFAULT_SETTINGS, COLOR_PRESETS } from './types-settings';

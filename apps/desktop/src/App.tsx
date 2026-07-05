@@ -7,14 +7,14 @@ import { AISearchPage } from '@/pages/ai-search';
 import { ProfilePage } from '@/pages/profile';
 import { SettingsPage } from '@/pages/settings';
 import { WelcomeFlow } from '@/components/welcome-flow';
-import { useStarsWorkspace } from '@/hooks/use-stars-workspace';
-import { useSettings } from '@/hooks/use-settings';
+import { WorkspaceProvider, useWorkspace } from '@/providers/workspace-provider';
+import { SettingsProvider, useAppSettings } from '@/providers/settings-provider';
 
 type Page = 'dashboard' | 'repositories' | 'tag-network' | 'ai-search' | 'profile' | 'settings';
 
-export function App() {
-  const workspace = useStarsWorkspace();
-  const settingsHook = useSettings();
+function AppContent() {
+  const workspace = useWorkspace();
+  const settingsHook = useAppSettings();
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   const [showWelcome, setShowWelcome] = useState(false);
 
@@ -28,7 +28,7 @@ export function App() {
   // 应用品牌色
   useEffect(() => {
     if (settingsHook.settings.theme.brandColor) {
-      document.documentElement.style.setProperty('--primary-color', settingsHook.settings.theme.brandColor);
+      document.documentElement.style.setProperty('--color-primary', settingsHook.settings.theme.brandColor);
     }
   }, [settingsHook.settings.theme.brandColor]);
 
@@ -79,8 +79,21 @@ export function App() {
       currentPage={currentPage}
       onNavigate={setCurrentPage}
       user={workspace.authState.user}
+      onSyncStars={workspace.handleSyncStars}
+      isSyncing={workspace.isSyncingStars}
+      syncSummary={workspace.syncSummary}
     >
       {renderPage()}
     </AppLayout>
+  );
+}
+
+export function App() {
+  return (
+    <SettingsProvider>
+      <WorkspaceProvider>
+        <AppContent />
+      </WorkspaceProvider>
+    </SettingsProvider>
   );
 }

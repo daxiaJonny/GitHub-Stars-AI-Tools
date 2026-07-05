@@ -1,80 +1,163 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
 
-:root {
-  /* 基础色：轻微暖灰底，提升舒适度 */
-  --background: oklch(0.985 0.002 90);
-  --foreground: oklch(0.18 0.008 90);
+@theme {
+  /* --- 表面层 (Material Design 3 surface hierarchy) --- */
+  --color-surface: #faf8ff;
+  --color-surface-dim: #d9d9e5;
+  --color-surface-bright: #faf8ff;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f3f3fe;
+  --color-surface-container: #ededf9;
+  --color-surface-container-high: #e7e7f3;
+  --color-surface-container-highest: #e1e2ed;
+  --color-surface-variant: #e1e2ed;
+  --color-surface-tint: #0053db;
 
-  /* 表面层：纯白卡片，清晰分层 */
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.18 0.008 90);
+  /* --- 前景色 --- */
+  --color-on-surface: #191b23;
+  --color-on-surface-variant: #434655;
+  --color-inverse-surface: #2e3039;
+  --color-inverse-on-surface: #f0f0fb;
 
-  /* 弹出层 */
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.18 0.008 90);
+  /* --- 轮廓 --- */
+  --color-outline: #737686;
+  --color-outline-variant: #c3c6d7;
 
-  /* 主色：知识蓝，传递专业与可靠 */
-  --primary: oklch(0.48 0.14 240);
-  --primary-foreground: oklch(0.99 0 0);
+  /* --- 主色 (知识蓝) --- */
+  --color-primary: oklch(0.48 0.14 240);
+  --color-on-primary: #ffffff;
+  --color-primary-container: #2563eb;
+  --color-on-primary-container: #eeefff;
+  --color-inverse-primary: #b4c5ff;
+  --color-primary-fixed: #dbe1ff;
+  --color-primary-fixed-dim: #b4c5ff;
+  --color-on-primary-fixed: #00174b;
+  --color-on-primary-fixed-variant: #003ea8;
 
-  /* 次要色：灰蓝，低调但有层次 */
-  --secondary: oklch(0.96 0.008 240);
-  --secondary-foreground: oklch(0.32 0.05 240);
+  /* --- 次要色 --- */
+  --color-secondary: #5c5f60;
+  --color-on-secondary: #ffffff;
+  --color-secondary-container: #e1e3e4;
+  --color-on-secondary-container: #626566;
+  --color-secondary-fixed: #e1e3e4;
+  --color-secondary-fixed-dim: #c5c7c8;
+  --color-on-secondary-fixed: #191c1d;
+  --color-on-secondary-fixed-variant: #454748;
 
-  /* 弱化色 */
-  --muted: oklch(0.97 0.005 90);
-  --muted-foreground: oklch(0.52 0.015 90);
+  /* --- 第三色 (橙色强调) --- */
+  --color-tertiary: #943700;
+  --color-on-tertiary: #ffffff;
+  --color-tertiary-container: #bc4800;
+  --color-on-tertiary-container: #ffede6;
+  --color-tertiary-fixed: #ffdbcd;
+  --color-tertiary-fixed-dim: #ffb596;
+  --color-on-tertiary-fixed: #360f00;
+  --color-on-tertiary-fixed-variant: #7d2d00;
 
-  /* 强调色：稍深的主色调 */
-  --accent: oklch(0.95 0.02 240);
-  --accent-foreground: oklch(0.28 0.08 240);
+  /* --- 功能色 --- */
+  --color-error: #ba1a1a;
+  --color-on-error: #ffffff;
+  --color-error-container: #ffdad6;
+  --color-on-error-container: #93000a;
+  --color-success: oklch(0.55 0.15 145);
+  --color-warning: oklch(0.68 0.16 75);
+  --color-destructive: oklch(0.58 0.22 25);
 
-  /* 成功色：柔和绿 */
-  --success: oklch(0.55 0.15 145);
-  --success-foreground: oklch(0.99 0 0);
+  /* --- 背景 / 卡片 / 静默 --- */
+  --color-background: oklch(0.985 0.002 90 / 0.85);
+  --color-on-background: #191b23;
+  --color-foreground: oklch(0.18 0.008 90);
+  --color-card: oklch(1 0 0 / 0.7);
+  --color-card-foreground: oklch(0.18 0.008 90);
+  --color-card-border: oklch(1 0 0 / 0.1);
+  --color-muted: oklch(0.97 0.005 90 / 0.5);
+  --color-muted-foreground: oklch(0.52 0.015 90);
 
-  /* 警告色：琥珀 */
-  --warning: oklch(0.68 0.16 75);
-  --warning-foreground: oklch(0.18 0.008 90);
+  /* shadcn 兼容别名 */
+  --color-popover: #ffffff;
+  --color-popover-foreground: oklch(0.18 0.008 90);
+  --color-accent: oklch(0.95 0.02 240);
+  --color-accent-foreground: oklch(0.28 0.08 240);
+  --color-border: oklch(0.92 0.005 90);
+  --color-input: oklch(0.96 0.005 90);
+  --color-ring: oklch(0.48 0.14 240);
+  --color-primary-foreground: #ffffff;
+  --color-secondary-foreground: oklch(0.32 0.05 240);
+  --color-success-foreground: #ffffff;
+  --color-warning-foreground: oklch(0.18 0.008 90);
+  --color-destructive-foreground: #ffffff;
 
-  /* 危险色：柔和红 */
-  --destructive: oklch(0.58 0.22 25);
-  --destructive-foreground: oklch(0.99 0 0);
+  /* --- 间距 token --- */
+  --spacing-sidebar-width: 260px;
+  --spacing-margin-page: 2rem;
+  --spacing-gutter: 1.5rem;
+  --spacing-stack-gap: 1rem;
 
-  /* 边框与输入 */
-  --border: oklch(0.92 0.005 90);
-  --input: oklch(0.96 0.005 90);
-  --ring: oklch(0.48 0.14 240);
-
-  /* 圆角 */
+  /* --- 圆角 --- */
   --radius: 0.5rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
 
-  /* 阴影系统 */
-  --shadow-xs: 0 1px 2px oklch(0.18 0.008 90 / 0.05);
-  --shadow-sm: 0 1px 3px oklch(0.18 0.008 90 / 0.08), 0 1px 2px oklch(0.18 0.008 90 / 0.04);
-  --shadow-md: 0 4px 6px oklch(0.18 0.008 90 / 0.07), 0 2px 4px oklch(0.18 0.008 90 / 0.04);
-  --shadow-lg: 0 10px 15px oklch(0.18 0.008 90 / 0.08), 0 4px 6px oklch(0.18 0.008 90 / 0.04);
+  /* --- 字体族 --- */
+  --font-body-md: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body-lg: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-headline-md: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-headline-lg: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-label-sm: 'JetBrains Mono', 'SF Mono', Monaco, monospace;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 
-  color: oklch(var(--foreground));
-  background: oklch(var(--background));
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  /* --- 字号 token (设计模板的 body-md / headline-md 等) --- */
+  --text-body-md: 14px;
+  --text-body-md--line-height: 20px;
+  --text-body-md--font-weight: 400;
+  --text-body-lg: 16px;
+  --text-body-lg--line-height: 24px;
+  --text-body-lg--font-weight: 400;
+  --text-headline-md: 24px;
+  --text-headline-md--line-height: 32px;
+  --text-headline-md--font-weight: 600;
+  --text-headline-lg: 30px;
+  --text-headline-lg--line-height: 38px;
+  --text-headline-lg--font-weight: 700;
+  --text-label-sm: 12px;
+  --text-label-sm--line-height: 16px;
+  --text-label-sm--font-weight: 500;
+
+  /* --- 动画曲线 --- */
+  --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
+
+/* ===========================================================================
+ * 全局基础样式
+ * =========================================================================*/
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
+  font-family: var(--font-sans);
+  color: var(--color-on-surface);
+  background-color: #ffffff;
+  background-image:
+    radial-gradient(at 0% 0%, hsla(240, 100%, 98%, 0.5) 0px, transparent 50%),
+    radial-gradient(at 100% 100%, hsla(240, 100%, 98%, 0.5) 0px, transparent 50%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 button,
@@ -85,95 +168,86 @@ textarea {
   font: inherit;
 }
 
-/* 焦点状态优化 */
 :focus-visible {
-  outline: 2px solid oklch(var(--ring));
+  outline: 2px solid var(--color-ring);
   outline-offset: 2px;
 }
 
-/* 滚动条美化 */
+::selection {
+  background: var(--color-primary-container);
+  color: var(--color-on-primary-container);
+}
+
+/* --- 滚动条 --- */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
-
 ::-webkit-scrollbar-track {
-  background: oklch(var(--muted));
-  border-radius: 4px;
+  background: transparent;
 }
-
 ::-webkit-scrollbar-thumb {
-  background: oklch(var(--muted-foreground) / 0.3);
+  background: rgba(0, 0, 0, 0.1);
   border-radius: 4px;
-  border: 2px solid oklch(var(--muted));
 }
-
 ::-webkit-scrollbar-thumb:hover {
-  background: oklch(var(--muted-foreground) / 0.5);
+  background: rgba(0, 0, 0, 0.2);
 }
 
-.rail-section {
-  display: grid;
-  gap: 16px;
-  padding: 16px 0;
-  border-bottom: 1px solid oklch(var(--border));
+/* --- 无滚动条工具类 --- */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
-.rail-section:first-child {
-  padding-top: 0;
+/* --- 密集列表滚动条 --- */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: var(--color-outline-variant);
+  border-radius: 10px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-outline);
 }
 
-.rail-section:last-child {
-  border-bottom: 0;
-  padding-bottom: 0;
+/* ===========================================================================
+ * 标签芯片 (设计模板通用组件)
+ * =========================================================================*/
+.tag-pill {
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  transition: all 0.2s ease;
 }
-
-.rail-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: oklch(var(--foreground));
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.tag-chip {
-  min-height: 34px;
-  padding: 0 12px;
-  border: 1.5px solid oklch(var(--border));
-  border-radius: 8px;
-  color: oklch(var(--foreground));
-  background: var(--tag-color, oklch(var(--background)));
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 500;
-  transition: all 150ms ease-out;
-  box-shadow: var(--shadow-xs);
-}
-
-.tag-chip.selected {
-  border-color: oklch(var(--primary));
-  background: oklch(var(--primary) / 0.1);
-  color: oklch(var(--primary));
-  box-shadow: 0 0 0 1px oklch(var(--primary)), var(--shadow-sm);
-}
-
-.tag-chip:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.tag-chip:hover:not(:disabled):not(.selected) {
-  border-color: oklch(var(--muted-foreground) / 0.3);
-  background: oklch(var(--muted));
+.tag-pill:hover {
+  background: var(--color-primary-fixed);
+  border-color: var(--color-primary-fixed-dim);
   transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
 }
 
-.tag-chip:focus-visible {
-  outline: 2px solid oklch(var(--ring));
-  outline-offset: 2px;
+/* ===========================================================================
+ * 渐入动画
+ * =========================================================================*/
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-in-up {
+  animation: fadeInUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 @media (prefers-reduced-motion: reduce) {
