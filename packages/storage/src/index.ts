@@ -8,7 +8,7 @@ import type {
   RepositoryEmbeddingRecord,
   RepositoryFacts,
   RepositoryId,
-} from '@stars-ai/domain';
+} from '@gsat/domain';
 import { storageMigrations, type SqlMigration } from './migrations.js';
 
 export type ReadmeAiCandidate = {
@@ -33,6 +33,7 @@ export type RepositoryEmbeddingLookup = {
 export type StoragePort = {
   upsertRepository(repository: RepositoryFacts): Promise<void>;
   getRepository(repoId: RepositoryId): Promise<RepositoryFacts | null>;
+  listRepositories(accountId: GitHubAccountId, limit: number): Promise<RepositoryFacts[]>;
   saveReadme(readme: ReadmeDocument): Promise<void>;
   getAiDocument(repoId: RepositoryId): Promise<AiRepositoryDocument | null>;
   listReadmeAiCandidates(accountId: GitHubAccountId, limit: number): Promise<ReadmeAiCandidate[]>;

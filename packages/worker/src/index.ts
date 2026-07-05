@@ -1,20 +1,68 @@
-import type { AiProvider, EmbeddingResult } from '@stars-ai/ai';
-import type { AiRepositoryDocument, GitHubAccountId, ISODateString, ReadmeDocument, RepositoryEmbeddingRecord, RepositoryFacts } from '@stars-ai/domain';
-import type { GitHubProvider } from '@stars-ai/github';
-import type { SearchPort, VectorIndexPort } from '@stars-ai/search';
-import type { StoragePort } from '@stars-ai/storage';
+import type { AiProvider, EmbeddingResult } from '@gsat/ai';
+import type { AiRepositoryDocument, GitHubAccountId, ISODateString, ReadmeDocument, RepositoryEmbeddingRecord, RepositoryFacts } from '@gsat/domain';
+import type { GitHubProvider, StarSyncCursor } from '@gsat/github';
+import type { IndexPort, SearchPort, VectorIndexPort } from '@gsat/search';
+import type { StoragePort } from '@gsat/storage';
 
 export type WorkerDependencies = {
   github: GitHubProvider;
   storage: StoragePort;
   ai: AiProvider;
   search: SearchPort;
+  searchIndex?: IndexPort;
   vectorIndex?: VectorIndexPort;
 };
 
 export type WorkerResult = {
   succeeded: boolean;
   message: string;
+};
+
+export type SyncStarsInput = {
+  tokenRef: string;
+  cursor?: {
+    page?: number;
+    perPage?: number;
+    since?: string;
+  };
+  maxPages?: number;
+};
+
+export type SyncStarsResult = WorkerResult & {
+  accountId: GitHubAccountId;
+  syncedCount: number;
+};
+
+export type FetchReadmesInput = {
+  accountId: GitHubAccountId;
+  limit?: number;
+  concurrency?: number;
+};
+
+export type FetchReadmesResult = WorkerResult & {
+  totalCount: number;
+  fetchedCount: number;
+  missingCount: number;
+  failedCount: number;
+  failures: Array<{
+    repoId: string;
+    message: string;
+  }>;
+};
+
+export type RebuildSearchIndexInput = {
+  accountId: GitHubAccountId;
+  limit?: number;
+};
+
+export type RebuildSearchIndexResult = WorkerResult & {
+  totalCount: number;
+  indexedCount: number;
+  failedCount: number;
+  failures: Array<{
+    repoId: string;
+    message: string;
+  }>;
 };
 
 export type ReadmeAiPipelineInput = {
@@ -68,12 +116,12 @@ export type BuildRepositoryEmbeddingIndexResult = {
 };
 
 export type WorkerRuntime = {
-  syncStars(): Promise<WorkerResult>;
-  fetchReadmes(): Promise<WorkerResult>;
-  summarizeReadmes(): Promise<WorkerResult>;
+  syncStars(input: SyncStarsInput): Promise<SyncStarsResult>;
+  fetchReadmes(input: FetchReadmesInput): Promise<FetchReadmesResult>;
+  summarizeReadmes(input: SummarizeReadmesInput): Promise<WorkerResult>;
   summarizeReadmeBatch(input: SummarizeReadmesInput): Promise<SummarizeReadmesResult>;
   buildRepositoryEmbeddingIndex(input: BuildRepositoryEmbeddingIndexInput): Promise<BuildRepositoryEmbeddingIndexResult>;
-  rebuildSearchIndex(): Promise<WorkerResult>;
+  rebuildSearchIndex(input: RebuildSearchIndexInput): Promise<RebuildSearchIndexResult>;
   runReadmeAiPipeline(input: ReadmeAiPipelineInput): Promise<ReadmeAiPipelineResult>;
 };
 
@@ -220,16 +268,141 @@ export async function buildRepositoryEmbeddingIndex(
   return result;
 }
 
+export async function syncStars(
+  dependencies: Pick<WorkerDependencies, 'github' | 'storage'>,
+  input: SyncStarsInput,
+): Promise<SyncStarsResult> {
+  const profile = await dependencies.github.verifyToken(input.tokenRef);
+  let cursor: StarSyncCursor = {
+    page: input.cursor?.page ?? 1,
+    perPage: input.cursor?.perPage ?? 100,
+    since: input.cursor?.since,
+  };
+  const maxPages = Math.max(1, input.maxPages ?? Number.MAX_SAFE_INTEGER);
+  let syncedCount = 0;
+
+  for (let pageCount = 0; pageCount < maxPages; pageCount += 1) {
+    const page = await dependencies.github.listStarredRepositories(profile.accountId, cursor);
+
+    for (const repository of page.repositories) {
+      await dependencies.storage.upsertRepository(repository);
+      syncedCount += 1;
+    }
+
+    if (!page.nextCursor) {
+      break;
+    }
+
+    cursor = page.nextCursor;
+  }
+
+  return {
+    succeeded: true,
+    accountId: profile.accountId,
+    syncedCount,
+    message: `已同步 ${syncedCount} 个 Stars。`,
+  };
+}
+
+export async function fetchReadmes(
+  dependencies: Pick<WorkerDependencies, 'github' | 'storage'>,
+  input: FetchReadmesInput,
+): Promise<FetchReadmesResult> {
+  const repositories = await dependencies.storage.listRepositories(input.accountId, input.limit ?? 100);
+  const result: FetchReadmesResult = {
+    succeeded: true,
+    message: '',
+    totalCount: repositories.length,
+    fetchedCount: 0,
+    missingCount: 0,
+    failedCount: 0,
+    failures: [],
+  };
+
+  await mapWithConcurrency(repositories, input.concurrency ?? 6, async (repository) => {
+    try {
+      const readme = await dependencies.github.fetchReadme(repository.id, repository.fullName);
+
+      if (!readme) {
+        result.missingCount += 1;
+        return;
+      }
+
+      await dependencies.storage.saveReadme(readme);
+      result.fetchedCount += 1;
+    } catch (error) {
+      result.failedCount += 1;
+      result.failures.push({
+        repoId: repository.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  result.succeeded = result.failedCount === 0;
+  result.message = `README 处理完成：更新 ${result.fetchedCount} 个，缺失 ${result.missingCount} 个，失败 ${result.failedCount} 个。`;
+
+  return result;
+}
+
+export async function rebuildSearchIndex(
+  dependencies: Pick<WorkerDependencies, 'storage' | 'searchIndex'>,
+  input: RebuildSearchIndexInput,
+): Promise<RebuildSearchIndexResult> {
+  if (!dependencies.searchIndex) {
+    return {
+      succeeded: false,
+      message: '检索索引服务未配置，无法重建索引。',
+      totalCount: 0,
+      indexedCount: 0,
+      failedCount: 0,
+      failures: [],
+    };
+  }
+
+  const repositories = await dependencies.storage.listRepositories(input.accountId, input.limit ?? 500);
+  const result: RebuildSearchIndexResult = {
+    succeeded: true,
+    message: '',
+    totalCount: repositories.length,
+    indexedCount: 0,
+    failedCount: 0,
+    failures: [],
+  };
+
+  for (const repository of repositories) {
+    try {
+      await dependencies.searchIndex.rebuildRepositoryIndex(repository.id);
+      result.indexedCount += 1;
+    } catch (error) {
+      result.failedCount += 1;
+      result.failures.push({
+        repoId: repository.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  result.succeeded = result.failedCount === 0;
+  result.message = `检索索引处理完成：重建 ${result.indexedCount} 个，失败 ${result.failedCount} 个。`;
+
+  return result;
+}
+
 export function createWorkerRuntime(dependencies: WorkerDependencies): WorkerRuntime {
   return {
-    async syncStars() {
-      return { succeeded: true, message: 'Star 同步 Worker 已注册，等待实现 GitHub Provider' };
+    async syncStars(input) {
+      return syncStars(dependencies, input);
     },
-    async fetchReadmes() {
-      return { succeeded: true, message: 'README 抓取 Worker 已注册，等待实现任务队列' };
+    async fetchReadmes(input) {
+      return fetchReadmes(dependencies, input);
     },
-    async summarizeReadmes() {
-      return { succeeded: true, message: `中文摘要 Worker 已接入 ${dependencies.ai.metadata.displayName}` };
+    async summarizeReadmes(input) {
+      const result = await summarizeReadmeBatch(dependencies, input);
+      return {
+        succeeded: result.failedCount === 0,
+        message: `中文摘要处理完成：生成 ${result.generatedCount} 个，跳过 ${result.skippedCount} 个，失败 ${result.failedCount} 个。`,
+      };
     },
     async summarizeReadmeBatch(input) {
       return summarizeReadmeBatch(dependencies, input);
@@ -237,8 +410,8 @@ export function createWorkerRuntime(dependencies: WorkerDependencies): WorkerRun
     async buildRepositoryEmbeddingIndex(input) {
       return buildRepositoryEmbeddingIndex(dependencies, input);
     },
-    async rebuildSearchIndex() {
-      return { succeeded: true, message: '检索索引 Worker 已注册，等待接入 Search Provider' };
+    async rebuildSearchIndex(input) {
+      return rebuildSearchIndex(dependencies, input);
     },
     async runReadmeAiPipeline(input) {
       return runReadmeAiPipeline(dependencies, input);
@@ -297,4 +470,23 @@ function repositoryKnowledgeParts(repository: RepositoryFacts, document: AiRepos
 
 function currentIsoTimestamp(): ISODateString {
   return new Date().toISOString();
+}
+
+async function mapWithConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  task: (item: T) => Promise<void>,
+) {
+  const workerCount = Math.min(Math.max(Math.trunc(concurrency), 1), Math.max(items.length, 1));
+  let nextIndex = 0;
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const item = items[nextIndex];
+        nextIndex += 1;
+        await task(item);
+      }
+    }),
+  );
 }

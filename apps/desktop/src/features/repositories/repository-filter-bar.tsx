@@ -34,8 +34,8 @@ export function RepositoryFilterBar(props: RepositoryFilterBarProps) {
   }
 
   return (
-    <form className="flex items-center gap-3" onSubmit={handleSubmit}>
-      <div className="relative flex-1 min-w-[320px]">
+    <form className="flex flex-wrap items-center gap-3" onSubmit={handleSubmit}>
+      <div className="relative min-w-0 flex-[1_1_260px]">
         <Search className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           className="h-10 rounded-lg pl-10 pr-12 shadow-sm transition-shadow focus-visible:shadow-md"
@@ -49,7 +49,7 @@ export function RepositoryFilterBar(props: RepositoryFilterBarProps) {
       </div>
 
       <Select value={draftFilters.language || 'all'} onValueChange={(value) => setDraftFilters((current) => ({ ...current, language: value === 'all' ? '' : value }))}>
-        <SelectTrigger className="h-10 w-[180px] rounded-lg shadow-sm">
+        <SelectTrigger className="h-10 w-full min-w-[140px] sm:w-40 rounded-lg shadow-sm">
           <SelectValue placeholder="全部语言" />
         </SelectTrigger>
         <SelectContent>
@@ -61,7 +61,7 @@ export function RepositoryFilterBar(props: RepositoryFilterBarProps) {
       </Select>
 
       <Select value={draftFilters.tagId || 'all'} onValueChange={(value) => setDraftFilters((current) => ({ ...current, tagId: value === 'all' ? '' : value }))}>
-        <SelectTrigger className="h-10 w-[180px] rounded-lg shadow-sm">
+        <SelectTrigger className="h-10 w-full min-w-[140px] sm:w-40 rounded-lg shadow-sm">
           <SelectValue placeholder="全部标签" />
         </SelectTrigger>
         <SelectContent>
