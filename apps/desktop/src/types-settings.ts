@@ -6,6 +6,7 @@ export type AppSettings = {
 };
 
 export type ThemeSettings = {
+  mode: 'system' | 'light' | 'dark';
   brandColor: string;
   fontSize: 'small' | 'medium' | 'large';
   colorPreset: string;
@@ -14,24 +15,23 @@ export type ThemeSettings = {
 export type SyncSettings = {
   autoSyncInterval: number; // 分钟
   enableAutoSync: boolean;
-  defaultGistId: string;
 };
 
 export type AISettings = {
-  provider: 'openai' | 'anthropic' | 'local' | 'none';
+  provider: 'openai' | 'openai-compatible' | 'anthropic' | 'none';
+  baseUrl: string;
   apiKey: string;
   model: string;
   enableAutoSummary: boolean;
 };
 
 export type GeneralSettings = {
-  language: 'zh-CN' | 'en-US';
-  dataDirectory: string;
   showWelcomeOnStartup: boolean;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: {
+    mode: 'system',
     brandColor: '#3b82f6',
     fontSize: 'medium',
     colorPreset: 'blue',
@@ -39,17 +39,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sync: {
     autoSyncInterval: 30,
     enableAutoSync: false,
-    defaultGistId: '',
   },
   ai: {
     provider: 'none',
+    baseUrl: '',
     apiKey: '',
-    model: '',
+    model: 'gpt-4o-mini',
     enableAutoSummary: false,
   },
   general: {
-    language: 'zh-CN',
-    dataDirectory: '',
     showWelcomeOnStartup: true,
   },
 };

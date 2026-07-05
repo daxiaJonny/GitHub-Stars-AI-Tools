@@ -10,7 +10,7 @@ product
 
 ## Product Purpose
 
-GitHub Stars AI Tools 将 GitHub Stars 同步到本地 SQLite，缓存 README，承载标签、笔记和阅读状态，并为后续 AI 中文摘要与语义检索提供工作台。成功的界面应让用户快速找到项目、判断项目价值、沉淀自己的使用结论，并信任数据和密钥都留在本地优先的控制范围内。
+GitHub-Stars-AI-Tools 将 GitHub Stars 同步到本地 SQLite，缓存 README，承载标签、笔记和阅读状态，并为后续 AI 中文摘要与语义检索提供工作台。成功的界面应让用户快速找到项目、判断项目价值、沉淀自己的使用结论，并信任数据和密钥都留在本地优先的控制范围内。
 
 ## Brand Personality
 
