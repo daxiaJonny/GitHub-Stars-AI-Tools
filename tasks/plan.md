@@ -1,4 +1,4 @@
-# Implementation Plan: GitHub Stars AI Tools
+# Implementation Plan: GitHub-Stars-AI-Tools
 
 ## Overview
 

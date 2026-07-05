@@ -1,4 +1,4 @@
-# TODO：GitHub Stars AI Tools
+# TODO：GitHub-Stars-AI-Tools
 
 ## Phase 1: Foundation
 
@@ -17,7 +17,7 @@
 - [x] Task 1.3: 建立本地 SQLite 与迁移机制
   - Status: 已完成。核心表、迁移记录表、FTS 表、迁移清单和幂等验证脚本均已建立。
   - Acceptance: 核心表可创建，migration 可重复执行。
-  - Verify: `pnpm --filter @stars-ai/storage verify:migrations` 与 `pnpm build` 已通过。
+  - Verify: `pnpm --filter @gsat/storage verify:migrations` 与 `pnpm build` 已通过。
   - Files: `packages/storage/**`
 
 ## Phase 2: GitHub Sync
