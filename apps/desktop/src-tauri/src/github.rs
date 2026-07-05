@@ -1,4 +1,4 @@
-use crate::auth::{github_api_get, github_api_get_optional};
+use crate::auth::{github_api_get, github_api_get_optional, github_api_post};
 use base64::Engine;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 const STARRED_REPOSITORIES_API: &str = "https://api.github.com/user/starred";
 const STARRED_ACCEPT: &str = "application/vnd.github.star+json";
 const README_ACCEPT: &str = "application/vnd.github+json";
+const GIST_API: &str = "https://api.github.com/gists";
+const ANNOTATION_GIST_FILE: &str = "github-stars-ai-tools-annotations.json";
 const PAGE_SIZE: u16 = 100;
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,24 @@ pub struct ReadmeDocument {
     pub content_hash: String,
     pub source_path: String,
     pub fetched_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GistExportResult {
+    pub gist_id: String,
+    pub html_url: String,
+}
+
+#[derive(Deserialize)]
+struct GistFileResponse {
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GistResponse {
+    id: String,
+    html_url: String,
+    files: std::collections::HashMap<String, GistFileResponse>,
 }
 
 #[derive(Deserialize)]
@@ -124,6 +144,46 @@ pub fn fetch_readme(
         source_path: readme.path,
         fetched_at: current_iso_timestamp()?,
     }))
+}
+
+pub fn create_annotation_gist(
+    token: &str,
+    snapshot_json: &str,
+) -> Result<GistExportResult, String> {
+    let mut files = serde_json::Map::new();
+    files.insert(
+        ANNOTATION_GIST_FILE.to_owned(),
+        serde_json::json!({ "content": snapshot_json }),
+    );
+    let body = serde_json::json!({
+        "description": "GitHub Stars AI Tools annotation snapshot",
+        "public": false,
+        "files": files,
+    })
+    .to_string();
+    let response_body = github_api_post(token, GIST_API, README_ACCEPT, &body)?;
+    let response = serde_json::from_str::<GistResponse>(&response_body)
+        .map_err(|error| format!("GitHub Gist 响应解析失败：{error}"))?;
+
+    Ok(GistExportResult {
+        gist_id: response.id,
+        html_url: response.html_url,
+    })
+}
+
+pub fn fetch_annotation_gist(token: &str, gist_id: &str) -> Result<String, String> {
+    let url = format!("{GIST_API}/{gist_id}");
+    let body = github_api_get(token, &url, README_ACCEPT)?;
+    let response = serde_json::from_str::<GistResponse>(&body)
+        .map_err(|error| format!("GitHub Gist 响应解析失败：{error}"))?;
+    let file = response
+        .files
+        .get(ANNOTATION_GIST_FILE)
+        .ok_or_else(|| "Gist 中没有 GitHub Stars AI Tools 注解快照文件".to_owned())?;
+
+    file.content
+        .clone()
+        .ok_or_else(|| "Gist 注解快照内容为空或过大，当前版本无法导入".to_owned())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

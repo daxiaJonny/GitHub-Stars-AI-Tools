@@ -23,7 +23,10 @@ type GitHubAuthState = {
 
 type StarSyncSummary = {
   accountLogin: string;
-  syncedCount: number;
+  activeCount: number;
+  createdCount: number;
+  updatedCount: number;
+  removedCount: number;
 };
 
 type ReadmeFetchSummary = {
@@ -31,6 +34,19 @@ type ReadmeFetchSummary = {
   fetchedCount: number;
   skippedCount: number;
   missingCount: number;
+};
+
+type GistAnnotationExportSummary = {
+  gistId: string;
+  htmlUrl: string;
+  tagCount: number;
+  repositoryCount: number;
+};
+
+type GistAnnotationImportSummary = {
+  tagCount: number;
+  repositoryCount: number;
+  skippedRepositoryCount: number;
 };
 
 type RepositoryListItem = {
@@ -63,6 +79,22 @@ type RepositoryFilters = {
   tagId: string;
 };
 
+type SearchMatchReasonView = {
+  label: string;
+  detail: string;
+};
+
+type SearchCitationView = {
+  title: string;
+  snippet: string;
+};
+
+type RepositorySearchExplanationView = {
+  explanationZh: string;
+  reasons: SearchMatchReasonView[];
+  citations: SearchCitationView[];
+};
+
 type TagItem = {
   id: string;
   accountId: string;
@@ -79,6 +111,31 @@ type RepositoryAnnotationView = {
   readingStatus: ReadingStatus;
   tags: TagItem[];
   updatedAt: string;
+};
+
+type RepositoryDetailView = {
+  repositoryId: string;
+  accountId: string;
+  readme: RepositoryReadmeView | null;
+  aiDocument: RepositoryAiDocumentView | null;
+};
+
+type RepositoryReadmeView = {
+  rawMarkdown: string;
+  contentHash: string;
+  sourcePath: string;
+  fetchedAt: string;
+};
+
+type RepositoryAiDocumentView = {
+  summaryZh: string;
+  readmeZh: string | null;
+  keywords: string[];
+  suggestedTags: string[];
+  model: string;
+  promptVersion: string;
+  sourceHash: string;
+  generatedAt: string;
 };
 
 type ReadingStatus = 'unread' | 'read' | 'later';
@@ -115,8 +172,11 @@ export function App() {
   const [isClearingToken, setIsClearingToken] = useState(false);
   const [isSyncingStars, setIsSyncingStars] = useState(false);
   const [isFetchingReadmes, setIsFetchingReadmes] = useState(false);
+  const [isExportingAnnotations, setIsExportingAnnotations] = useState(false);
+  const [isImportingAnnotations, setIsImportingAnnotations] = useState(false);
   const [isLoadingRepositories, setIsLoadingRepositories] = useState(false);
   const [isLoadingAnnotation, setIsLoadingAnnotation] = useState(false);
+  const [isLoadingRepositoryDetail, setIsLoadingRepositoryDetail] = useState(false);
   const [isSavingAnnotation, setIsSavingAnnotation] = useState(false);
   const [isSavingTag, setIsSavingTag] = useState(false);
   const [syncSummary, setSyncSummary] = useState<StarSyncSummary | null>(null);
@@ -127,10 +187,12 @@ export function App() {
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<string | null>(null);
   const [tags, setTags] = useState<TagItem[]>([]);
   const [annotation, setAnnotation] = useState<RepositoryAnnotationView | null>(null);
+  const [repositoryDetail, setRepositoryDetail] = useState<RepositoryDetailView | null>(null);
   const [noteDraft, setNoteDraft] = useState('');
   const [readingStatusDraft, setReadingStatusDraft] = useState<ReadingStatus>('unread');
   const [newTagName, setNewTagName] = useState('');
   const [newTagColor, setNewTagColor] = useState('#fef0c7');
+  const [gistIdDraft, setGistIdDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [annotationMessage, setAnnotationMessage] = useState<string | null>(null);
@@ -173,6 +235,7 @@ export function App() {
   useEffect(() => {
     if (!selectedRepository) {
       setAnnotation(null);
+      setRepositoryDetail(null);
       setNoteDraft('');
       setReadingStatusDraft('unread');
       return;
@@ -227,23 +290,29 @@ export function App() {
 
   async function loadAnnotationWorkspace(repository: RepositoryListItem) {
     setIsLoadingAnnotation(true);
+    setIsLoadingRepositoryDetail(true);
     setAnnotationMessage(null);
 
     try {
-      const [nextTags, nextAnnotation] = await Promise.all([
+      const [nextTags, nextAnnotation, nextRepositoryDetail] = await Promise.all([
         invoke<TagItem[]>('list_tags', { request: { accountId: repository.accountId } }),
         invoke<RepositoryAnnotationView>('get_repository_annotation', {
+          request: { repositoryId: repository.id, accountId: repository.accountId },
+        }),
+        invoke<RepositoryDetailView>('get_repository_detail', {
           request: { repositoryId: repository.id, accountId: repository.accountId },
         }),
       ]);
       setTags(nextTags);
       setAnnotation(nextAnnotation);
+      setRepositoryDetail(nextRepositoryDetail);
       setNoteDraft(nextAnnotation.noteMarkdown);
       setReadingStatusDraft(nextAnnotation.readingStatus);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setIsLoadingAnnotation(false);
+      setIsLoadingRepositoryDetail(false);
     }
   }
 
@@ -293,7 +362,9 @@ export function App() {
       setSyncSummary(summary);
       setReadmeSummary(null);
       await refreshRepositoryWorkspace();
-      setAuthMessage(`已同步 ${summary.syncedCount} 个 Star 项目。`);
+      setAuthMessage(
+        `同步完成：当前 active ${summary.activeCount} 个，新增 ${summary.createdCount} 个，更新 ${summary.updatedCount} 个，移除 ${summary.removedCount} 个。`,
+      );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -315,6 +386,52 @@ export function App() {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setIsFetchingReadmes(false);
+    }
+  }
+
+  async function handleExportAnnotations() {
+    setIsExportingAnnotations(true);
+    setError(null);
+    setAuthMessage(null);
+
+    try {
+      const summary = await invoke<GistAnnotationExportSummary>('export_annotation_gist');
+      setGistIdDraft(summary.gistId);
+      setAuthMessage(`注解已导出到 Secret Gist：${summary.tagCount} 个标签，${summary.repositoryCount} 条仓库注解。`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setIsExportingAnnotations(false);
+    }
+  }
+
+  async function handleImportAnnotations(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const gistId = gistIdDraft.trim();
+
+    if (!gistId) {
+      return;
+    }
+
+    setIsImportingAnnotations(true);
+    setError(null);
+    setAuthMessage(null);
+
+    try {
+      const summary = await invoke<GistAnnotationImportSummary>('import_annotation_gist', {
+        request: { gistId },
+      });
+      await refreshRepositoryWorkspace();
+      if (selectedRepository) {
+        await loadAnnotationWorkspace(selectedRepository);
+      }
+      setAuthMessage(
+        `注解已导入：${summary.tagCount} 个标签，${summary.repositoryCount} 条仓库注解，跳过 ${summary.skippedRepositoryCount} 条本地不存在的仓库。`,
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setIsImportingAnnotations(false);
     }
   }
 
@@ -543,6 +660,7 @@ export function App() {
             filters={repositoryFilters}
             isLoading={isLoadingRepositories}
             isLoadingAnnotation={isLoadingAnnotation}
+            isLoadingRepositoryDetail={isLoadingRepositoryDetail}
             isSavingAnnotation={isSavingAnnotation}
             isSavingTag={isSavingTag}
             languages={repositoryLanguages}
@@ -551,6 +669,7 @@ export function App() {
             noteDraft={noteDraft}
             page={repositoryPage}
             readingStatusDraft={readingStatusDraft}
+            repositoryDetail={repositoryDetail}
             selectedRepository={selectedRepository}
             tags={tags}
             onApplyFilters={applyRepositoryFilters}
@@ -616,11 +735,11 @@ export function App() {
           <div className="sync-layout">
             <div>
               <p className="form-help">
-                先从 GitHub API 分页同步全部 Star 仓库，再抓取 README 并按内容 hash 缓存。重复执行会跳过未变化的 README，不会覆盖标签和笔记。
+                从 GitHub API 分页同步全部 Star 仓库，并与本地事实层对账：新增和仍在 Star 的项目保持 active，已取消 Star 的项目标记为 removed。标签、笔记、README 和 AI 派生数据都会保留。
               </p>
               {syncSummary ? (
                 <p className="sync-result">
-                  @{syncSummary.accountLogin} 当前已同步 {syncSummary.syncedCount} 个 Star 项目。
+                  @{syncSummary.accountLogin} 当前 active {syncSummary.activeCount} 个；新增 {syncSummary.createdCount} 个，更新 {syncSummary.updatedCount} 个，移除 {syncSummary.removedCount} 个。
                 </p>
               ) : null}
               {readmeSummary ? (
@@ -646,6 +765,39 @@ export function App() {
               >
                 {isFetchingReadmes ? '正在抓取…' : '抓取 README'}
               </button>
+            </div>
+          </div>
+
+          <div className="gist-sync-panel">
+            <div>
+              <strong>注解导入导出</strong>
+              <p className="form-help">
+                只同步标签、仓库打标、Markdown 笔记和阅读状态。GitHub 仓库事实、README 和 AI 派生数据不会写入 Gist。
+              </p>
+            </div>
+            <div className="gist-sync-actions">
+              <button
+                className="secondary-button"
+                disabled={!authState.user || isExportingAnnotations}
+                onClick={handleExportAnnotations}
+                type="button"
+              >
+                {isExportingAnnotations ? '正在导出…' : '导出到 Secret Gist'}
+              </button>
+              <form className="gist-import-form" onSubmit={handleImportAnnotations}>
+                <input
+                  value={gistIdDraft}
+                  placeholder="粘贴 Gist ID"
+                  onChange={(event) => setGistIdDraft(event.target.value)}
+                />
+                <button
+                  className="primary-button"
+                  disabled={!authState.user || isImportingAnnotations || gistIdDraft.trim().length === 0}
+                  type="submit"
+                >
+                  {isImportingAnnotations ? '正在导入…' : '导入注解'}
+                </button>
+              </form>
             </div>
           </div>
         </section>
@@ -678,6 +830,7 @@ function RepositoryWorkspace(props: {
   filters: RepositoryFilters;
   isLoading: boolean;
   isLoadingAnnotation: boolean;
+  isLoadingRepositoryDetail: boolean;
   isSavingAnnotation: boolean;
   isSavingTag: boolean;
   languages: string[];
@@ -686,6 +839,7 @@ function RepositoryWorkspace(props: {
   noteDraft: string;
   page: RepositoryListPage | null;
   readingStatusDraft: ReadingStatus;
+  repositoryDetail: RepositoryDetailView | null;
   selectedRepository: RepositoryListItem | null;
   tags: TagItem[];
   onApplyFilters: (filters: RepositoryFilters) => void;
@@ -765,6 +919,7 @@ function RepositoryWorkspace(props: {
           {props.page.items.map((repository) => (
             <RepositoryCard
               key={repository.id}
+              explanation={buildRepositorySearchExplanation(repository, props.filters, props.tags)}
               isSelected={repository.id === props.selectedRepository?.id}
               repository={repository}
               onSelectRepository={props.onSelectRepository}
@@ -777,6 +932,7 @@ function RepositoryWorkspace(props: {
         annotation={props.annotation}
         annotationMessage={props.annotationMessage}
         isLoadingAnnotation={props.isLoadingAnnotation}
+        isLoadingRepositoryDetail={props.isLoadingRepositoryDetail}
         isSavingAnnotation={props.isSavingAnnotation}
         isSavingTag={props.isSavingTag}
         newTagColor={props.newTagColor}
@@ -784,6 +940,7 @@ function RepositoryWorkspace(props: {
         noteDraft={props.noteDraft}
         readingStatusDraft={props.readingStatusDraft}
         repository={props.selectedRepository}
+        repositoryDetail={props.repositoryDetail}
         tags={props.tags}
         onCreateTag={props.onCreateTag}
         onDeleteTag={props.onDeleteTag}
@@ -878,6 +1035,7 @@ function RepositoryFilterBar(props: {
 }
 
 function RepositoryCard(props: {
+  explanation: RepositorySearchExplanationView | null;
   isSelected: boolean;
   repository: RepositoryListItem;
   onSelectRepository: (repositoryId: string) => void;
@@ -913,14 +1071,114 @@ function RepositoryCard(props: {
           ))}
         </div>
       ) : null}
+      {props.explanation ? <RepositorySearchExplanation explanation={props.explanation} /> : null}
     </article>
   );
+}
+
+function RepositorySearchExplanation(props: { explanation: RepositorySearchExplanationView }) {
+  return (
+    <section className="search-explanation" aria-label="检索匹配解释">
+      <p>{props.explanation.explanationZh}</p>
+      {props.explanation.reasons.length > 0 ? (
+        <div className="search-reason-list">
+          {props.explanation.reasons.map((reason) => (
+            <span key={`${reason.label}-${reason.detail}`}>
+              <strong>{reason.label}</strong>
+              {reason.detail}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {props.explanation.citations.length > 0 ? (
+        <div className="search-citation-list">
+          {props.explanation.citations.map((citation) => (
+            <blockquote key={`${citation.title}-${citation.snippet}`}>
+              <strong>{citation.title}</strong>
+              <span>{citation.snippet}</span>
+            </blockquote>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function buildRepositorySearchExplanation(
+  repository: RepositoryListItem,
+  filters: RepositoryFilters,
+  tags: TagItem[],
+): RepositorySearchExplanationView | null {
+  const reasons: SearchMatchReasonView[] = [];
+  const citations: SearchCitationView[] = [];
+  const keyword = filters.keyword.trim();
+
+  if (keyword) {
+    const matchedText = findKeywordSnippet(
+      [repository.fullName, repository.description, repository.language, repository.topics.join(' ')].filter(Boolean).join(' '),
+      keyword,
+    );
+
+    reasons.push({
+      label: '关键词命中',
+      detail: `当前结果与“${keyword}”相关。`,
+    });
+
+    if (matchedText) {
+      citations.push({
+        title: '仓库信息片段',
+        snippet: matchedText,
+      });
+    }
+  }
+
+  if (filters.language && repository.language === filters.language) {
+    reasons.push({
+      label: '语言命中',
+      detail: `项目主要语言是 ${filters.language}。`,
+    });
+  }
+
+  if (filters.tagId) {
+    const tagName = tags.find((tag) => tag.id === filters.tagId)?.name ?? '当前标签';
+    reasons.push({
+      label: '标签命中',
+      detail: `项目已归入“${tagName}”。`,
+    });
+  }
+
+  if (reasons.length === 0) {
+    return null;
+  }
+
+  return {
+    explanationZh: `${repository.fullName} 出现在结果中，主要依据是 ${reasons.map((reason) => reason.label).join('、')}。`,
+    reasons,
+    citations,
+  };
+}
+
+function findKeywordSnippet(content: string, keyword: string) {
+  const normalizedContent = content.replace(/\s+/gu, ' ').trim();
+  const matchIndex = normalizedContent.toLowerCase().indexOf(keyword.toLowerCase());
+
+  if (matchIndex < 0) {
+    return normalizedContent.slice(0, 180);
+  }
+
+  const start = Math.max(matchIndex - 56, 0);
+  const end = Math.min(matchIndex + keyword.length + 96, normalizedContent.length);
+  const prefix = start > 0 ? '…' : '';
+  const suffix = end < normalizedContent.length ? '…' : '';
+
+  return `${prefix}${normalizedContent.slice(start, end)}${suffix}`;
 }
 
 function AnnotationPanel(props: {
   annotation: RepositoryAnnotationView | null;
   annotationMessage: string | null;
   isLoadingAnnotation: boolean;
+  isLoadingRepositoryDetail: boolean;
   isSavingAnnotation: boolean;
   isSavingTag: boolean;
   newTagColor: string;
@@ -928,6 +1186,7 @@ function AnnotationPanel(props: {
   noteDraft: string;
   readingStatusDraft: ReadingStatus;
   repository: RepositoryListItem | null;
+  repositoryDetail: RepositoryDetailView | null;
   tags: TagItem[];
   onCreateTag: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteTag: (tag: TagItem) => void;
@@ -961,7 +1220,10 @@ function AnnotationPanel(props: {
       </div>
 
       {props.isLoadingAnnotation ? <p className="form-help">正在读取标签和笔记…</p> : null}
+      {props.isLoadingRepositoryDetail ? <p className="form-help">正在读取 README 和中文摘要…</p> : null}
       {props.annotationMessage ? <p className="success-message compact-message">{props.annotationMessage}</p> : null}
+
+      <RepositoryKnowledgePanel detail={props.repositoryDetail} />
 
       <label className="field-group" htmlFor="reading-status">
         <span>阅读状态</span>
@@ -1045,6 +1307,59 @@ function AnnotationPanel(props: {
         {props.isSavingAnnotation ? '正在保存…' : '保存笔记'}
       </button>
     </aside>
+  );
+}
+
+function RepositoryKnowledgePanel(props: { detail: RepositoryDetailView | null }) {
+  const aiDocument = props.detail?.aiDocument ?? null;
+  const readme = props.detail?.readme ?? null;
+
+  return (
+    <section className="knowledge-panel" aria-label="AI 中文摘要与 README">
+      <div className="knowledge-section">
+        <div className="knowledge-heading">
+          <span>AI 中文摘要</span>
+          {aiDocument ? <small>{aiDocument.model}</small> : null}
+        </div>
+        {aiDocument ? (
+          <>
+            <p className="summary-text">{aiDocument.summaryZh}</p>
+            {aiDocument.keywords.length > 0 ? (
+              <div className="knowledge-chip-list" aria-label="关键词">
+                {aiDocument.keywords.map((keyword) => (
+                  <span key={keyword}>{keyword}</span>
+                ))}
+              </div>
+            ) : null}
+            {aiDocument.suggestedTags.length > 0 ? (
+              <div className="suggested-tags">
+                <strong>推荐标签</strong>
+                <div className="knowledge-chip-list">
+                  {aiDocument.suggestedTags.map((tag) => (
+                    <span key={tag}>{tag}</span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <p className="form-help">基于 README hash 生成于 {formatDate(aiDocument.generatedAt)}，仅作为 AI 派生层展示。</p>
+          </>
+        ) : (
+          <p className="form-help">还没有中文摘要。完成 README 中文摘要任务后会显示用途说明、关键词和推荐标签。</p>
+        )}
+      </div>
+
+      <details className="knowledge-section readme-section">
+        <summary>原 README</summary>
+        {readme ? (
+          <>
+            <p className="form-help">来源：{readme.sourcePath}，抓取于 {formatDate(readme.fetchedAt)}</p>
+            <pre>{readme.rawMarkdown.slice(0, 8000)}</pre>
+          </>
+        ) : (
+          <p className="form-help">还没有缓存 README。请先在同步中心执行“抓取 README”。</p>
+        )}
+      </details>
+    </section>
   );
 }
 

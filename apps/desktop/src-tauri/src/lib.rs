@@ -18,7 +18,10 @@ struct BackendStatus {
 #[serde(rename_all = "camelCase")]
 struct StarSyncSummary {
     account_login: String,
-    synced_count: usize,
+    active_count: usize,
+    created_count: usize,
+    updated_count: usize,
+    removed_count: usize,
 }
 
 #[derive(Serialize)]
@@ -28,6 +31,23 @@ struct ReadmeFetchSummary {
     fetched_count: usize,
     skipped_count: usize,
     missing_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GistAnnotationExportSummary {
+    gist_id: String,
+    html_url: String,
+    tag_count: usize,
+    repository_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GistAnnotationImportSummary {
+    tag_count: usize,
+    repository_count: usize,
+    skipped_repository_count: usize,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +99,13 @@ struct RepositoryAnnotationRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RepositoryDetailRequest {
+    account_id: String,
+    repository_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SaveRepositoryAnnotationRequest {
     account_id: String,
     repository_id: String,
@@ -92,6 +119,12 @@ struct SetRepositoryTagsRequest {
     account_id: String,
     repository_id: String,
     tag_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportAnnotationGistRequest {
+    gist_id: String,
 }
 
 #[tauri::command]
@@ -128,11 +161,14 @@ fn sync_github_stars(app_handle: tauri::AppHandle) -> Result<StarSyncSummary, St
     let repositories = github::fetch_all_starred_repositories(&token, &account_id)?;
 
     storage.upsert_github_account(&user)?;
-    storage.upsert_repositories(&repositories)?;
+    let reconcile_summary = storage.reconcile_starred_repositories(&account_id, &repositories)?;
 
     Ok(StarSyncSummary {
         account_login: user.login,
-        synced_count: repositories.len(),
+        active_count: reconcile_summary.active_count,
+        created_count: reconcile_summary.created_count,
+        updated_count: reconcile_summary.updated_count,
+        removed_count: reconcile_summary.removed_count,
     })
 }
 
@@ -201,6 +237,16 @@ fn list_repository_languages(app_handle: tauri::AppHandle) -> Result<Vec<String>
     let storage = AppStorage::from_app_handle(&app_handle)?;
 
     storage.list_repository_languages()
+}
+
+#[tauri::command]
+fn get_repository_detail(
+    app_handle: tauri::AppHandle,
+    request: RepositoryDetailRequest,
+) -> Result<storage::RepositoryDetailView, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+
+    storage.get_repository_detail(&request.repository_id, &request.account_id)
 }
 
 #[tauri::command]
@@ -284,6 +330,50 @@ fn set_repository_tags(
     )
 }
 
+#[tauri::command]
+fn export_annotation_gist(
+    app_handle: tauri::AppHandle,
+) -> Result<GistAnnotationExportSummary, String> {
+    let token = auth::require_github_token()?;
+    let user = auth::verify_github_token(&token)?;
+    let account_id = user.id.to_string();
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let snapshot = storage.export_annotation_snapshot(&account_id)?;
+    let tag_count = snapshot.tags.len();
+    let repository_count = snapshot.repositories.len();
+    let snapshot_json = serde_json::to_string_pretty(&snapshot)
+        .map_err(|error| format!("注解快照序列化失败：{error}"))?;
+    let gist = github::create_annotation_gist(&token, &snapshot_json)?;
+
+    Ok(GistAnnotationExportSummary {
+        gist_id: gist.gist_id,
+        html_url: gist.html_url,
+        tag_count,
+        repository_count,
+    })
+}
+
+#[tauri::command]
+fn import_annotation_gist(
+    app_handle: tauri::AppHandle,
+    request: ImportAnnotationGistRequest,
+) -> Result<GistAnnotationImportSummary, String> {
+    let token = auth::require_github_token()?;
+    let user = auth::verify_github_token(&token)?;
+    let account_id = user.id.to_string();
+    let snapshot_json = github::fetch_annotation_gist(&token, &request.gist_id)?;
+    let snapshot = serde_json::from_str::<storage::AnnotationSnapshot>(&snapshot_json)
+        .map_err(|error| format!("注解快照解析失败：{error}"))?;
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let summary = storage.import_annotation_snapshot(&account_id, &snapshot)?;
+
+    Ok(GistAnnotationImportSummary {
+        tag_count: summary.tag_count,
+        repository_count: summary.repository_count,
+        skipped_repository_count: summary.skipped_repository_count,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -296,6 +386,7 @@ pub fn run() {
             fetch_repository_readmes,
             list_repositories,
             list_repository_languages,
+            get_repository_detail,
             list_tags,
             create_tag,
             update_tag,
@@ -303,6 +394,8 @@ pub fn run() {
             get_repository_annotation,
             save_repository_annotation,
             set_repository_tags,
+            export_annotation_gist,
+            import_annotation_gist,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用运行失败");

@@ -1,11 +1,39 @@
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const GITHUB_TOKEN_SERVICE: &str = "github-stars-ai-tools";
 const GITHUB_TOKEN_ACCOUNT: &str = "github-pat";
 const GITHUB_USER_API: &str = "https://api.github.com/user";
 const GITHUB_API_VERSION: &str = "2022-11-28";
+const DEBUG_SESSION_ID: &str = "974fcdfc-8128-4fa9-849e-60e37b172aad";
+const DEBUG_LOG_PATH: &str = "/.cursor/debug-974fcdfc-8128-4fa9-849e-60e37b172aad.log";
+
+fn debug_log(run_id: &str, hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let payload = serde_json::json!({
+        "sessionId": DEBUG_SESSION_ID,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": timestamp,
+    });
+
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(DEBUG_LOG_PATH)
+    {
+        let _ = writeln!(file, "{}", payload);
+    }
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,8 +98,44 @@ pub fn require_github_token() -> Result<String, String> {
 
 pub fn verify_github_token(token: &str) -> Result<GitHubUser, String> {
     let body = github_api_get(token, GITHUB_USER_API, "application/vnd.github+json")?;
-    serde_json::from_str::<GitHubUser>(&body)
-        .map_err(|error| format!("GitHub 用户信息解析失败：{error}"))
+    let json_value = serde_json::from_str::<serde_json::Value>(&body).ok();
+    let keys = json_value
+        .as_ref()
+        .and_then(|value| value.as_object())
+        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    // #region agent log
+    debug_log(
+        "initial",
+        "H1,H2,H3,H4",
+        "auth.rs:verify_github_token:before_parse",
+        "GitHub user response shape before parsing",
+        serde_json::json!({
+            "bodyLength": body.len(),
+            "hasId": json_value.as_ref().and_then(|value| value.get("id")).is_some(),
+            "hasLogin": json_value.as_ref().and_then(|value| value.get("login")).is_some(),
+            "hasHtmlUrlSnake": json_value.as_ref().and_then(|value| value.get("html_url")).is_some(),
+            "hasHtmlUrlCamel": json_value.as_ref().and_then(|value| value.get("htmlUrl")).is_some(),
+            "hasMessage": json_value.as_ref().and_then(|value| value.get("message")).is_some(),
+            "topLevelKeys": keys,
+        }),
+    );
+    // #endregion
+
+    serde_json::from_str::<GitHubUser>(&body).map_err(|error| {
+        // #region agent log
+        debug_log(
+            "initial",
+            "H1,H2,H3,H4",
+            "auth.rs:verify_github_token:parse_error",
+            "GitHub user response parse failed",
+            serde_json::json!({
+                "error": error.to_string(),
+            }),
+        );
+        // #endregion
+        format!("GitHub 用户信息解析失败：{error}")
+    })
 }
 
 pub fn github_api_get(token: &str, url: &str, accept: &str) -> Result<String, String> {
@@ -102,6 +166,16 @@ pub fn github_api_get_optional(
     Err("GitHub API 请求失败，请检查 Token 权限或 GitHub 限流状态".to_owned())
 }
 
+pub fn github_api_post(token: &str, url: &str, accept: &str, body: &str) -> Result<String, String> {
+    let response = github_api_request_with_body(token, url, accept, "POST", body)?;
+
+    if !response.status_success {
+        return Err("GitHub API 写入失败，请检查 Token Gist 权限或 GitHub 限流状态".to_owned());
+    }
+
+    Ok(response.body)
+}
+
 struct GitHubApiResponse {
     status_success: bool,
     http_code: Option<u16>,
@@ -123,6 +197,38 @@ header = "Authorization: Bearer {token}"
 "#
     );
 
+    execute_curl_config(&config)
+}
+
+fn github_api_request_with_body(
+    token: &str,
+    url: &str,
+    accept: &str,
+    method: &str,
+    body: &str,
+) -> Result<GitHubApiResponse, String> {
+    let escaped_body = curl_config_string(body);
+    let config = format!(
+        r#"
+silent
+show-error
+location
+url = "{url}"
+request = "{method}"
+write-out = "\n__GITHUB_STARS_AI_HTTP_STATUS__:%{{http_code}}"
+header = "Accept: {accept}"
+header = "Content-Type: application/json"
+header = "X-GitHub-Api-Version: {GITHUB_API_VERSION}"
+header = "User-Agent: GitHub-Stars-AI-Tools"
+header = "Authorization: Bearer {token}"
+data = "{escaped_body}"
+"#
+    );
+
+    execute_curl_config(&config)
+}
+
+fn execute_curl_config(config: &str) -> Result<GitHubApiResponse, String> {
     let mut child = Command::new("curl")
         .args(["--config", "-"])
         .stdin(Stdio::piped())
@@ -154,6 +260,15 @@ header = "Authorization: Bearer {token}"
         http_code,
         body,
     })
+}
+
+fn curl_config_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 fn split_http_status(output: &str) -> (String, Option<u16>) {
