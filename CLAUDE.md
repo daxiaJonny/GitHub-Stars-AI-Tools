@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-这是一个基于 Tauri 2 的本地优先 GitHub Stars 管理桌面应用，采用 pnpm monorepo 架构。核心能力包括：GitHub Stars 同步到本地 SQLite、README 抓取与缓存、AI 中文摘要生成、向量化语义检索、标签与笔记管理、Gist 注解同步。
+这是一个基于 Tauri 2 的本地优先 GitHub Stars 管理桌面应用，采用 pnpm monorepo 架构。核心能力包括：GitHub Stars 同步到本地 SQLite、README 抓取与缓存、AI 中文摘要生成、自然语言搜索、标签与笔记管理、Gist 注解同步。
 
 ## 环境要求
 
@@ -35,7 +35,7 @@ COREPACK_HOME="$PWD/.corepack" pnpm dev
 COREPACK_HOME="$PWD/.corepack" pnpm build:packages  # 构建共享包
 COREPACK_HOME="$PWD/.corepack" pnpm build           # 构建桌面应用
 
-# 验证 SQLite 迁移
+# 验证 SQLite Schema
 COREPACK_HOME="$PWD/.corepack" pnpm --filter @gsat/storage verify:migrations
 
 # Rust 后端检查
@@ -82,12 +82,12 @@ apps/desktop/              # Tauri 桌面应用（React + Vite 前端 + Rust 后
       storage.rs           # SQLite 操作封装
 
 packages/domain/           # 领域类型定义（TypeScript）
-packages/storage/          # SQLite Schema 与迁移脚本
-  migrations/              # SQL 迁移文件（如 001_initial_schema.sql）
+packages/storage/          # SQLite Schema 与初始化脚本
+  migrations/              # SQL Schema 文件（如 001_initial_schema.sql）
 packages/github/           # GitHub API 接入边界
 packages/ai/               # AI Provider 抽象层
 packages/search/           # 搜索 DSL 与查询结构
-packages/worker/           # 同步、摘要、向量化任务编排
+packages/worker/           # 同步、README 缓存与 AI 摘要任务编排
 ```
 
 ### 数据流与职责边界
@@ -95,7 +95,7 @@ packages/worker/           # 同步、摘要、向量化任务编排
 1. **前端 (React)**: 用户交互、状态管理、调用 Tauri 命令
 2. **Tauri 命令 (Rust)**: 安全沙箱层，处理 GitHub Token、SQLite 读写、系统调用
 3. **共享包 (TypeScript)**: 跨前后端的类型定义与业务逻辑
-4. **SQLite**: 本地事实数据存储（仓库元信息、README、AI 摘要、向量、用户注解）
+4. **SQLite**: 本地事实数据存储（仓库元信息、README、AI 摘要、标签、用户注解）
 
 ### 关键领域模型 (packages/domain)
 
@@ -103,7 +103,6 @@ packages/worker/           # 同步、摘要、向量化任务编排
 - `RepositoryAnnotation`: 用户注解层（tags、notes、readStatus）
 - `ReadmeDocument`: README 原始 Markdown 与缓存元信息
 - `AiRepositoryDocument`: AI 生成的中文摘要、关键词、建议标签
-- `RepositoryEmbeddingRecord`: 向量化记录
 - `RepoQuery`: 统一查询结构，支持 keyword、natural_language、hybrid 三种模式
 
 ### Tauri 命令边界
@@ -116,19 +115,21 @@ Rust 后端通过 Tauri 命令暴露给前端，主要模块：
 
 前端通过 `@tauri-apps/api` 的 `invoke` 调用这些命令。
 
-### 数据迁移流程
+### Schema 初始化与本机数据重置
 
 SQLite Schema 由 `packages/storage/migrations/` 下的 `.sql` 文件管理：
 
-- 迁移文件按序号命名（如 `001_initial_schema.sql`）
-- 通过 `verify:migrations` 脚本验证可执行性
-- Rust 后端启动时自动执行未应用的迁移
+- 当前本机测试阶段不做旧 SQLite 迁移
+- 后端启动时执行完整、幂等的 `001_initial_schema.sql`
+- 如果已有本机数据库缺少当前版本必需表或字段，直接删除旧数据库文件并重建
+- 通过 `verify:migrations` 脚本验证完整 Schema 可重复执行
 
 修改 Schema 时：
 
-1. 在 `migrations/` 下新建 `.sql` 文件
+1. 更新 `migrations/001_initial_schema.sql`
 2. 运行 `COREPACK_HOME="$PWD/.corepack" pnpm --filter @gsat/storage verify:migrations` 验证
-3. 更新 `packages/domain/src/index.ts` 中的相关类型定义
+3. 更新 `apps/desktop/src-tauri/src/storage.rs` 的必需表字段检测
+4. 更新 `packages/domain/src/index.ts` 中的相关类型定义
 
 ### 前端架构约定
 
@@ -149,7 +150,7 @@ SQLite Schema 由 `packages/storage/migrations/` 下的 `.sql` 文件管理：
 
 - GitHub 仓库事实数据
 - README 缓存
-- AI 摘要与向量
+- AI 摘要、标签网络与自然语言搜索计划
 - 完整 SQLite 数据库
 
 导入时仅合并到本地已存在的仓库记录。
