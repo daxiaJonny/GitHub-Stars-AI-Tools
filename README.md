@@ -81,6 +81,14 @@ pnpm tauri dev
 pnpm dev
 ```
 
+平时开发桌面应用优先使用：
+
+```bash
+pnpm tauri dev
+```
+
+这个命令会启动 Vite 开发服务并打开 Tauri 桌面窗口，适合日常改前端界面、Tauri 命令和本地功能联调。`pnpm dev` 只启动前端浏览器预览，不会打开桌面壳，适合单独调试纯 UI。
+
 ### 打包
 
 ```bash
@@ -92,6 +100,9 @@ pnpm verify:mvp
 
 # 打包当前系统的桌面安装包
 pnpm package:desktop
+
+# macOS：生成标准拖拽安装 DMG（大图标 App + Applications）
+pnpm package:desktop:dmg
 ```
 
 `pnpm package:desktop` 会先构建 Monorepo 共享包，再执行 Tauri 安装包打包。安装包位于 `apps/desktop/src-tauri/target/release/bundle/`。本机只能稳定产出当前系统对应安装包；Linux、Windows、macOS 三端安装包由 GitHub Actions 分平台构建：
@@ -99,6 +110,14 @@ pnpm package:desktop
 - macOS: Apple Silicon 与 Intel 两套 `.dmg`
 - Windows: `.msi` 或 `setup.exe`
 - Linux: `.deb`、`.rpm` 或 `.AppImage`
+
+macOS 本机需要官方示例那种双击后拖动安装的 DMG 时，使用 `pnpm package:desktop:dmg`。该命令会先让 Tauri 生成 DMG 辅助脚本，再构建 `.app`，最后通过 `apps/desktop/scripts/package-dmg.mjs` 重新封装 Finder 视图，图标大小为 128px，窗口中只保留 `GitHub-Stars-AI-Tools.app` 和 `Applications` 两个大对象。最终产物位于：
+
+```text
+apps/desktop/dist-dmg/GitHub-Stars-AI-Tools_0.1.0.dmg
+```
+
+如果只需要普通 Tauri 安装包，继续使用 `pnpm package:desktop`；如果要检查 macOS 安装体验或上传给用户，优先使用 `pnpm package:desktop:dmg`。
 
 ### GitHub Actions 发版
 
@@ -109,7 +128,7 @@ pnpm package:desktop
 - `release_draft`: 是否先创建草稿 Release
 - `prerelease`: 是否标记为预发布
 
-工作流会先把填写的版本号同步到 Tauri、Cargo 和 package 配置，再在 macOS Apple Silicon、macOS Intel、Windows、Linux runner 上分别执行 Tauri `build`，并把各平台安装包上传到同一个 `v版本号` GitHub Release。普通安装包用户不需要任何 `.env`、Node.js、pnpm 或 Rust；GitHub Token 与 AI Key 都在应用内设置。
+工作流会先把填写的版本号同步到 Tauri、Cargo 和 package 配置，再在 macOS Apple Silicon、macOS Intel、Windows、Linux runner 上分别执行 Tauri `build`，并把各平台安装包上传到同一个 `v版本号` GitHub Release。macOS job 会在 Tauri 默认 DMG 之后额外执行 `apps/desktop/scripts/package-dmg.mjs`，用 128px Finder 图标重新封装，并通过 `gh release upload --clobber` 覆盖 Release 中同名 `.dmg`，因此最终下载到的是官方示例风格的拖拽安装 DMG。普通安装包用户不需要任何 `.env`、Node.js、pnpm 或 Rust；GitHub Token 与 AI Key 都在应用内设置。
 
 ## 📖 使用指南
 

@@ -759,7 +759,7 @@ function RepoListItem(props: {
     onClick,
     onToggleRecommendation,
   } = props;
-  const localizedProjectName = buildLocalizedProjectName(repo, repo.aiKeywords, repo.suggestedTags);
+  const localizedProjectPosition = buildLocalizedProjectPosition(repo, repo.aiKeywords, repo.suggestedTags);
 
   return (
     <div
@@ -818,9 +818,9 @@ function RepoListItem(props: {
             ? 'bg-primary/5 pl-2 text-primary/80'
             : 'bg-surface-container-low text-on-surface-variant'
         }`}
-        title={`中文定位：${localizedProjectName}`}
+        title={`${localizedProjectPosition.isPending ? '待定位' : '中文定位'}：${localizedProjectPosition.text}`}
       >
-        中文定位：{localizedProjectName}
+        {localizedProjectPosition.isPending ? '待定位' : '中文定位'}：{localizedProjectPosition.text}
       </p>
       <div className={`flex items-center justify-between ${isSelected ? 'pl-2' : ''}`}>
         <div className="flex items-center gap-3">
@@ -923,7 +923,7 @@ function RepositoryTableRow(props: {
     onClick,
     onToggleRecommendation,
   } = props;
-  const localizedProjectName = buildLocalizedProjectName(repo, repo.aiKeywords, repo.suggestedTags);
+  const localizedProjectPosition = buildLocalizedProjectPosition(repo, repo.aiKeywords, repo.suggestedTags);
 
   return (
     <button
@@ -976,8 +976,8 @@ function RepositoryTableRow(props: {
         <Icon name="book" size={16} className={isSelected ? 'text-primary' : 'text-on-surface-variant'} />
         <span className="min-w-0">
           <span className="block truncate text-sm font-medium">{repo.fullName}</span>
-          <span className="mt-0.5 block truncate text-[11px] text-on-surface-variant" title={`中文定位：${localizedProjectName}`}>
-            中文定位：{localizedProjectName}
+          <span className="mt-0.5 block truncate text-[11px] text-on-surface-variant" title={`${localizedProjectPosition.isPending ? '待定位' : '中文定位'}：${localizedProjectPosition.text}`}>
+            {localizedProjectPosition.isPending ? '待定位' : '中文定位'}：{localizedProjectPosition.text}
           </span>
         </span>
       </span>
@@ -1349,10 +1349,11 @@ function RepoDetailPanel(props: {
   const readmeStatusLabel = detail?.readme ? 'README 已缓存' : repo.hasReadme ? '列表显示已缓存，正在载入详情' : 'README 待抓取';
   const aiStatusLabel = aiDoc ? 'AI 已解析' : repo.aiSummary ? '列表已有摘要，正在载入详情' : 'AI 待解析';
   const knowledgeTitle = buildKnowledgeTitle(repo, aiDoc?.keywords ?? repo.aiKeywords);
-  const localizedProjectName = buildLocalizedProjectName(
+  const localizedProjectPosition = buildLocalizedProjectPosition(
     repo,
     aiDoc?.keywords ?? repo.aiKeywords,
     aiDoc?.suggestedTags ?? repo.suggestedTags,
+    aiDoc?.summaryZh,
   );
   const visibleKnowledgeTags = uniqueStrings([
     ...(aiDoc?.suggestedTags ?? repo.suggestedTags),
@@ -1413,7 +1414,7 @@ function RepoDetailPanel(props: {
               <span className="font-medium">{repo.language ?? '其他'}</span>
             </div>
             <span className="min-w-0 truncate rounded-md border border-primary/15 bg-primary/5 px-2 py-0.5 text-xs text-on-surface-variant">
-              {localizedProjectName}
+              {localizedProjectPosition.text}
             </span>
           </div>
         </div>
@@ -1702,7 +1703,7 @@ function RepoDetailPanel(props: {
                 <p className="mt-1 text-[12px] leading-relaxed text-on-surface-variant">{knowledgeTitle}</p>
                 <p className="mt-2 rounded-lg border border-primary/15 bg-primary/5 px-2.5 py-1.5 text-[12px] leading-relaxed text-on-surface">
                   <span className="mr-1 font-semibold text-primary">中文名称/定位</span>
-                  {localizedProjectName}
+                  {localizedProjectPosition.text}
                 </p>
               </div>
               <div className="shrink-0 rounded-lg bg-primary/10 px-2 py-1 text-[11px] font-semibold text-primary">
