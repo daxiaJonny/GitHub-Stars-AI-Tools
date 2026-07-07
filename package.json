@@ -1,17 +1,49 @@
 {
   "name": "github-stars-ai-tools",
   "version": "0.1.0",
+  "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",
+  "homepage": "https://github.com/xingranya/GitHub-Stars-AI-Tools",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xingranya/GitHub-Stars-AI-Tools.git"
+  },
   "packageManager": "pnpm@11.8.0",
   "scripts": {
     "dev": "pnpm --filter @gsat/desktop dev",
     "build": "pnpm build:packages && pnpm --filter @gsat/desktop build",
     "build:packages": "tsc -b tsconfig.packages.json",
+    "verify:mvp": "node scripts/verify-mvp.mjs",
+    "verify:acceptance": "node scripts/verify-acceptance-matrix.mjs",
+    "verify:auth-data-flow": "pnpm --filter @gsat/desktop verify:auth-data-flow",
+    "verify:auth-flow": "pnpm --filter @gsat/desktop verify:auth-flow",
+    "verify:ai": "pnpm --filter @gsat/ai verify:provider",
+    "verify:ai-search-flow": "pnpm --filter @gsat/desktop verify:ai-search-flow",
+    "verify:backup-flow": "pnpm --filter @gsat/desktop verify:backup-flow",
+    "verify:branding": "node scripts/verify-branding.mjs",
+    "verify:commands": "pnpm --filter @gsat/desktop verify:commands",
+    "verify:dashboard-flow": "pnpm --filter @gsat/desktop verify:dashboard-flow",
+    "verify:desktop-runtime": "pnpm --filter @gsat/desktop verify:desktop-runtime",
+    "verify:github": "pnpm --filter @gsat/github verify:provider",
+    "verify:no-empty": "node scripts/verify-no-empty-implementations.mjs",
+    "verify:recommendation-flow": "pnpm --filter @gsat/desktop verify:recommendation-flow",
+    "verify:desktop-rust": "pnpm --filter @gsat/desktop verify:rust",
+    "verify:release": "pnpm verify:tauri-release-config && pnpm package:desktop",
+    "verify:search": "pnpm --filter @gsat/search verify:engine",
+    "verify:settings-flow": "pnpm --filter @gsat/desktop verify:settings-flow",
+    "verify:sync-resilience": "pnpm --filter @gsat/desktop verify:sync-resilience",
+    "verify:tauri-release-config": "node scripts/verify-tauri-release-config.mjs",
+    "verify:task-feedback": "pnpm --filter @gsat/desktop verify:task-feedback",
+    "verify:ui": "pnpm --filter @gsat/desktop verify:ui",
+    "verify:view-ai-ui": "pnpm --filter @gsat/desktop verify:view-ai-ui",
+    "verify:virtual-list": "pnpm --filter @gsat/desktop verify:virtual-list",
+    "verify:worker": "pnpm --filter @gsat/worker verify:pipeline",
+    "package:desktop": "pnpm build:packages && pnpm --filter @gsat/desktop tauri build",
     "tauri": "pnpm --filter @gsat/desktop tauri"
   },
   "devDependencies": {
-    "typescript": "latest"
+    "typescript": "6.0.3"
   },
   "engines": {
     "node": ">=24.0.0",
