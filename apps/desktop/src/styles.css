@@ -222,6 +222,37 @@ textarea {
   color: var(--color-on-primary-container);
 }
 
+.app-brand-icon {
+  border-radius: 28%;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.9),
+    0 10px 24px -18px rgb(25 27 35 / 0.55),
+    0 2px 8px -5px rgb(25 27 35 / 0.28);
+}
+
+/* 知识库页单独缩放，给左侧列表、README 和 AI 卡片三列同时腾出空间。 */
+.repositories-page-compact {
+  zoom: 0.94;
+}
+
+@media (min-width: 900px) {
+  .repositories-page-compact {
+    zoom: 0.9;
+  }
+}
+
+@media (min-width: 1280px) {
+  .repositories-page-compact {
+    zoom: 0.88;
+  }
+}
+
+@media (min-width: 1800px) {
+  .repositories-page-compact {
+    zoom: 0.86;
+  }
+}
+
 /* --- 滚动条 --- */
 ::-webkit-scrollbar {
   width: 8px;
@@ -433,6 +464,48 @@ textarea {
   border-left: 3px solid var(--color-primary);
   color: var(--color-on-surface-variant);
   padding-left: 0.9rem;
+}
+
+.readme-rendered-compact {
+  font-size: 13px;
+  line-height: 1.58;
+}
+
+.readme-rendered-compact h1,
+.readme-rendered-compact h2,
+.readme-rendered-compact h3,
+.readme-rendered-compact h4 {
+  margin: 1.05em 0 0.5em;
+}
+
+.readme-rendered-compact h1 {
+  font-size: 1.28rem;
+}
+
+.readme-rendered-compact h2 {
+  font-size: 1.08rem;
+}
+
+.readme-rendered-compact h3 {
+  font-size: 0.98rem;
+}
+
+.readme-rendered-compact p,
+.readme-rendered-compact ul,
+.readme-rendered-compact ol,
+.readme-rendered-compact blockquote,
+.readme-rendered-compact pre,
+.readme-rendered-compact table {
+  margin: 0.62rem 0;
+}
+
+.readme-rendered-compact pre {
+  padding: 0.7rem 0.8rem;
+}
+
+.readme-rendered-compact th,
+.readme-rendered-compact td {
+  padding: 0.35rem 0.5rem;
 }
 
 @keyframes taskProgressIndeterminate {

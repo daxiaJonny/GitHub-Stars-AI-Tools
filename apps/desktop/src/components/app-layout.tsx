@@ -66,7 +66,7 @@ export function AppLayout(props: AppLayoutProps) {
           <img
             src="/icon.png"
             alt="GitHub-Stars-AI-Tools"
-            className={`${isSidebarCollapsed ? 'h-10 w-10' : 'h-11 w-11'} shrink-0 rounded-[14px] border border-card-border bg-surface-container-lowest object-contain shadow-sm`}
+            className={`${isSidebarCollapsed ? 'h-10 w-10' : 'h-11 w-11'} app-brand-icon shrink-0 border border-card-border bg-surface-container-lowest object-contain`}
           />
           {!isSidebarCollapsed && (
           <div className="min-w-0 leading-tight">
@@ -184,7 +184,7 @@ export function AppLayout(props: AppLayoutProps) {
             <img
               src="/icon.png"
               alt="GitHub-Stars-AI-Tools"
-              className="h-9 w-9 shrink-0 rounded-[12px] border border-card-border bg-surface-container-lowest object-contain shadow-sm"
+              className="app-brand-icon h-9 w-9 shrink-0 border border-card-border bg-surface-container-lowest object-contain"
             />
             <div className="min-w-0">
               <h1 className="truncate text-[16px] font-semibold leading-5 text-on-surface" title="GitHub-Stars-AI-Tools">

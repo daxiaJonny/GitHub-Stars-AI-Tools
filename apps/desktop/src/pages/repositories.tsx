@@ -97,11 +97,11 @@ function repositoryMatchesLocalFilters(repo: RepositoryListItem, filters: { keyw
 type SortBy = 'recent' | 'stars' | 'name';
 type ViewMode = 'detail' | 'table';
 type BatchAiLimit = 'all' | '50' | '100' | '300';
-const REPOSITORY_CARD_HEIGHT = 108;
-const REPOSITORY_CARD_GAP = 6;
+const REPOSITORY_CARD_HEIGHT = 92;
+const REPOSITORY_CARD_GAP = 4;
 const REPOSITORY_ROW_HEIGHT = REPOSITORY_CARD_HEIGHT + REPOSITORY_CARD_GAP;
-const REPOSITORY_TABLE_ROW_HEIGHT = 64;
-const REPOSITORY_TABLE_HEADER_HEIGHT = 33;
+const REPOSITORY_TABLE_ROW_HEIGHT = 54;
+const REPOSITORY_TABLE_HEADER_HEIGHT = 30;
 const LIST_OVERSCAN = 8;
 const MAX_RECOMMENDATION_SELECTION = 8;
 
@@ -342,16 +342,16 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
 
   return (
     <div
-      className={`grid h-full min-w-0 flex-1 content-start grid-cols-1 gap-3 overflow-y-auto p-2.5 sm:p-3 md:min-h-0 md:content-stretch md:overflow-hidden md:p-3 xl:gap-4 xl:p-4 ${
+      className={`repositories-page-compact grid h-full min-w-0 flex-1 content-start grid-cols-1 gap-2 overflow-y-auto p-2 text-[13px] md:min-h-0 md:content-stretch md:overflow-hidden xl:gap-3 ${
         isRepositoryListCollapsed
-          ? 'md:grid-cols-[56px_minmax(0,1fr)]'
-          : 'md:grid-cols-[minmax(240px,27vw,300px)_minmax(0,1fr)] xl:grid-cols-[minmax(260px,23vw,320px)_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)]'
+          ? 'md:grid-cols-[48px_minmax(0,1fr)]'
+          : 'md:grid-cols-[clamp(230px,20vw,282px)_minmax(0,1fr)] xl:grid-cols-[clamp(244px,18vw,300px)_minmax(0,1fr)] 2xl:grid-cols-[304px_minmax(0,1fr)]'
       }`}
     >
       {/* 左侧仓库列表 */}
       <div
-        className={`min-w-0 overflow-hidden rounded-xl border border-card-border bg-surface-container-low shadow-sm md:h-full ${
-          isRepositoryListCollapsed ? 'hidden md:flex md:flex-col md:items-center md:justify-between md:p-2' : 'flex h-[min(42dvh,460px)] min-h-[300px] flex-col md:h-full'
+        className={`min-w-0 overflow-hidden rounded-lg border border-card-border bg-surface-container-low shadow-sm md:h-full ${
+          isRepositoryListCollapsed ? 'hidden md:flex md:flex-col md:items-center md:justify-between md:p-1.5' : 'flex h-[min(42dvh,420px)] min-h-[280px] flex-col md:h-full'
         }`}
       >
         {isRepositoryListCollapsed ? (
@@ -378,31 +378,22 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
         ) : (
           <>
         {/* 列表标题与控制区 */}
-        <div className="shrink-0 border-b border-outline-variant/20 bg-surface/50 p-3 backdrop-blur-md sm:p-4">
-          <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="shrink-0 border-b border-outline-variant/20 bg-surface/50 p-2.5 backdrop-blur-md">
+          <div className="mb-2 flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <h1 className="font-headline-md text-lg font-bold tracking-tight text-on-surface">知识库</h1>
+              <h1 className="text-base font-bold tracking-tight text-on-surface">知识库列表</h1>
               <p className="mt-0.5 truncate text-xs text-on-surface-variant">
                 {compactNumber(filteredRepos.length)} / {compactNumber(workspace.repositoryStats.total)} 个仓库
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => setIsRepositoryListCollapsed(true)}
-              className="hidden size-8 shrink-0 items-center justify-center rounded-lg border border-outline-variant/30 bg-surface text-on-surface-variant transition-colors hover:border-primary/40 hover:text-primary md:flex"
-              title="收起 Star 列表"
-              aria-label="收起 Star 列表"
-            >
-              <Icon name="left_panel_close" size={18} />
-            </button>
-            <div className="flex shrink-0 rounded-lg border border-outline-variant/30 bg-surface p-0.5">
+            <div className="flex shrink-0 rounded-md border border-outline-variant/30 bg-surface p-0.5">
               <button
                 type="button"
                 onClick={() => {
                   setViewMode('detail');
                   resetListScroll();
                 }}
-                className={`rounded-md px-2.5 py-1 text-[11px] transition-colors ${
+                className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
                   viewMode === 'detail' ? 'bg-primary text-white' : 'text-on-surface-variant hover:text-on-surface'
                 }`}
               >
@@ -414,7 +405,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
                   setViewMode('table');
                   resetListScroll();
                 }}
-                className={`rounded-md px-2.5 py-1 text-[11px] transition-colors ${
+                className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
                   viewMode === 'table' ? 'bg-primary text-white' : 'text-on-surface-variant hover:text-on-surface'
                 }`}
               >
@@ -422,11 +413,21 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
               </button>
             </div>
           </div>
-          <div className="mb-3 overflow-hidden rounded-lg border border-primary/25 bg-primary/5">
+          <button
+            type="button"
+            onClick={() => setIsRepositoryListCollapsed(true)}
+            className="mb-2 hidden w-full items-center justify-center gap-1.5 rounded-md border border-primary/25 bg-primary/10 px-2.5 py-1.5 text-xs font-semibold text-primary shadow-sm transition-colors hover:border-primary/45 hover:bg-primary/15 md:flex"
+            title="收起 Star 列表"
+            aria-label="收起 Star 列表"
+          >
+            <Icon name="left_panel_close" size={15} />
+            收起 Star 列表
+          </button>
+          <div className="mb-2 overflow-hidden rounded-md border border-primary/25 bg-primary/5">
             <button
               type="button"
               onClick={() => setIsBatchPanelOpen((current) => !current)}
-              className="flex w-full cursor-pointer items-center justify-between gap-3 px-3 py-2.5 text-left text-xs font-semibold text-primary transition-colors hover:bg-primary/10"
+              className="flex w-full cursor-pointer items-center justify-between gap-2 px-2.5 py-1.5 text-left text-xs font-semibold text-primary transition-colors hover:bg-primary/10"
               aria-expanded={isBatchPanelOpen}
             >
               <span className="inline-flex min-w-0 items-center gap-1.5">
@@ -586,33 +587,33 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
             </div>
             )}
           </div>
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-1.5">
             {/* 排序与搜索 */}
             <div className="flex gap-2">
               <div className="flex-1 relative">
-                <Icon name="filter_list" size={18} className="absolute left-2.5 top-2 text-on-surface-variant" />
+                <Icon name="filter_list" size={16} className="absolute left-2 top-1.5 text-on-surface-variant" />
                 <select
                   value={sortBy}
                   onChange={(e) => setSortBy(e.target.value as SortBy)}
-                  className="w-full pl-9 pr-8 py-1.5 text-sm bg-surface rounded-lg border border-outline-variant/40 focus:ring-1 focus:ring-primary focus:border-primary appearance-none text-on-surface shadow-sm cursor-pointer hover:border-outline-variant transition-colors"
+                  className="w-full rounded-md border border-outline-variant/40 bg-surface py-1 pl-8 pr-7 text-xs text-on-surface shadow-sm appearance-none transition-colors cursor-pointer hover:border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary"
                 >
                   <option value="recent">最近加星</option>
                   <option value="stars">最活跃</option>
                   <option value="name">按名称</option>
                 </select>
-                <Icon name="expand_more" size={18} className="absolute right-2.5 top-2 text-on-surface-variant pointer-events-none" />
+                <Icon name="expand_more" size={16} className="pointer-events-none absolute right-2 top-1.5 text-on-surface-variant" />
               </div>
             </div>
 
             {/* 搜索 */}
             <div className="relative">
-              <Icon name="search" size={18} className="absolute left-2.5 top-2 text-on-surface-variant" />
+              <Icon name="search" size={16} className="absolute left-2 top-1.5 text-on-surface-variant" />
               <input
                 type="text"
                 value={searchKeyword}
                 onChange={(e) => setSearchKeyword(e.target.value)}
                 placeholder="搜索仓库..."
-                className="w-full pl-9 pr-3 py-1.5 text-sm bg-surface rounded-lg border border-outline-variant/40 focus:ring-1 focus:ring-primary focus:border-primary text-on-surface placeholder:text-on-surface-variant shadow-sm"
+                className="w-full rounded-md border border-outline-variant/40 bg-surface py-1 pl-8 pr-2.5 text-xs text-on-surface shadow-sm placeholder:text-on-surface-variant focus:border-primary focus:ring-1 focus:ring-primary"
               />
             </div>
 
@@ -621,7 +622,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
               <select
                 value={selectedLanguage}
                 onChange={(e) => setSelectedLanguage(e.target.value)}
-                className="flex-1 py-1 px-2 bg-surface rounded border border-outline-variant/30 text-on-surface-variant hover:border-outline-variant cursor-pointer"
+                className="min-w-0 flex-1 cursor-pointer rounded border border-outline-variant/30 bg-surface px-2 py-1 text-on-surface-variant hover:border-outline-variant"
               >
                 <option value="">全部语言</option>
                 {workspace.repositoryLanguages.map((lang) => (
@@ -633,7 +634,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
               <select
                 value={selectedTagId}
                 onChange={(e) => setSelectedTagId(e.target.value)}
-                className="flex-1 py-1 px-2 bg-surface rounded border border-outline-variant/30 text-on-surface-variant hover:border-outline-variant cursor-pointer"
+                className="min-w-0 flex-1 cursor-pointer rounded border border-outline-variant/30 bg-surface px-2 py-1 text-on-surface-variant hover:border-outline-variant"
               >
                 <option value="">全部标签</option>
                 {workspace.tags.map((tag) => (
@@ -646,10 +647,10 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
           </div>
 
           {/* 快捷标签 */}
-          <div className="flex gap-2 mt-3 overflow-x-auto custom-scrollbar pb-1">
+          <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1 custom-scrollbar">
             <button
               onClick={() => setSelectedTagId('')}
-              className="px-2.5 py-1 rounded-full bg-primary-container text-white text-[11px] font-label-sm font-medium whitespace-nowrap cursor-pointer hover:brightness-110 transition-all"
+              className="whitespace-nowrap rounded-full bg-primary-container px-2 py-0.5 text-[11px] font-medium text-white transition-all cursor-pointer hover:brightness-110"
             >
               全部 ({workspace.repositoryStats.total})
             </button>
@@ -657,7 +658,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
               <button
                 key={tag.id}
                 onClick={() => setSelectedTagId(selectedTagId === tag.id ? '' : tag.id)}
-                className={`px-2.5 py-1 rounded-full glass-panel text-[11px] font-label-sm font-medium whitespace-nowrap cursor-pointer hover:bg-surface-variant/50 transition-all border border-outline-variant/30 ${
+                className={`whitespace-nowrap rounded-full border border-outline-variant/30 px-2 py-0.5 text-[11px] font-medium transition-all cursor-pointer hover:bg-surface-variant/50 ${
                   selectedTagId === tag.id ? 'bg-primary text-white' : 'text-on-surface'
                 }`}
               >
@@ -670,7 +671,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
         {/* 可滚动列表 */}
         <div
           ref={listViewportRef}
-          className="flex-1 overflow-y-auto custom-scrollbar p-2"
+          className="flex-1 overflow-y-auto p-1.5 custom-scrollbar"
           onScroll={(event) => setListScrollTop(event.currentTarget.scrollTop)}
         >
           {workspace.isLoadingRepositories && filteredRepos.length === 0 ? (
@@ -818,15 +819,15 @@ function RepoListItem(props: {
   return (
     <div
       onClick={onClick}
-      className={`h-full p-3 rounded-lg cursor-pointer transition-all relative overflow-hidden group ${
+      className={`group relative h-full cursor-pointer overflow-hidden rounded-md p-2 transition-all ${
         isSelected
-          ? 'bg-primary-fixed/30 border border-primary/30 shadow-sm'
+          ? 'border border-primary/30 bg-primary-fixed/30 shadow-sm'
           : 'bg-surface hover:bg-surface-variant/40 border border-transparent hover:border-outline-variant/20'
       }`}
     >
-      {isSelected && <div className="absolute left-0 top-0 bottom-0 w-1 bg-primary rounded-l-lg" />}
-      <div className={`flex justify-between items-start mb-1 ${isSelected ? 'pl-2' : ''}`}>
-        <div className="flex items-center gap-2 flex-1 min-w-0">
+      {isSelected && <div className="absolute bottom-0 left-0 top-0 w-0.5 rounded-l-md bg-primary" />}
+      <div className={`mb-1 flex items-start justify-between gap-2 ${isSelected ? 'pl-1.5' : ''}`}>
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
           <button
             type="button"
             onClick={(event) => {
@@ -837,7 +838,7 @@ function RepoListItem(props: {
               onToggleRecommendation();
             }}
             disabled={isRecommendationSelectionDisabled}
-            className={`flex size-5 shrink-0 items-center justify-center rounded border transition-colors ${
+            className={`flex size-4 shrink-0 items-center justify-center rounded border transition-colors ${
               isMarkedForRecommendation
                 ? 'border-primary bg-primary text-white'
                 : isRecommendationSelectionDisabled
@@ -852,35 +853,35 @@ function RepoListItem(props: {
                   : '作为相似发现参考'
             }
           >
-            <Icon name="check" size={14} />
+            <Icon name="check" size={12} />
           </button>
-          <Icon name="book" size={16} className={isSelected ? 'text-primary' : 'text-on-surface-variant'} />
-          <h3 className="font-medium text-sm text-on-surface truncate font-headline-lg" style={{ fontSize: '14px', lineHeight: '20px' }}>
+          <Icon name="book" size={14} className={isSelected ? 'text-primary' : 'text-on-surface-variant'} />
+          <h3 className="truncate text-[13px] font-semibold leading-5 text-on-surface">
             {repo.fullName}
           </h3>
         </div>
-        <span className="text-[10px] text-on-surface-variant flex items-center gap-0.5 bg-surface-variant/30 px-1.5 py-0.5 rounded shrink-0">
-          <Icon name="star" size={12} /> {compactNumber(repo.starsCount)}
+        <span className="flex shrink-0 items-center gap-0.5 rounded bg-surface-variant/30 px-1.5 py-0.5 text-[10px] text-on-surface-variant">
+          <Icon name="star" size={11} /> {compactNumber(repo.starsCount)}
         </span>
       </div>
-      <p className={`text-xs text-on-surface-variant line-clamp-1 mb-1 ${isSelected ? 'pl-2' : ''} leading-relaxed`}>
+      <p className={`mb-1 line-clamp-1 text-[11px] leading-4 text-on-surface-variant ${isSelected ? 'pl-1.5' : ''}`}>
         {repo.description ?? '暂无描述'}
       </p>
       <p
-        className={`mb-1 line-clamp-1 rounded px-1 py-0.5 text-[11px] ${
+        className={`mb-1 line-clamp-1 rounded px-1 py-0.5 text-[10px] leading-4 ${
           isSelected
-            ? 'bg-primary/5 pl-2 text-primary/80'
+            ? 'bg-primary/5 pl-1.5 text-primary/80'
             : 'bg-surface-container-low text-on-surface-variant'
         }`}
         title={`${localizedProjectPosition.isPending ? '待定位' : '中文定位'}：${localizedProjectPosition.text}`}
       >
         {localizedProjectPosition.isPending ? '待定位' : '中文定位'}：{localizedProjectPosition.text}
       </p>
-      <div className={`flex items-center justify-between ${isSelected ? 'pl-2' : ''}`}>
-        <div className="flex items-center gap-3">
+      <div className={`flex items-center justify-between ${isSelected ? 'pl-1.5' : ''}`}>
+        <div className="flex items-center gap-2">
           {repo.language && (
             <div className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getLanguageColor(repo.language) }} />
+              <span className="size-1.5 rounded-full" style={{ backgroundColor: getLanguageColor(repo.language) }} />
               <span className="text-[10px] text-on-surface font-label-sm">{repo.language}</span>
             </div>
           )}
@@ -1426,34 +1427,34 @@ function RepoDetailPanel(props: {
   }
 
   return (
-    <div className="flex min-w-0 flex-col overflow-visible rounded-xl border border-card-border glass-panel shadow-sm md:min-h-0 md:flex-1 md:overflow-hidden">
+    <div className="flex min-w-0 flex-col overflow-visible rounded-lg border border-card-border glass-panel shadow-sm md:min-h-0 md:flex-1 md:overflow-hidden">
       {/* 详情标题区 */}
-      <div className="flex shrink-0 flex-col gap-2 border-b border-card-border bg-surface/45 px-3 py-2 backdrop-blur-md md:flex-row md:items-center md:justify-between">
+      <div className="flex shrink-0 flex-col gap-2 border-b border-card-border bg-surface/45 px-2.5 py-2 backdrop-blur-md md:flex-row md:items-center md:justify-between">
         <div className="min-w-0 flex-1">
-          <div className="mb-1.5 flex min-w-0 items-center gap-2">
-            <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-outline-variant/30 bg-surface-container-lowest p-1">
-              <Icon name="book" size={16} className="text-on-surface-variant" />
+          <div className="mb-1 flex min-w-0 items-center gap-1.5">
+            <div className="flex size-6 shrink-0 items-center justify-center rounded-md border border-outline-variant/30 bg-surface-container-lowest p-1">
+              <Icon name="book" size={14} className="text-on-surface-variant" />
             </div>
-            <h2 className="min-w-0 flex-1 truncate font-headline-lg text-xl font-bold tracking-tight text-on-surface xl:text-2xl">
+            <h2 className="min-w-0 flex-1 truncate text-lg font-bold leading-6 tracking-normal text-on-surface xl:text-xl">
               {repo.fullName}
             </h2>
           </div>
-          <p className="line-clamp-1 max-w-4xl text-sm leading-relaxed text-on-surface-variant">{repo.description ?? '暂无描述'}</p>
+          <p className="line-clamp-1 max-w-4xl text-xs leading-5 text-on-surface-variant">{repo.description ?? '暂无描述'}</p>
           {/* 统计信息 */}
-          <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-on-surface-variant sm:gap-3">
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-on-surface-variant">
             <div className="flex items-center gap-1 text-xs text-on-surface-variant">
-              <Icon name="star" size={16} />
+              <Icon name="star" size={14} />
               <span className="font-medium">{compactNumber(repo.starsCount)}</span>
             </div>
             <div className="flex items-center gap-1 text-xs text-on-surface-variant">
-              <Icon name="fork_right" size={16} />
+              <Icon name="fork_right" size={14} />
               <span className="font-medium">{compactNumber(repo.forksCount)}</span>
             </div>
             <div className="flex items-center gap-1 text-xs text-on-surface-variant">
-              <span className="size-2.5 rounded-full" style={{ backgroundColor: getLanguageColor(repo.language) }} />
+              <span className="size-2 rounded-full" style={{ backgroundColor: getLanguageColor(repo.language) }} />
               <span className="font-medium">{repo.language ?? '其他'}</span>
             </div>
-            <span className="min-w-0 truncate rounded-md border border-primary/15 bg-primary/5 px-2 py-0.5 text-xs text-on-surface-variant">
+            <span className="min-w-0 truncate rounded border border-primary/15 bg-primary/5 px-1.5 py-0.5 text-[11px] text-on-surface-variant">
               {localizedProjectPosition.text}
             </span>
           </div>
@@ -1462,17 +1463,17 @@ function RepoDetailPanel(props: {
           href={repo.htmlUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-outline-variant/35 bg-surface-container-low px-3 py-1.5 text-sm font-medium text-on-surface transition-colors hover:border-primary/40 hover:text-primary"
+          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border border-outline-variant/35 bg-surface-container-low px-2.5 py-1.5 text-xs font-medium text-on-surface transition-colors hover:border-primary/40 hover:text-primary"
         >
-          <Icon name="open_in_new" size={18} /> 在浏览器打开
+          <Icon name="open_in_new" size={15} /> 在浏览器打开
         </a>
       </div>
 
       {/* 可滚动详情内容 */}
-      <div className="bg-surface-container-lowest/30 p-2.5 sm:p-3 md:min-h-0 md:flex-1 md:overflow-hidden md:p-3 xl:p-4">
-        <div className="grid min-w-0 grid-cols-1 gap-3 md:h-full md:min-h-0 md:grid-cols-[92px_minmax(0,1fr)_minmax(280px,320px)] md:overflow-hidden xl:grid-cols-[112px_minmax(0,1fr)_minmax(320px,360px)] xl:gap-4 2xl:grid-cols-[132px_minmax(0,1fr)_380px] 2xl:gap-5">
+      <div className="bg-surface-container-lowest/30 p-2 md:min-h-0 md:flex-1 md:overflow-hidden xl:p-2.5">
+        <div className="grid min-w-0 grid-cols-1 gap-2 md:h-full md:min-h-0 md:grid-cols-[minmax(0,1fr)_clamp(252px,28vw,330px)] md:overflow-hidden xl:grid-cols-[minmax(0,1fr)_clamp(270px,27vw,360px)] 2xl:grid-cols-[112px_minmax(0,1fr)_360px]">
         {/* README 目录 */}
-        <nav className="hidden min-h-0 min-w-0 overflow-y-auto border-r border-outline-variant/20 pr-2 custom-scrollbar md:block xl:pr-3">
+        <nav className="hidden min-h-0 min-w-0 overflow-y-auto border-r border-outline-variant/20 pr-2 custom-scrollbar 2xl:block">
           <p className="mb-2 text-xs font-semibold text-on-surface">目录</p>
           {readmeHeadings.length > 0 ? (
             <div className="space-y-1.5">
@@ -1498,19 +1499,19 @@ function RepoDetailPanel(props: {
         {/* README 正文 */}
         <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
           {/* README 内容 */}
-          <div className="flex min-h-[420px] min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-card-border bg-surface/60 p-2.5 shadow-sm backdrop-blur-sm sm:p-3 md:min-h-0">
-            <div className="mb-2.5 flex shrink-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-h-[380px] min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-card-border bg-surface/60 p-2 shadow-sm backdrop-blur-sm md:min-h-0">
+            <div className="mb-2 flex shrink-0 flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between">
               <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <Icon name="description" size={18} className="text-primary" />
-                  <h3 className="font-headline-md text-lg font-semibold text-on-surface xl:text-xl">README</h3>
+                <div className="flex items-center gap-1.5">
+                  <Icon name="description" size={16} className="text-primary" />
+                  <h3 className="text-base font-semibold leading-6 text-on-surface">README</h3>
                 </div>
-                <p className="mt-0.5 text-xs leading-relaxed text-on-surface-variant">
+                <p className="mt-0.5 text-[11px] leading-4 text-on-surface-variant">
                   原文用于核对项目安装、API、示例和限制；右侧 AI 解析会基于当前缓存生成。
                 </p>
               </div>
               {detail?.readme && (
-                <span className="shrink-0 rounded-lg border border-outline-variant/25 bg-surface-container-low px-2.5 py-1 text-[11px] text-on-surface-variant">
+                <span className="shrink-0 rounded-md border border-outline-variant/25 bg-surface-container-low px-2 py-0.5 text-[10px] text-on-surface-variant">
                   {detail.readme.sourcePath} · {formatDateTime(detail.readme.fetchedAt)}
                 </span>
               )}
@@ -1530,6 +1531,7 @@ function RepoDetailPanel(props: {
                   markdown={detail.readme.rawMarkdown}
                   repositoryFullName={repo.fullName}
                   sourcePath={detail.readme.sourcePath}
+                  className="readme-rendered readme-rendered-compact min-w-0 rounded-md border border-outline-variant/20 bg-surface-container-lowest/70 p-3 text-on-surface"
                 />
               </div>
             ) : (
@@ -1550,16 +1552,16 @@ function RepoDetailPanel(props: {
         </div>
 
         {/* 右侧 AI 洞察栏 */}
-        <div className="min-h-[520px] min-w-0 md:min-h-0">
-          <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-primary/20 bg-surface/80 p-3 shadow-sm backdrop-blur-sm sm:p-4">
-            <div className="mb-2 flex shrink-0 items-start justify-between gap-3">
+        <div className="min-h-[460px] min-w-0 md:min-h-0">
+          <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-primary/20 bg-surface/80 p-2.5 shadow-sm backdrop-blur-sm">
+            <div className="mb-2 flex shrink-0 items-start justify-between gap-2">
               <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <Icon name="auto_awesome" size={18} className="text-primary" />
-                  <h3 className="font-headline-md text-lg font-semibold text-primary">AI 项目知识卡</h3>
+                <div className="flex items-center gap-1.5">
+                  <Icon name="auto_awesome" size={16} className="text-primary" />
+                  <h3 className="text-base font-semibold leading-6 text-primary">AI 项目知识卡</h3>
                 </div>
-                <p className="mt-0.5 line-clamp-1 text-[12px] leading-relaxed text-on-surface-variant">{knowledgeTitle}</p>
-                <p className="mt-1.5 line-clamp-2 rounded-md border border-primary/15 bg-primary/5 px-2 py-1 text-[12px] leading-relaxed text-on-surface">
+                <p className="mt-0.5 line-clamp-1 text-[11px] leading-4 text-on-surface-variant">{knowledgeTitle}</p>
+                <p className="mt-1 line-clamp-2 rounded-md border border-primary/15 bg-primary/5 px-2 py-1 text-[11px] leading-4 text-on-surface">
                   <span className="mr-1 font-semibold text-primary">中文名称/定位</span>
                   {localizedProjectPosition.text}
                 </p>
