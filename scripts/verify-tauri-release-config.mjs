@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = resolve(new URL('..', import.meta.url).pathname);
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 const rootPackage = JSON.parse(read('package.json'));
 const desktopPackage = JSON.parse(read('apps/desktop/package.json'));
@@ -85,7 +86,7 @@ assert.doesNotMatch(
 console.log('Tauri release configuration verification passed.');
 
 function read(relativePath) {
-  return readFileSync(join(root, relativePath), 'utf8');
+  return readFileSync(join(root, relativePath), 'utf8').replace(/\r\n/g, '\n');
 }
 
 function escapeRegExp(value) {
