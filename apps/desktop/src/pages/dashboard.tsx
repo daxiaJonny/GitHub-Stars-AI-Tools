@@ -37,6 +37,7 @@ function getLanguageColor(language: string | null): string {
 type DashboardPageProps = {
   onOpenRepository: (query: string) => void;
   onSelectLanguage: (language: string) => void;
+  onOpenSettings: () => void;
 };
 
 const EMPTY_DASHBOARD_STATS: DashboardStats = {
@@ -44,6 +45,8 @@ const EMPTY_DASHBOARD_STATS: DashboardStats = {
   totalStars: 0,
   totalReadmes: 0,
   totalAiSummaries: 0,
+  totalAiInputTokens: 0,
+  totalAiOutputTokens: 0,
   totalTags: 0,
   totalNotes: 0,
   languageDistribution: [],
@@ -91,7 +94,7 @@ export function DashboardPage(props: DashboardPageProps) {
 
   if (!displayStats) {
     return (
-      <div className="p-margin-page flex items-center justify-center h-full">
+      <div className="flex h-full items-center justify-center p-4 sm:p-5 lg:p-margin-page">
         <Icon name="progress_activity" size={32} className="text-primary animate-spin" />
       </div>
     );
@@ -137,16 +140,16 @@ export function DashboardPage(props: DashboardPageProps) {
       };
 
   return (
-    <div className="p-margin-page flex flex-col gap-6 w-full max-w-7xl mx-auto overflow-y-auto h-full">
-      {/* Welcome Row */}
-      <div className="flex justify-between items-end mb-2">
+    <div className="mx-auto flex h-full w-full max-w-7xl flex-col gap-5 overflow-y-auto p-4 sm:gap-6 sm:p-5 lg:p-margin-page">
+      {/* 欢迎行 */}
+      <div className="mb-1 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:mb-2">
         <div>
           <h2 className="font-headline-lg text-headline-lg text-on-surface tracking-tight">概览</h2>
           <p className="font-body-md text-body-md text-on-surface-variant mt-1">
             欢迎回来，这是您的数据仓库实时情报。
           </p>
         </div>
-        <div className="text-right">
+        <div className="text-left sm:text-right">
           <p className="font-label-sm text-label-sm text-on-surface-variant">最后同步</p>
           <p className="font-body-md text-body-md text-on-surface font-medium">
             {displayStats.lastSyncAt ? formatDate(displayStats.lastSyncAt) : workspace.syncSummary ? '刚刚' : '尚未同步'}
@@ -159,7 +162,7 @@ export function DashboardPage(props: DashboardPageProps) {
         </div>
       )}
 
-      {/* Bento Grid: Stats Overview */}
+      {/* Bento 网格：统计概览 */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           icon="star"
@@ -174,8 +177,8 @@ export function DashboardPage(props: DashboardPageProps) {
           icon="auto_awesome"
           iconBgClass="bg-tertiary/10"
           iconColorClass="text-tertiary"
-          trend={<TrendBadge value={`${Math.round((displayStats.totalAiSummaries / Math.max(displayStats.totalRepos, 1)) * 100)}% 覆盖`} />}
-          label="AI 摘要数"
+          trend={<TrendBadge value={`输入 ${compactNumber(displayStats.totalAiInputTokens)} / 输出 ${compactNumber(displayStats.totalAiOutputTokens)}`} />}
+          label="AI 摘要与用量"
           value={compactNumber(displayStats.totalAiSummaries)}
           blobClass="bg-tertiary/5 group-hover:bg-tertiary/10"
         />
@@ -201,9 +204,9 @@ export function DashboardPage(props: DashboardPageProps) {
         />
       </div>
 
-      {/* Middle Row: Distribution & Sync Status */}
+      {/* 中部区域：分布与同步状态 */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Language Distribution */}
+        {/* 语言分布 */}
         <div className="glass-card rounded-xl p-6 lg:col-span-2 flex flex-col">
           <div className="flex justify-between items-center mb-6">
             <h3 className="font-headline-md text-headline-md text-on-surface text-lg">语言分布</h3>
@@ -247,7 +250,7 @@ export function DashboardPage(props: DashboardPageProps) {
           </div>
         </div>
 
-        {/* Sync Status Widget */}
+        {/* 同步状态组件 */}
         <div className="glass-card rounded-xl p-6 flex flex-col justify-between bg-gradient-to-br from-surface-bright to-surface-container-low">
           <div>
             <div className="flex justify-between items-center mb-4">
@@ -269,9 +272,9 @@ export function DashboardPage(props: DashboardPageProps) {
             </div>
           </div>
           <button
-            onClick={() => void workspace.handleSyncStars()}
-            disabled={workspace.isSyncingStars || !workspace.authState.user}
-            title={workspace.authState.user ? '同步 GitHub Stars' : '请先在设置中连接 GitHub 账号'}
+            onClick={() => (workspace.authState.user ? void workspace.handleSyncStars() : props.onOpenSettings())}
+            disabled={workspace.isSyncingStars}
+            title={workspace.authState.user ? '同步 GitHub Stars' : '前往设置连接 GitHub 账号'}
             className="interactive-btn w-full py-2 bg-surface-container-high hover:bg-surface-container-highest text-on-surface rounded-lg border border-card-border font-body-md text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-60"
           >
             <Icon name="sync" size={16} className={workspace.isSyncingStars ? 'animate-spin' : ''} />
@@ -280,10 +283,10 @@ export function DashboardPage(props: DashboardPageProps) {
         </div>
       </div>
 
-      {/* Bottom Row: Recent Stars & Quick Access */}
-        <div className="grid flex-1 grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Recent Stars */}
-          <div className="glass-card flex min-h-[320px] flex-col rounded-xl p-5 sm:p-6 lg:col-span-2 xl:min-h-[380px]">
+      {/* 底部区域：最近 Stars 与快捷入口 */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        {/* 最近 Stars */}
+        <div className="glass-card flex min-h-[320px] flex-col rounded-xl p-5 sm:p-6 lg:col-span-2 xl:min-h-[380px]">
           <div className="flex justify-between items-center mb-4">
             <h3 className="font-headline-md text-headline-md text-on-surface text-lg">最近收藏</h3>
           </div>
@@ -305,29 +308,44 @@ export function DashboardPage(props: DashboardPageProps) {
           </div>
         </div>
 
-        {/* Quick Access */}
-        <div className="glass-card flex min-h-[320px] flex-col rounded-xl p-5 sm:p-6 xl:min-h-[380px]">
-          <h3 className="font-headline-md text-headline-md text-on-surface text-lg mb-4">快捷访问</h3>
-          <p className="font-body-md text-sm text-on-surface-variant mb-6">高频访问的主题和技术栈</p>
-          <div className="grid grid-cols-2 gap-3 flex-1">
+        {/* 快捷入口 */}
+        <div className="glass-card flex min-h-[240px] flex-col rounded-xl p-5 sm:p-6">
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <h3 className="font-headline-md text-lg text-on-surface">快捷访问</h3>
+              <p className="mt-1 font-body-md text-sm text-on-surface-variant">按技术栈快速进入仓库列表</p>
+            </div>
+            <Icon name="bolt" size={20} className="mt-1 shrink-0 text-primary" />
+          </div>
+          <div className="grid flex-1 auto-rows-fr grid-cols-[repeat(auto-fit,minmax(132px,1fr))] gap-3">
             {displayStats.languageDistribution.length === 0 ? (
-              <div className="col-span-2 flex flex-col items-center justify-center text-on-surface-variant gap-2">
+              <div className="col-span-full flex min-h-[120px] flex-col items-center justify-center gap-2 text-on-surface-variant">
                 <Icon name="inbox" size={42} className="opacity-30" />
                 <p className="font-body-md text-sm">暂无快捷访问项</p>
               </div>
             ) : (
               displayStats.languageDistribution.slice(0, 4).map((item, idx) => {
                 const icons = ['code_blocks', 'palette', 'terminal', 'psychology'];
-                const colors = [getLanguageColor(item.language), '#38B2AC', '#DEA584', 'text-tertiary'];
+                const colors = [getLanguageColor(item.language), '#38B2AC', '#DEA584', '#8B5CF6'];
                 return (
                   <button
                     key={item.language}
                     type="button"
                     onClick={() => props.onSelectLanguage(item.language)}
-                    className="interactive-btn flex flex-col items-center justify-center gap-2 p-3 rounded-lg border border-card-border bg-surface/50 hover:bg-surface-container-low transition-colors"
+                    className="interactive-btn group flex min-h-[92px] flex-col items-start justify-between rounded-lg border border-card-border bg-surface/60 p-3 text-left transition-colors hover:border-primary/25 hover:bg-surface-container-low"
                   >
-                    <Icon name={icons[idx] ?? 'code_blocks'} size={28} style={{ color: colors[idx] }} />
-                    <span className="font-body-md text-sm font-medium text-on-surface">{item.language}</span>
+                    <span className="flex w-full items-start justify-between gap-2">
+                      <Icon name={icons[idx] ?? 'code_blocks'} size={24} style={{ color: colors[idx] }} />
+                      <span className="rounded-md bg-surface-container-high px-1.5 py-0.5 font-label-sm text-[10px] text-on-surface-variant">
+                        {item.percentage}%
+                      </span>
+                    </span>
+                    <span>
+                      <span className="block font-body-md text-sm font-semibold text-on-surface">{item.language}</span>
+                      <span className="mt-0.5 block font-label-sm text-[11px] text-on-surface-variant">
+                        {item.count} 个仓库
+                      </span>
+                    </span>
                   </button>
                 );
               })
@@ -357,9 +375,9 @@ function StatCard(props: {
       {props.blobClass && (
         <div className={`absolute -right-4 -top-4 w-24 h-24 rounded-full blur-xl transition-colors ${props.blobClass}`} />
       )}
-      <div className="flex justify-between items-start mb-4 relative z-10">
-        <div className={`p-2 rounded-lg ${props.iconBgClass} ${props.iconColorClass}`}>
-          <Icon name={props.icon} size={20} />
+      <div className="relative z-10 mb-4 flex items-start justify-between gap-3">
+        <div className={`grid size-11 shrink-0 place-items-center rounded-lg ${props.iconBgClass} ${props.iconColorClass}`}>
+          <Icon name={props.icon} size={22} className="block leading-none" />
         </div>
         {props.trend}
       </div>
@@ -395,19 +413,19 @@ function RecentRepoItem({
     <button
       type="button"
       onClick={() => onOpenRepository(repo.fullName)}
-      className="w-full p-4 rounded-lg border border-card-border bg-surface/40 hover:bg-surface/80 transition-colors flex justify-between items-start group text-left"
+      className="group flex w-full items-start justify-between gap-3 rounded-lg border border-card-border bg-surface/40 p-4 text-left transition-colors hover:bg-surface/80"
     >
-      <div>
+      <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 mb-1">
-          <Icon name="book" size={16} className="text-on-surface-variant" />
-          <h4 className="font-body-md text-body-md text-on-surface font-medium group-hover:text-primary transition-colors">
+          <Icon name="book" size={16} className="shrink-0 text-on-surface-variant" />
+          <h4 className="min-w-0 truncate font-body-md text-body-md text-on-surface font-medium transition-colors group-hover:text-primary" title={repo.fullName}>
             {repo.fullName}
           </h4>
         </div>
         <p className="font-body-md text-sm text-on-surface-variant line-clamp-1 mb-2">
           {repo.description ?? '暂无描述'}
         </p>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {repo.language && (
             <span className="px-2 py-0.5 rounded bg-surface-container-high text-on-surface-variant font-label-sm text-[11px] border border-card-border">
               {repo.language}
@@ -423,7 +441,7 @@ function RecentRepoItem({
           )}
         </div>
       </div>
-      <p className="font-label-sm text-label-sm text-on-surface-variant text-[11px] whitespace-nowrap">
+      <p className="shrink-0 whitespace-nowrap font-label-sm text-[11px] text-on-surface-variant">
         {formatRelativeTime(repo.starredAt)}
       </p>
     </button>
