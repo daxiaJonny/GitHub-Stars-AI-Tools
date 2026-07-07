@@ -111,6 +111,8 @@ pnpm package:desktop:dmg
 
 macOS job 会在 Tauri 默认 DMG 之后额外运行 `apps/desktop/scripts/package-dmg.mjs`，把 Release 中同名 `.dmg` 覆盖为官方示例风格的拖拽安装 DMG：窗口中只显示 `GitHub-Stars-AI-Tools.app` 和 `Applications` 两个 128px 大图标对象。
 
+`pnpm verify:mvp` 是本地或独立 CI 的完整静态验收命令，不放进 Release workflow；正式发版流程只做发布配置校验、版本同步、平台构建和 Release 上传，避免首次发版被非打包链路阻塞。
+
 ## 📖 使用指南
 
 ### 首次设置

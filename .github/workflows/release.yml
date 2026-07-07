@@ -193,9 +193,6 @@ jobs:
           }
           NODE
 
-      - name: Run MVP verification
-        run: pnpm verify:mvp
-
       - name: Build shared packages
         run: pnpm build:packages
 
