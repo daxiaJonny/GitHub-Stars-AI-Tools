@@ -92,6 +92,25 @@ pnpm package:desktop
 pnpm package:desktop:dmg
 ```
 
+本机普通安装包由 `pnpm package:desktop` 生成，macOS 大图标拖拽安装 DMG 由 `pnpm package:desktop:dmg` 生成，产物位于 `apps/desktop/dist-dmg/GitHub-Stars-AI-Tools_0.1.0.dmg`。
+
+### GitHub Actions 发版
+
+仓库内置 `Release Desktop Apps` 工作流。首次或后续发版时，在 GitHub 网页端进入 **Actions → Release Desktop Apps → Run workflow**，填写：
+
+- `version`：版本号，例如 `0.1.0` 或 `v0.1.0`
+- `changelog`：更新日志，会写入 GitHub Release
+- `release_draft`：是否先创建草稿 Release
+- `prerelease`：是否标记为预发布版本
+
+工作流会在 macOS Apple Silicon、macOS Intel、Windows、Linux runner 上分别构建安装包：
+
+- macOS：Apple Silicon 与 Intel 两套 `.dmg`
+- Windows：`.msi` 或 `setup.exe`
+- Linux：`.deb`、`.rpm` 或 `.AppImage`
+
+macOS job 会在 Tauri 默认 DMG 之后额外运行 `apps/desktop/scripts/package-dmg.mjs`，把 Release 中同名 `.dmg` 覆盖为官方示例风格的拖拽安装 DMG：窗口中只显示 `GitHub-Stars-AI-Tools.app` 和 `Applications` 两个 128px 大图标对象。
+
 ## 📖 使用指南
 
 ### 首次设置
