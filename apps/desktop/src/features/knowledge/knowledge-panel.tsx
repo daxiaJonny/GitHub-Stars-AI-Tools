@@ -1,5 +1,6 @@
 import { FormEvent, type CSSProperties } from 'react';
 import { BookOpen, ExternalLink, Plus, Save, Sparkles } from 'lucide-react';
+import { ReadmeRenderer } from '@/components/readme-renderer';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -7,7 +8,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
-import { formatDate } from '@/lib/format';
+import { compactNumber, formatDate } from '@/lib/format';
 import type { ReadingStatus, RepositoryAnnotationView, RepositoryDetailView, RepositoryListItem, TagItem } from '@/types';
 
 const readingStatusLabels: Record<ReadingStatus, string> = {
@@ -72,7 +73,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
             </a>
           </Button>
         </div>
-        {props.annotationMessage ? <p className="mt-3 rounded-lg bg-primary/10 px-3 py-2 text-sm text-primary-foreground">{props.annotationMessage}</p> : null}
+        {props.annotationMessage ? <p className="mt-3 rounded-lg bg-primary/10 px-3 py-2 text-sm text-primary">{props.annotationMessage}</p> : null}
         {props.isLoadingAnnotation || props.isLoadingRepositoryDetail ? (
           <p className="mt-3 text-xs text-muted-foreground">正在读取本地知识层…</p>
         ) : null}
@@ -80,7 +81,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="grid gap-6 p-5">
-          <RepositoryKnowledgeSummary detail={props.repositoryDetail} />
+          <RepositoryKnowledgeSummary detail={props.repositoryDetail} repositoryFullName={props.repository.fullName} />
 
           <div className="grid gap-2.5">
             <label className="text-xs font-semibold text-foreground">阅读状态</label>
@@ -176,7 +177,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   );
 }
 
-function RepositoryKnowledgeSummary(props: { detail: RepositoryDetailView | null }) {
+function RepositoryKnowledgeSummary(props: { detail: RepositoryDetailView | null; repositoryFullName: string }) {
   const aiDocument = props.detail?.aiDocument ?? null;
   const readme = props.detail?.readme ?? null;
 
@@ -209,7 +210,12 @@ function RepositoryKnowledgeSummary(props: { detail: RepositoryDetailView | null
               </div>
             </div>
           ) : null}
-          <p className="text-xs text-muted-foreground">生成于 {formatDate(aiDocument.generatedAt)}</p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span>生成于 {formatDate(aiDocument.generatedAt)}</span>
+            <span>
+              估算用量：输入 {compactNumber(aiDocument.inputTokens)} tokens · 输出 {compactNumber(aiDocument.outputTokens)} tokens
+            </span>
+          </div>
         </>
       ) : (
         <p className="text-sm text-muted-foreground leading-relaxed">还没有中文摘要。生成后会显示用途说明、关键词和推荐标签。</p>
@@ -223,7 +229,12 @@ function RepositoryKnowledgeSummary(props: { detail: RepositoryDetailView | null
         {readme ? (
           <div className="mt-3 grid gap-3">
             <p className="text-xs text-muted-foreground">来源：{readme.sourcePath} · 抓取于 {formatDate(readme.fetchedAt)}</p>
-            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-muted/50 p-4 text-xs leading-relaxed shadow-inner">{readme.rawMarkdown.slice(0, 8000)}</pre>
+            <ReadmeRenderer
+              markdown={readme.rawMarkdown}
+              repositoryFullName={props.repositoryFullName}
+              sourcePath={readme.sourcePath}
+              className="readme-rendered min-w-0 rounded-lg border bg-muted/40 p-4 text-sm leading-relaxed shadow-inner"
+            />
           </div>
         ) : (
           <p className="mt-3 text-sm text-muted-foreground leading-relaxed">还没有缓存 README。请在左侧面板执行"抓取 README"。</p>

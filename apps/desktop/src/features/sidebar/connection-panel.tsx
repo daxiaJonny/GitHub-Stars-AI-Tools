@@ -52,12 +52,16 @@ export function ConnectionPanel(props: ConnectionPanelProps) {
                 value={props.token}
                 type="password"
                 autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                inputMode="text"
                 placeholder="粘贴 GitHub Token"
                 onChange={(event) => props.onSetToken(event.target.value)}
               />
             </div>
           </label>
-          <p className="text-xs leading-relaxed text-muted-foreground">Token 仅用于本地验证和 GitHub API 请求，保存在系统 Keychain。</p>
+          <p className="text-xs leading-relaxed text-muted-foreground">Token 仅用于本地验证和 GitHub API 请求，保存在系统凭据管理器。</p>
           <Button className="h-10 rounded-lg shadow-sm" disabled={props.isSavingToken || props.token.trim().length === 0} type="submit">
             {props.isSavingToken ? '验证中…' : '连接账号'}
           </Button>
