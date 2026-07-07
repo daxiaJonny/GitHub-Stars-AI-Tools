@@ -50,38 +50,45 @@ export function SettingsPage() {
   const settingsHook = useAppSettings();
   const [activeTab, setActiveTab] = useState<SettingsTab>('github');
 
-  const tabs: { key: SettingsTab; icon: string; label: string }[] = [
-    { key: 'github', icon: 'code', label: 'GitHub 账号' },
-    { key: 'ai', icon: 'smart_toy', label: 'AI 引擎配置' },
-    { key: 'general', icon: 'tune', label: '通用设置' },
-    { key: 'backup', icon: 'backup', label: '数据备份' },
+  const tabs: { key: SettingsTab; icon: string; label: string; shortLabel: string }[] = [
+    { key: 'github', icon: 'code', label: 'GitHub 账号', shortLabel: '账号' },
+    { key: 'ai', icon: 'smart_toy', label: 'AI 引擎配置', shortLabel: '引擎' },
+    { key: 'general', icon: 'tune', label: '通用设置', shortLabel: '通用' },
+    { key: 'backup', icon: 'backup', label: '数据备份', shortLabel: '备份' },
   ];
+  const activeTabLabel = tabs.find((tab) => tab.key === activeTab)?.label ?? '设置';
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-5 overflow-y-auto p-4 sm:p-5 lg:flex-row lg:gap-8 lg:p-margin-page">
-      {/* 设置侧栏 */}
-      <aside className="w-full flex-shrink-0 lg:w-64">
-        <h2 className="font-headline-md text-headline-md text-on-surface mb-6">设置</h2>
-        <nav className="flex gap-2 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto p-4 sm:p-5 lg:p-margin-page">
+      <header className="mx-auto mb-6 flex w-full max-w-5xl flex-col items-center gap-4 text-center">
+        <div>
+          <h2 className="font-headline-md text-headline-md text-on-surface">设置</h2>
+          <p className="mt-1 font-body-md text-sm text-on-surface-variant">{activeTabLabel}</p>
+        </div>
+        <nav className="grid w-full max-w-[520px] grid-cols-4 gap-2 rounded-xl border border-card-border bg-surface/55 p-2 shadow-sm backdrop-blur-md">
           {tabs.map((tab) => (
             <button
               key={tab.key}
+              type="button"
               onClick={() => setActiveTab(tab.key)}
-              className={`flex w-max shrink-0 items-center gap-3 rounded-lg px-4 py-3 text-left font-medium transition-colors lg:w-full ${
+              title={tab.label}
+              aria-label={tab.label}
+              aria-current={activeTab === tab.key ? 'page' : undefined}
+              className={`flex min-w-0 flex-col items-center justify-center gap-1.5 rounded-lg px-2 py-2.5 text-center transition-all ${
                 activeTab === tab.key
-                  ? 'bg-surface-container text-primary'
+                  ? 'bg-primary text-white shadow-sm'
                   : 'text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface'
               }`}
             >
-              <Icon name={tab.icon} size={20} />
-              <span className="font-body-md text-body-md">{tab.label}</span>
+              <Icon name={tab.icon} size={19} />
+              <span className="truncate font-label-sm text-[11px]">{tab.shortLabel}</span>
             </button>
           ))}
         </nav>
-      </aside>
+      </header>
 
       {/* 设置内容 */}
-      <div className="min-w-0 flex-1 space-y-6 lg:max-w-5xl">
+      <div className="mx-auto w-full max-w-5xl min-w-0 flex-1 space-y-6">
         {settingsHook.settingsError && (
           <div className="rounded-lg border border-error/20 bg-error/10 px-4 py-3 font-body-md text-sm text-error">
             {settingsHook.settingsError}
@@ -288,6 +295,7 @@ function GitHubSettings({
         isSyncingStars={workspace.isSyncingStars}
         isFetchingReadmes={workspace.isFetchingReadmes}
         isBatchGeneratingAiDocuments={workspace.isBatchGeneratingAiDocuments}
+        isGeneratingTagNetwork={workspace.isGeneratingTagNetwork}
         runtimeCheck={runtimeCheck}
         runtimeCheckCompletedAt={runtimeCheckCompletedAt}
         lastSelfCheckRecord={settingsHook.settings.runtime.lastSelfCheckRecord}
@@ -310,6 +318,14 @@ function GitHubSettings({
               autoGenerateAi: true,
               onlyMissing: true,
             });
+          })().catch(() => undefined);
+        }}
+        onGenerateTagNetwork={() => {
+          void (async () => {
+            if (shouldFlushAiApiKey(settingsHook.settings.ai)) {
+              await settingsHook.flushAIKey(settingsHook.settings.ai.apiKey);
+            }
+            await workspace.handleGenerateAiTagNetwork(settingsHook.settings.ai);
           })().catch(() => undefined);
         }}
         onOpenAiSettings={onOpenAiSettings}
@@ -403,7 +419,7 @@ function GitHubSettings({
                 </span>
               </h4>
               <p className="font-body-md text-on-surface-variant mt-1">
-                手动抓取会批量缓存 README；生成单个 AI 摘要时也会自动补抓当前仓库 README。
+                README 是中文定位、AI 摘要和标签网络的上下文；只抓取 README 不会直接生成中文用途说明。
               </p>
             </div>
           </div>
@@ -463,7 +479,28 @@ function GitHubSettings({
                 ? 'AI 分析中...'
                 : settingsHook.settings.ai.enableAutoSummary
                   ? '抓取 README 并分析'
-                  : '抓取 README'}
+	                  : '抓取 README'}
+	          </button>
+          <button
+            onClick={() => {
+              void (async () => {
+                if (shouldFlushAiApiKey(settingsHook.settings.ai)) {
+                  await settingsHook.flushAIKey(settingsHook.settings.ai.apiKey);
+                }
+                await workspace.handleGenerateAiTagNetwork(settingsHook.settings.ai);
+              })().catch(() => undefined);
+            }}
+            disabled={
+              workspace.isGeneratingTagNetwork ||
+              workspace.isBatchGeneratingAiDocuments ||
+              !isConnected ||
+              Boolean(getAiConfigMessage(settingsHook.settings.ai))
+            }
+            title={getAiConfigMessage(settingsHook.settings.ai) ?? '根据已同步仓库、README 摘要和 Topics 生成标签网络'}
+            className="px-4 py-2 bg-primary/10 hover:bg-primary/15 text-primary rounded-lg border border-primary/20 font-body-md flex items-center gap-2 transition-all disabled:opacity-60"
+          >
+            <Icon name="hub" size={18} className={workspace.isGeneratingTagNetwork ? 'animate-spin' : ''} />
+            {workspace.isGeneratingTagNetwork ? '生成中...' : '生成标签网络'}
           </button>
         </div>
         {autoSummaryConfigMessage && (
@@ -497,6 +534,7 @@ function RuntimeReadinessPanel(props: {
   isSyncingStars: boolean;
   isFetchingReadmes: boolean;
   isBatchGeneratingAiDocuments: boolean;
+  isGeneratingTagNetwork: boolean;
   runtimeCheck: RuntimeReadinessCheckResult | null;
   runtimeCheckCompletedAt: string | null;
   lastSelfCheckRecord: RuntimeSelfCheckRecord | null;
@@ -504,12 +542,14 @@ function RuntimeReadinessPanel(props: {
   onSyncStars: () => void;
   onFetchReadmes: () => void;
   onGenerateAi: () => void;
+  onGenerateTagNetwork: () => void;
   onOpenAiSettings: () => void;
   onCheckRuntime: () => void;
 }) {
   const totalRepos = props.stats?.totalRepos ?? 0;
   const totalReadmes = props.stats?.totalReadmes ?? 0;
   const totalAiSummaries = props.stats?.totalAiSummaries ?? 0;
+  const totalTags = props.stats?.totalTags ?? 0;
   const totalAiInputTokens = props.stats?.totalAiInputTokens ?? 0;
   const totalAiOutputTokens = props.stats?.totalAiOutputTokens ?? 0;
   const hasRepos = totalRepos > 0;
@@ -519,6 +559,7 @@ function RuntimeReadinessPanel(props: {
   );
   const aiReady = !props.aiConfigMessage;
   const isReadmeBusy = props.isFetchingReadmes || props.isBatchGeneratingAiDocuments;
+  const isAiWorkflowBusy = isReadmeBusy || props.isGeneratingTagNetwork;
   const runtimeCheckSummary = props.runtimeCheck ? summarizeRuntimeCheck(props.runtimeCheck) : null;
   const selfCheckRecord = runtimeCheckSummary
     ? {
@@ -548,10 +589,10 @@ function RuntimeReadinessPanel(props: {
       done: totalReadmes > 0,
       detail: totalReadmes > 0
         ? `已缓存 ${totalReadmes} / ${Math.max(totalRepos, totalReadmes)} 个 README${readmeNeedsTopUp ? '，可继续补抓缺失项' : ''}`
-        : '同步后抓取 README，作为 AI 分析上下文',
+        : '同步后先抓取 README，作为中文定位和标签网络的上下文',
       actionLabel: props.isFetchingReadmes ? '抓取中...' : totalReadmes > 0 ? '补抓缺失 README' : '抓取 README',
       onAction: readmeNeedsTopUp ? props.onFetchReadmes : null,
-      actionDisabled: isReadmeBusy,
+      actionDisabled: isAiWorkflowBusy,
     },
     {
       title: 'AI 引擎',
@@ -567,7 +608,19 @@ function RuntimeReadinessPanel(props: {
       onAction: aiReady
         ? aiNeedsTopUp ? props.onGenerateAi : null
         : props.onOpenAiSettings,
-      actionDisabled: isReadmeBusy,
+      actionDisabled: isAiWorkflowBusy,
+    },
+    {
+      title: '标签网络',
+      done: totalTags > 0,
+      detail: totalTags > 0
+        ? `已生成 ${totalTags} 个标签，可在标签网络页查看关联`
+        : totalAiSummaries > 0
+          ? '已有中文摘要后，可生成标签网络并联动中文定位'
+          : '先生成 AI 摘要，再用标签网络聚类项目用途',
+      actionLabel: props.isGeneratingTagNetwork ? '生成中...' : totalTags > 0 ? '重新生成标签网络' : '生成标签网络',
+      onAction: aiReady && totalAiSummaries > 0 ? props.onGenerateTagNetwork : aiReady ? null : props.onOpenAiSettings,
+      actionDisabled: isAiWorkflowBusy,
     },
   ];
 
@@ -1002,7 +1055,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
             <h4 className="font-body-lg font-medium text-on-surface">自动生成 AI 摘要</h4>
             <p className="font-body-md text-on-surface-variant mt-1">
               {needsRemoteConfig
-                ? '同步 README 后自动调用 AI 引擎生成中文摘要和关键词。'
+                ? '同步 README 后自动调用 AI 引擎生成中文定位、摘要、关键词和建议标签。'
                 : '选择 OpenAI、OpenAI 兼容接口或 Anthropic 后可启用自动摘要。'}
             </p>
           </div>
