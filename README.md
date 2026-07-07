@@ -8,6 +8,7 @@
     <a href="https://react.dev/"><img alt="React" src="https://img.shields.io/badge/React-19-087EA4?style=for-the-badge&logo=react&logoColor=white" /></a>
     <a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/Rust-backend-B7410E?style=for-the-badge&logo=rust&logoColor=white" /></a>
     <a href="https://www.sqlite.org/"><img alt="SQLite" src="https://img.shields.io/badge/SQLite-local-003B57?style=for-the-badge&logo=sqlite&logoColor=white" /></a>
+    <a href="https://linux.do/"><img alt="LinuxDo 社区" src="https://img.shields.io/badge/LinuxDo-社区-2563EB?style=for-the-badge" /></a>
   </p>
 </div>
 
@@ -296,3 +297,4 @@ cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
 - [react-markdown](https://github.com/remarkjs/react-markdown)、[remark-gfm](https://github.com/remarkjs/remark-gfm)、[rehype-sanitize](https://github.com/rehypejs/rehype-sanitize) - README Markdown 渲染与安全处理
 - [Chart.js](https://www.chartjs.org/) / [react-chartjs-2](https://react-chartjs-2.js.org/) - 数据图表
 - [pnpm](https://pnpm.io/) - Monorepo 包管理
+- [LinuxDo 社区](https://linux.do/) - 感谢社区开源推广平台
