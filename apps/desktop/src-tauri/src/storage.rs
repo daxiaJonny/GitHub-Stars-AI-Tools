@@ -1,21 +1,155 @@
 use crate::auth::GitHubUser;
-use crate::github::{ReadmeDocument, StarredRepository};
+use crate::github::{GitHubRepositoryRecommendation, ReadmeDocument, StarredRepository};
+use rusqlite::{types::ValueRef, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 const INITIAL_SCHEMA_SQL: &str =
     include_str!("../../../../packages/storage/migrations/001_initial_schema.sql");
+const LEGACY_SQLITE_DATABASE_FILE_NAMES: &[&str] = &["stars-ai-tools.sqlite3"];
+const REQUIRED_SCHEMA_COLUMNS: &[(&str, &[&str])] = &[
+    ("schema_migrations", &["version", "name", "applied_at"]),
+    (
+        "github_accounts",
+        &[
+            "id",
+            "login",
+            "avatar_url",
+            "token_ref",
+            "connection_status",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "repositories",
+        &[
+            "id",
+            "account_id",
+            "owner",
+            "name",
+            "full_name",
+            "description",
+            "language",
+            "topics_json",
+            "html_url",
+            "stars_count",
+            "forks_count",
+            "starred_at",
+            "pushed_at",
+            "sync_status",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "repo_readmes",
+        &[
+            "repo_id",
+            "raw_markdown",
+            "content_hash",
+            "source_path",
+            "fetched_at",
+        ],
+    ),
+    (
+        "repo_ai_documents",
+        &[
+            "repo_id",
+            "summary_zh",
+            "readme_zh",
+            "keywords_json",
+            "suggested_tags_json",
+            "model",
+            "prompt_version",
+            "source_hash",
+            "input_tokens",
+            "output_tokens",
+            "generated_at",
+        ],
+    ),
+    (
+        "repo_embeddings",
+        &[
+            "repo_id",
+            "source_kind",
+            "source_hash",
+            "model",
+            "model_version",
+            "dimensions",
+            "vector_json",
+            "generated_at",
+        ],
+    ),
+    (
+        "tags",
+        &[
+            "id",
+            "account_id",
+            "name",
+            "color",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    ("repo_tags", &["repo_id", "tag_id", "created_at"]),
+    (
+        "annotations",
+        &[
+            "repo_id",
+            "account_id",
+            "note_md",
+            "rating",
+            "read_status",
+            "updated_at",
+        ],
+    ),
+    (
+        "jobs",
+        &[
+            "id",
+            "account_id",
+            "type",
+            "payload_json",
+            "status",
+            "idempotency_key",
+            "retry_count",
+            "last_error",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "github_recommendation_candidates",
+        &[
+            "id",
+            "account_id",
+            "full_name",
+            "description",
+            "language",
+            "topics_json",
+            "html_url",
+            "stars_count",
+            "forks_count",
+            "pushed_at",
+            "status",
+            "rationale_zh",
+            "queries_json",
+            "last_seen_at",
+            "updated_at",
+        ],
+    ),
+];
 
 pub struct AppStorage {
     database_path: PathBuf,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize)]
 pub struct StoredRepository {
     pub id: String,
     pub full_name: String,
@@ -45,12 +179,28 @@ pub struct AiTagAssignment {
     pub repository_full_names: Vec<String>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubRecommendationCandidateState {
+    pub id: String,
+    pub full_name: String,
+    pub status: String,
+}
+
+pub struct GithubRecommendationCandidateList {
+    pub rationale_zh: String,
+    pub queries: Vec<String>,
+    pub repositories: Vec<GitHubRepositoryRecommendation>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyAiTagAssignmentsSummary {
     pub tag_count: usize,
     pub linked_count: usize,
     pub skipped_repository_count: usize,
+    pub failed_batch_count: usize,
+    pub failures: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,6 +248,29 @@ struct RepositoryFullNameIdRow {
     id: String,
 }
 
+#[derive(Deserialize)]
+struct RecommendationCandidateRow {
+    id: String,
+    full_name: String,
+    status: String,
+}
+
+#[derive(Deserialize)]
+struct RecommendationCandidateDetailRow {
+    id: String,
+    full_name: String,
+    description: Option<String>,
+    language: Option<String>,
+    topics_json: String,
+    html_url: String,
+    stars_count: u64,
+    forks_count: u64,
+    pushed_at: Option<String>,
+    status: String,
+    rationale_zh: Option<String>,
+    queries_json: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryListPage {
@@ -134,6 +307,8 @@ pub struct RepositoryListItem {
     pub ai_summary: Option<String>,
     pub ai_keywords: Vec<String>,
     pub suggested_tags: Vec<String>,
+    pub tag_ids: Vec<String>,
+    pub tag_names: Vec<String>,
     pub ai_generated_at: Option<String>,
 }
 
@@ -187,6 +362,8 @@ pub struct RepositoryAiDocumentView {
     pub model: String,
     pub prompt_version: String,
     pub source_hash: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
     pub generated_at: String,
 }
 
@@ -216,6 +393,8 @@ struct RepositoryListRow {
     ai_summary: Option<String>,
     ai_keywords_json: Option<String>,
     suggested_tags_json: Option<String>,
+    tag_ids_json: String,
+    tag_names_json: String,
     ai_generated_at: Option<String>,
 }
 
@@ -259,6 +438,8 @@ struct RepositoryAiDocumentRow {
     model: String,
     prompt_version: String,
     source_hash: String,
+    input_tokens: u64,
+    output_tokens: u64,
     generated_at: String,
 }
 
@@ -307,6 +488,19 @@ struct SearchRepositoryRow {
 
 impl AppStorage {
     pub fn from_app_handle(app_handle: &tauri::AppHandle) -> Result<Self, String> {
+        let database_path = Self::database_path_from_app_handle(app_handle)?;
+        let storage = Self { database_path };
+        storage.migrate()?;
+
+        Ok(storage)
+    }
+
+    pub fn clear_local_database(app_handle: &tauri::AppHandle) -> Result<(), String> {
+        let database_path = Self::database_path_from_app_handle(app_handle)?;
+        remove_sqlite_database_files(&database_path)
+    }
+
+    fn database_path_from_app_handle(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
         let data_dir = app_handle
             .path()
             .app_data_dir()
@@ -314,30 +508,22 @@ impl AppStorage {
 
         std::fs::create_dir_all(&data_dir)
             .map_err(|error| format!("本地数据目录创建失败：{error}"))?;
+        remove_legacy_sqlite_database_files(&data_dir)?;
 
-        let database_path = data_dir.join("gsat.sqlite3");
-        let legacy_database_path = data_dir.join("stars-ai-tools.sqlite3");
-        if !database_path.exists() && legacy_database_path.exists() {
-            std::fs::copy(&legacy_database_path, &database_path)
-                .map_err(|error| format!("本地旧数据库迁移失败：{error}"))?;
-        }
-
-        let storage = Self { database_path };
-        storage.migrate()?;
-
-        Ok(storage)
+        Ok(data_dir.join("gsat.sqlite3"))
     }
 
     pub fn upsert_github_account(&self, user: &GitHubUser) -> Result<(), String> {
         let sql = format!(
             r#"
 PRAGMA foreign_keys = ON;
-INSERT INTO github_accounts (id, login, avatar_url, token_ref, updated_at)
-VALUES ({id}, {login}, {avatar_url}, 'macos-keychain:github-pat', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+INSERT INTO github_accounts (id, login, avatar_url, token_ref, connection_status, updated_at)
+VALUES ({id}, {login}, {avatar_url}, 'macos-keychain:github-pat', 'connected', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ON CONFLICT(id) DO UPDATE SET
   login = excluded.login,
   avatar_url = excluded.avatar_url,
   token_ref = excluded.token_ref,
+  connection_status = 'connected',
   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
 "#,
             id = sql_text(&user.id.to_string()),
@@ -348,11 +534,23 @@ ON CONFLICT(id) DO UPDATE SET
         self.execute_sql(&sql)
     }
 
+    pub fn mark_github_accounts_disconnected(&self) -> Result<(), String> {
+        self.execute_sql(
+            r#"
+UPDATE github_accounts
+SET connection_status = 'disconnected',
+    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE connection_status = 'connected';
+"#,
+        )
+    }
+
     pub fn get_recent_github_account(&self) -> Result<Option<GitHubUser>, String> {
         let sql = r#"
 .mode json
 SELECT id, login, avatar_url
 FROM github_accounts
+WHERE connection_status = 'connected'
 ORDER BY updated_at DESC
 LIMIT 1;
 "#;
@@ -409,6 +607,7 @@ ON CONFLICT(id) DO UPDATE SET
   account_id = excluded.account_id,
   owner = excluded.owner,
   name = excluded.name,
+  full_name = excluded.full_name,
   description = excluded.description,
   language = excluded.language,
   topics_json = excluded.topics_json,
@@ -452,7 +651,7 @@ VALUES ({id}, {account_id});
             .unwrap_or_default();
         let sql = format!(
             r#"
-.mode tabs
+.mode json
 SELECT id, full_name
 FROM repositories
 WHERE sync_status = 'active'
@@ -461,26 +660,7 @@ ORDER BY starred_at DESC;
 "#,
             account_clause = account_clause,
         );
-        let output = self.query_sql(&sql)?;
-
-        output
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                let mut fields = line.split('\t');
-                let id = fields
-                    .next()
-                    .ok_or_else(|| "SQLite 仓库查询结果缺少 id".to_owned())?;
-                let full_name = fields
-                    .next()
-                    .ok_or_else(|| "SQLite 仓库查询结果缺少 full_name".to_owned())?;
-
-                Ok(StoredRepository {
-                    id: id.to_owned(),
-                    full_name: full_name.to_owned(),
-                })
-            })
-            .collect()
+        parse_json_rows::<StoredRepository>(&self.query_sql(&sql)?, "SQLite 活跃仓库列表解析失败")
     }
 
     pub fn get_readme_hash(&self, repo_id: &str) -> Result<Option<String>, String> {
@@ -569,6 +749,8 @@ SELECT
 	  ai.summary_zh AS ai_summary,
 	  ai.keywords_json AS ai_keywords_json,
 	  ai.suggested_tags_json,
+	  COALESCE((SELECT json_group_array(tag_id) FROM (SELECT rt_list.tag_id AS tag_id FROM repo_tags rt_list JOIN tags t_list ON t_list.id = rt_list.tag_id AND t_list.account_id = r.account_id WHERE rt_list.repo_id = r.id ORDER BY t_list.name COLLATE NOCASE ASC)), '[]') AS tag_ids_json,
+	  COALESCE((SELECT json_group_array(tag_name) FROM (SELECT t_list.name AS tag_name FROM repo_tags rt_list JOIN tags t_list ON t_list.id = rt_list.tag_id AND t_list.account_id = r.account_id WHERE rt_list.repo_id = r.id ORDER BY t_list.name COLLATE NOCASE ASC)), '[]') AS tag_names_json,
 	  ai.generated_at AS ai_generated_at
 	FROM repositories r
 	LEFT JOIN repo_readmes rr ON rr.repo_id = r.id
@@ -684,9 +866,11 @@ LIMIT 1;
     pub fn list_repository_tagging_sources(
         &self,
         account_id: &str,
-        limit: usize,
+        limit: Option<usize>,
     ) -> Result<Vec<RepositoryTaggingSource>, String> {
-        let normalized_limit = limit.clamp(1, 1000);
+        let limit_clause = limit
+            .map(|value| format!("LIMIT {}", value.clamp(1, 1000)))
+            .unwrap_or_default();
         let sql = format!(
             r#"
 .mode json
@@ -703,10 +887,10 @@ LEFT JOIN repo_ai_documents ai ON ai.repo_id = r.id
 WHERE r.account_id = {account_id}
   AND r.sync_status = 'active'
 ORDER BY r.stars_count DESC, r.starred_at DESC
-LIMIT {limit};
+{limit_clause};
 "#,
             account_id = sql_text(account_id),
-            limit = normalized_limit,
+            limit_clause = limit_clause,
         );
         let rows = parse_json_rows::<RepositoryTaggingSourceRow>(
             &self.query_sql(&sql)?,
@@ -807,6 +991,270 @@ WHERE account_id = {account_id}
             .filter(|line| !line.is_empty())
             .map(str::to_owned)
             .collect())
+    }
+
+    pub fn upsert_github_recommendation_candidates(
+        &self,
+        account_id: &str,
+        rationale_zh: &str,
+        queries: &[String],
+        repositories: &[GitHubRepositoryRecommendation],
+    ) -> Result<HashMap<String, GithubRecommendationCandidateState>, String> {
+        if repositories.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let queries_json = serde_json::to_string(queries)
+            .map_err(|error| format!("GitHub 推荐搜索式序列化失败：{error}"))?;
+        let mut sql = String::from("PRAGMA foreign_keys = ON;\nBEGIN;\n");
+        for repository in repositories {
+            let normalized_full_name =
+                normalize_required_text(&repository.full_name, "GitHub 推荐候选仓库名称不能为空")?;
+            let candidate_id = next_local_id("gh_candidate")?;
+            let topics_json = serde_json::to_string(&repository.topics)
+                .map_err(|error| format!("GitHub 推荐 Topics 序列化失败：{error}"))?;
+            sql.push_str(&format!(
+                r#"
+INSERT INTO github_recommendation_candidates (
+  id,
+  account_id,
+  full_name,
+  description,
+  language,
+  topics_json,
+  html_url,
+  stars_count,
+  forks_count,
+  pushed_at,
+  status,
+  rationale_zh,
+  queries_json,
+  last_seen_at,
+  updated_at
+) VALUES (
+  {id},
+  {account_id},
+  {full_name},
+  {description},
+  {language},
+  {topics_json},
+  {html_url},
+  {stars_count},
+  {forks_count},
+  {pushed_at},
+  'new',
+  {rationale_zh},
+  {queries_json},
+  strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+  strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+)
+ON CONFLICT(account_id, full_name) DO UPDATE SET
+  description = excluded.description,
+  language = excluded.language,
+  topics_json = excluded.topics_json,
+  html_url = excluded.html_url,
+  stars_count = excluded.stars_count,
+  forks_count = excluded.forks_count,
+  pushed_at = excluded.pushed_at,
+  status = CASE
+    WHEN github_recommendation_candidates.status IN ('ignored', 'starred') THEN github_recommendation_candidates.status
+    ELSE 'new'
+  END,
+  rationale_zh = excluded.rationale_zh,
+  queries_json = excluded.queries_json,
+  last_seen_at = excluded.last_seen_at,
+  updated_at = excluded.updated_at;
+"#,
+                id = sql_text(&candidate_id),
+                account_id = sql_text(account_id),
+                full_name = sql_text(&normalized_full_name),
+                description = sql_optional_text(repository.description.as_deref()),
+                language = sql_optional_text(repository.language.as_deref()),
+                topics_json = sql_text(&topics_json),
+                html_url = sql_text(&repository.html_url),
+                stars_count = repository.stars_count,
+                forks_count = repository.forks_count,
+                pushed_at = sql_optional_text(repository.pushed_at.as_deref()),
+                rationale_zh = sql_text(rationale_zh),
+                queries_json = sql_text(&queries_json),
+            ));
+        }
+        sql.push_str("COMMIT;\n");
+        self.execute_sql(&sql)?;
+        self.list_github_recommendation_candidate_states(
+            account_id,
+            &repositories
+                .iter()
+                .map(|repository| repository.full_name.clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    pub fn list_github_recommendation_candidate_states(
+        &self,
+        account_id: &str,
+        full_names: &[String],
+    ) -> Result<HashMap<String, GithubRecommendationCandidateState>, String> {
+        if full_names.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let full_name_list = full_names
+            .iter()
+            .map(|full_name| sql_text(full_name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+.mode json
+SELECT id, full_name, status
+FROM github_recommendation_candidates
+WHERE account_id = {account_id}
+  AND full_name IN ({full_name_list});
+"#,
+            account_id = sql_text(account_id),
+            full_name_list = full_name_list,
+        );
+        let rows = parse_json_rows::<RecommendationCandidateRow>(
+            &self.query_sql(&sql)?,
+            "SQLite GitHub 推荐候选状态解析失败",
+        )?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.full_name.clone(),
+                    GithubRecommendationCandidateState {
+                        id: row.id,
+                        full_name: row.full_name,
+                        status: row.status,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    pub fn list_github_recommendation_candidates(
+        &self,
+        account_id: &str,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<GithubRecommendationCandidateList, String> {
+        let status_clause = match normalize_optional_text(status) {
+            Some(status) => format!(
+                "AND status = {}",
+                sql_text(normalize_recommendation_candidate_status(status)?)
+            ),
+            None => String::new(),
+        };
+        let limit = limit.clamp(1, 50);
+        let sql = format!(
+            r#"
+.mode json
+SELECT
+  id,
+  full_name,
+  description,
+  language,
+  topics_json,
+  html_url,
+  stars_count,
+  forks_count,
+  pushed_at,
+  status,
+  rationale_zh,
+  queries_json
+FROM github_recommendation_candidates
+WHERE account_id = {account_id}
+  {status_clause}
+ORDER BY
+  CASE status
+    WHEN 'marked' THEN 0
+    WHEN 'new' THEN 1
+    WHEN 'starred' THEN 2
+    ELSE 3
+  END,
+  last_seen_at DESC,
+  updated_at DESC
+LIMIT {limit};
+"#,
+            account_id = sql_text(account_id),
+            status_clause = status_clause,
+            limit = limit,
+        );
+        let rows = parse_json_rows::<RecommendationCandidateDetailRow>(
+            &self.query_sql(&sql)?,
+            "SQLite GitHub 推荐候选列表解析失败",
+        )?;
+        let mut rationale_zh = String::new();
+        let mut queries = Vec::new();
+        let mut repositories = Vec::new();
+
+        for row in rows {
+            if rationale_zh.is_empty() {
+                rationale_zh = row.rationale_zh.clone().unwrap_or_default();
+            }
+            for query in
+                parse_json_string_array(&row.queries_json, "SQLite GitHub 推荐搜索式解析失败")?
+            {
+                push_unique(&mut queries, &query);
+            }
+            let topics = serde_json::from_str::<Vec<String>>(&row.topics_json)
+                .map_err(|error| format!("SQLite GitHub 推荐 Topics 解析失败：{error}"))?;
+            repositories.push(GitHubRepositoryRecommendation {
+                candidate_id: Some(row.id),
+                candidate_status: Some(row.status),
+                full_name: row.full_name,
+                description: row.description,
+                language: row.language,
+                topics,
+                html_url: row.html_url,
+                stars_count: row.stars_count,
+                forks_count: row.forks_count,
+                pushed_at: row.pushed_at,
+            });
+        }
+
+        if rationale_zh.is_empty() && !repositories.is_empty() {
+            rationale_zh = "已从本地恢复最近发现的 GitHub 相似项目。".to_owned();
+        }
+
+        Ok(GithubRecommendationCandidateList {
+            rationale_zh,
+            queries,
+            repositories,
+        })
+    }
+
+    pub fn update_github_recommendation_candidate_status(
+        &self,
+        account_id: &str,
+        full_name: &str,
+        status: &str,
+    ) -> Result<GithubRecommendationCandidateState, String> {
+        let normalized_status = normalize_recommendation_candidate_status(status)?;
+        let normalized_full_name =
+            normalize_required_text(full_name, "GitHub 推荐候选仓库名称不能为空")?;
+        let sql = format!(
+            r#"
+UPDATE github_recommendation_candidates
+SET status = {status},
+    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE account_id = {account_id}
+  AND full_name = {full_name};
+"#,
+            status = sql_text(normalized_status),
+            account_id = sql_text(account_id),
+            full_name = sql_text(&normalized_full_name),
+        );
+        self.execute_sql(&sql)?;
+        self.list_github_recommendation_candidate_states(
+            account_id,
+            std::slice::from_ref(&normalized_full_name),
+        )?
+        .remove(&normalized_full_name)
+        .ok_or_else(|| "推荐候选项目不存在，请重新发现后再操作。".to_owned())
     }
 
     pub fn list_tags(&self, account_id: &str) -> Result<Vec<TagItem>, String> {
@@ -1016,9 +1464,28 @@ WHERE r.id = {repository_id} AND r.account_id = {account_id};
 
         for assignment in assignments {
             let tag_name = normalize_required_text(&assignment.tag_name, "标签名称不能为空")?;
-            if !seen_tags.insert(tag_name.to_lowercase()) {
+            let tag_key = tag_name.to_lowercase();
+            if seen_tags.contains(&tag_key) {
                 continue;
             }
+
+            let mut matched_repository_ids = Vec::new();
+            let mut seen_assignment_repository_ids = HashSet::new();
+            for full_name in &assignment.repository_full_names {
+                let normalized_full_name = normalize_repository_full_name_lookup_key(full_name);
+                let Some(repository_id) = repository_ids_by_full_name.get(&normalized_full_name)
+                else {
+                    skipped_repository_count += 1;
+                    continue;
+                };
+                if seen_assignment_repository_ids.insert(repository_id.clone()) {
+                    matched_repository_ids.push(repository_id.clone());
+                }
+            }
+            if matched_repository_ids.is_empty() {
+                continue;
+            }
+            seen_tags.insert(tag_key.clone());
 
             let tag_id = next_local_id("tag")?;
             sql.push_str(&format!(
@@ -1035,12 +1502,8 @@ ON CONFLICT(account_id, name) DO UPDATE SET
                 color = sql_optional_text(assignment.color.as_deref()),
             ));
 
-            for full_name in &assignment.repository_full_names {
-                let Some(repository_id) = repository_ids_by_full_name.get(full_name) else {
-                    skipped_repository_count += 1;
-                    continue;
-                };
-                if !seen_links.insert((repository_id.clone(), tag_name.to_lowercase())) {
+            for repository_id in matched_repository_ids {
+                if !seen_links.insert((repository_id.clone(), tag_key.clone())) {
                     continue;
                 }
 
@@ -1055,7 +1518,7 @@ FROM tags t
 WHERE t.account_id = {account_id}
   AND t.name = {tag_name};
 "#,
-                    repository_id = sql_text(repository_id),
+                    repository_id = sql_text(&repository_id),
                     account_id = sql_text(account_id),
                     tag_name = sql_text(&tag_name),
                 ));
@@ -1069,6 +1532,8 @@ WHERE t.account_id = {account_id}
             tag_count: seen_tags.len(),
             linked_count: seen_links.len(),
             skipped_repository_count,
+            failed_batch_count: 0,
+            failures: Vec::new(),
         })
     }
 
@@ -1098,6 +1563,7 @@ JOIN repositories r ON r.id = a.repo_id AND r.account_id = a.account_id
 LEFT JOIN repo_tags rt ON rt.repo_id = r.id
 LEFT JOIN tags t ON t.id = rt.tag_id AND t.account_id = r.account_id
 WHERE a.account_id = {account_id}
+  AND r.sync_status = 'active'
   AND (a.note_md != '' OR a.read_status != 'unread' OR t.id IS NOT NULL)
 GROUP BY r.id, r.full_name, a.note_md, a.read_status
 ORDER BY r.full_name COLLATE NOCASE ASC;
@@ -1233,7 +1699,10 @@ WHERE t.account_id = {account_id}
     fn list_repository_ids(&self, account_id: &str) -> Result<HashSet<String>, String> {
         let states = self.list_repository_sync_states(account_id)?;
 
-        Ok(states.into_keys().collect())
+        Ok(states
+            .into_iter()
+            .filter_map(|(id, status)| (status == "active").then_some(id))
+            .collect())
     }
 
     fn list_repository_ids_by_full_name(
@@ -1245,7 +1714,8 @@ WHERE t.account_id = {account_id}
 .mode json
 SELECT full_name, id
 FROM repositories
-WHERE account_id = {account_id};
+WHERE account_id = {account_id}
+  AND sync_status = 'active';
 "#,
             account_id = sql_text(account_id),
         );
@@ -1256,7 +1726,12 @@ WHERE account_id = {account_id};
 
         Ok(rows
             .into_iter()
-            .map(|row| (row.full_name, row.id))
+            .map(|row| {
+                (
+                    normalize_repository_full_name_lookup_key(&row.full_name),
+                    row.id,
+                )
+            })
             .collect())
     }
 
@@ -1437,6 +1912,8 @@ SELECT
   model,
   prompt_version,
   source_hash,
+  input_tokens,
+  output_tokens,
   generated_at
 FROM repo_ai_documents
 WHERE repo_id = {repository_id}
@@ -1463,6 +1940,8 @@ LIMIT 1;
             model: row.model,
             prompt_version: row.prompt_version,
             source_hash: row.source_hash,
+            input_tokens: row.input_tokens,
+            output_tokens: row.output_tokens,
             generated_at: row.generated_at,
         }))
     }
@@ -1585,6 +2064,8 @@ WHERE r.sync_status = 'active'{account_clause};
             .trim()
             .parse::<usize>()
             .unwrap_or(0);
+        let (total_ai_input_tokens, total_ai_output_tokens) =
+            self.get_ai_usage_totals(&account_clause)?;
 
         let total_tags = self
             .query_sql(&format!(
@@ -1663,6 +2144,8 @@ SELECT COALESCE(MAX(updated_at), '') FROM repositories r WHERE r.sync_status = '
             total_stars,
             total_readmes,
             total_ai_summaries,
+            total_ai_input_tokens,
+            total_ai_output_tokens,
             total_tags,
             total_notes,
             language_distribution,
@@ -1768,9 +2251,11 @@ SELECT COALESCE(SUM(r.stars_count), 0) FROM repositories r WHERE r.sync_status =
             .query_sql(&format!(
                 r#"
 .mode list
-SELECT COUNT(*) FROM annotations WHERE note_md != '' AND account_id = {};
+SELECT COUNT(*)
+FROM annotations a
+JOIN repositories r ON r.id = a.repo_id AND r.account_id = a.account_id
+WHERE r.sync_status = 'active'{account_clause} AND a.note_md != '';
 "#,
-                sql_text(account_id)
             ))?
             .trim()
             .parse::<usize>()
@@ -1789,6 +2274,8 @@ WHERE r.sync_status = 'active'{account_clause};
             .trim()
             .parse::<usize>()
             .unwrap_or(0);
+        let (total_ai_input_tokens, total_ai_output_tokens) =
+            self.get_ai_usage_totals(&account_clause)?;
 
         // 语言分布 (雷达图)
         let lang_sql = format!(
@@ -1852,10 +2339,35 @@ ORDER BY month;
             total_stars,
             total_notes,
             total_ai_words,
+            total_ai_input_tokens,
+            total_ai_output_tokens,
             language_breakdown,
             monthly_trend,
             recent_repos: recent.items,
         })
+    }
+
+    fn get_ai_usage_totals(&self, account_clause: &str) -> Result<(u64, u64), String> {
+        let output = self.query_sql(&format!(
+            r#"
+.mode list
+SELECT
+  COALESCE(SUM(ai.input_tokens), 0) || '|' ||
+  COALESCE(SUM(ai.output_tokens), 0)
+FROM repo_ai_documents ai
+JOIN repositories r ON r.id = ai.repo_id
+WHERE r.sync_status = 'active'{account_clause};
+"#,
+        ))?;
+        let normalized = output.trim();
+        let Some((input_tokens, output_tokens)) = normalized.split_once('|') else {
+            return Err("AI 用量统计解析失败".to_owned());
+        };
+
+        Ok((
+            input_tokens.trim().parse::<u64>().unwrap_or(0),
+            output_tokens.trim().parse::<u64>().unwrap_or(0),
+        ))
     }
 
     /// 保存 AI 文档（摘要、关键词、建议标签）
@@ -1869,6 +2381,8 @@ ORDER BY month;
         model: &str,
         prompt_version: &str,
         source_hash: &str,
+        input_tokens: u64,
+        output_tokens: u64,
     ) -> Result<(), String> {
         let keywords_json =
             serde_json::to_string(keywords).map_err(|e| format!("关键词序列化失败：{e}"))?;
@@ -1882,8 +2396,8 @@ ORDER BY month;
 
         let sql = format!(
             r#"
-INSERT INTO repo_ai_documents (repo_id, summary_zh, readme_zh, keywords_json, suggested_tags_json, model, prompt_version, source_hash, generated_at)
-VALUES ({repo_id}, {summary}, {readme_zh}, {keywords}, {suggested}, {model}, {prompt_version}, {source_hash}, {timestamp})
+INSERT INTO repo_ai_documents (repo_id, summary_zh, readme_zh, keywords_json, suggested_tags_json, model, prompt_version, source_hash, input_tokens, output_tokens, generated_at)
+VALUES ({repo_id}, {summary}, {readme_zh}, {keywords}, {suggested}, {model}, {prompt_version}, {source_hash}, {input_tokens}, {output_tokens}, {timestamp})
 ON CONFLICT(repo_id) DO UPDATE SET
   summary_zh = excluded.summary_zh,
   readme_zh = excluded.readme_zh,
@@ -1892,6 +2406,8 @@ ON CONFLICT(repo_id) DO UPDATE SET
   model = excluded.model,
   prompt_version = excluded.prompt_version,
   source_hash = excluded.source_hash,
+  input_tokens = excluded.input_tokens,
+  output_tokens = excluded.output_tokens,
   generated_at = excluded.generated_at;
 "#,
             repo_id = sql_text(repository_id),
@@ -1902,6 +2418,8 @@ ON CONFLICT(repo_id) DO UPDATE SET
             model = sql_text(model),
             prompt_version = sql_text(prompt_version),
             source_hash = sql_text(source_hash),
+            input_tokens = input_tokens,
+            output_tokens = output_tokens,
             timestamp = sql_text(&timestamp),
         );
 
@@ -1912,16 +2430,31 @@ ON CONFLICT(repo_id) DO UPDATE SET
         &self,
         query: &str,
         context_queries: &[String],
+        context_repository_ids: &[String],
         limit: usize,
         account_id: Option<&str>,
+        metadata: Option<AiSearchMetadata>,
     ) -> Result<AiSearchResponseData, String> {
         let normalized_query = query.trim();
+        let metadata = metadata.unwrap_or_else(|| AiSearchMetadata {
+            original_query: normalized_query.to_owned(),
+            ai_enhanced: false,
+            ai_query: None,
+            ai_rationale_zh: None,
+            ai_error: None,
+        });
         if normalized_query.is_empty() {
             return Ok(AiSearchResponseData {
-                query: String::new(),
+                query: metadata.original_query,
                 mode: "local_knowledge".to_owned(),
                 results: Vec::new(),
                 total_count: 0,
+                context_queries_used: Vec::new(),
+                context_applied: false,
+                ai_enhanced: metadata.ai_enhanced,
+                ai_query: metadata.ai_query,
+                ai_rationale_zh: metadata.ai_rationale_zh,
+                ai_error: metadata.ai_error,
             });
         }
 
@@ -1968,24 +2501,46 @@ ORDER BY r.starred_at DESC;
             &self.query_sql(&sql)?,
             "SQLite 搜索数据解析失败",
         )?;
-        let context_text = context_queries
+        let context_queries_used = context_queries
             .iter()
             .rev()
             .take(4)
             .map(String::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let context_text = context_queries_used
+            .iter()
+            .map(String::as_str)
             .collect::<Vec<_>>()
             .join(" ");
-        let scoring_query = if context_text.is_empty() {
-            normalized_query.to_owned()
-        } else {
-            format!("{context_text} {normalized_query}")
-        };
-        let tokens = tokenize_query(&scoring_query);
+        let context_repository_set = context_repository_ids
+            .iter()
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .take(30)
+            .collect::<HashSet<_>>();
+        let context_tokens = tokenize_query(&context_text);
+        let query_tokens = tokenize_query(normalized_query);
+        let mut tokens = query_tokens.clone();
+        for token in &context_tokens {
+            push_unique(&mut tokens, token);
+        }
         let mut results = rows
             .into_iter()
-            .filter_map(|row| score_search_row(row, normalized_query, &tokens).transpose())
+            .filter_map(|row| {
+                score_search_row(
+                    row,
+                    normalized_query,
+                    &query_tokens,
+                    &context_tokens,
+                    &tokens,
+                    &context_repository_set,
+                )
+                .transpose()
+            })
             .collect::<Result<Vec<_>, String>>()?;
 
         results.sort_by(|a, b| {
@@ -1996,74 +2551,35 @@ ORDER BY r.starred_at DESC;
         });
         let total_count = results.len();
         results.truncate(limit.clamp(1, 100));
+        let context_applied = results.iter().any(search_result_uses_context);
 
         Ok(AiSearchResponseData {
-            query: normalized_query.to_owned(),
-            mode: "local_knowledge".to_owned(),
+            query: metadata.original_query,
+            mode: if metadata.ai_enhanced {
+                "ai_enhanced".to_owned()
+            } else {
+                "local_knowledge".to_owned()
+            },
             results,
             total_count,
+            context_queries_used,
+            context_applied,
+            ai_enhanced: metadata.ai_enhanced,
+            ai_query: metadata.ai_query,
+            ai_rationale_zh: metadata.ai_rationale_zh,
+            ai_error: metadata.ai_error,
         })
     }
 
     fn migrate(&self) -> Result<(), String> {
+        self.reset_incompatible_database()?;
         self.execute_sql(INITIAL_SCHEMA_SQL)?;
-        self.migrate_repository_ids_to_account_scope()
-    }
 
-    fn migrate_repository_ids_to_account_scope(&self) -> Result<(), String> {
-        self.execute_sql(
-            r#"
-PRAGMA foreign_keys = OFF;
-BEGIN;
+        if !self.database_uses_current_schema()? {
+            return Err("本地数据库初始化后仍缺少当前版本所需表结构".to_owned());
+        }
 
-CREATE TEMP TABLE IF NOT EXISTS repository_id_migration (
-  old_id TEXT PRIMARY KEY,
-  new_id TEXT NOT NULL
-);
-
-DELETE FROM repository_id_migration;
-
-INSERT INTO repository_id_migration (old_id, new_id)
-SELECT id, account_id || ':' || id
-FROM repositories
-WHERE INSTR(id, ':') = 0;
-
-UPDATE repo_readmes
-SET repo_id = (
-  SELECT new_id FROM repository_id_migration WHERE old_id = repo_readmes.repo_id
-)
-WHERE repo_id IN (SELECT old_id FROM repository_id_migration);
-
-UPDATE repo_ai_documents
-SET repo_id = (
-  SELECT new_id FROM repository_id_migration WHERE old_id = repo_ai_documents.repo_id
-)
-WHERE repo_id IN (SELECT old_id FROM repository_id_migration);
-
-UPDATE annotations
-SET repo_id = (
-  SELECT new_id FROM repository_id_migration WHERE old_id = annotations.repo_id
-)
-WHERE repo_id IN (SELECT old_id FROM repository_id_migration);
-
-UPDATE repo_tags
-SET repo_id = (
-  SELECT new_id FROM repository_id_migration WHERE old_id = repo_tags.repo_id
-)
-WHERE repo_id IN (SELECT old_id FROM repository_id_migration);
-
-UPDATE repositories
-SET id = (
-  SELECT new_id FROM repository_id_migration WHERE old_id = repositories.id
-)
-WHERE id IN (SELECT old_id FROM repository_id_migration);
-
-DROP TABLE repository_id_migration;
-
-COMMIT;
-PRAGMA foreign_keys = ON;
-"#,
-        )
+        Ok(())
     }
 
     fn execute_sql(&self, sql: &str) -> Result<(), String> {
@@ -2072,6 +2588,144 @@ PRAGMA foreign_keys = ON;
 
     fn query_sql(&self, sql: &str) -> Result<String, String> {
         execute_sqlite(&self.database_path, sql)
+    }
+
+    fn reset_incompatible_database(&self) -> Result<(), String> {
+        if !self.database_path.exists() || self.database_uses_current_schema()? {
+            return Ok(());
+        }
+
+        remove_sqlite_database_files(&self.database_path)
+    }
+
+    fn database_uses_current_schema(&self) -> Result<bool, String> {
+        if !self.database_path.exists() {
+            return Ok(true);
+        }
+
+        let connection = match Connection::open(&self.database_path) {
+            Ok(connection) => connection,
+            Err(_) => return Ok(false),
+        };
+
+        match sqlite_database_uses_current_schema(&connection) {
+            Ok(is_current) => Ok(is_current),
+            Err(_) => Ok(false),
+        }
+    }
+}
+
+fn sqlite_database_uses_current_schema(connection: &Connection) -> Result<bool, String> {
+    if !sqlite_schema_has_current_marker(connection)? {
+        return Ok(false);
+    }
+
+    for (table_name, required_columns) in REQUIRED_SCHEMA_COLUMNS {
+        if !sqlite_table_has_columns(connection, table_name, required_columns)? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn sqlite_schema_has_current_marker(connection: &Connection) -> Result<bool, String> {
+    let count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = '001' AND name = 'initial_schema';",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("SQLite schema_migrations 读取失败：{error}"))?;
+
+    Ok(count == 1)
+}
+
+fn sqlite_table_has_columns(
+    connection: &Connection,
+    table_name: &str,
+    required_columns: &[&str],
+) -> Result<bool, String> {
+    let pragma_sql = format!("PRAGMA table_info({table_name});");
+    let mut statement = connection
+        .prepare(&pragma_sql)
+        .map_err(|error| format!("SQLite 表结构读取失败：{table_name}：{error}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("SQLite 表结构查询失败：{table_name}：{error}"))?;
+    let mut existing_columns = HashSet::new();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("SQLite 表结构行读取失败：{table_name}：{error}"))?
+    {
+        let column_name = row
+            .get::<_, String>(1)
+            .map_err(|error| format!("SQLite 表结构列名读取失败：{table_name}：{error}"))?;
+        existing_columns.insert(column_name);
+    }
+
+    if existing_columns.is_empty() {
+        return Ok(false);
+    }
+
+    Ok(required_columns
+        .iter()
+        .all(|column_name| existing_columns.contains(*column_name)))
+}
+
+fn remove_sqlite_database_files(database_path: &Path) -> Result<(), String> {
+    for path in sqlite_database_files(database_path) {
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("本地数据库文件清理失败：{}：{error}", path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_legacy_sqlite_database_files(data_dir: &Path) -> Result<(), String> {
+    for file_name in LEGACY_SQLITE_DATABASE_FILE_NAMES {
+        remove_sqlite_database_files(&data_dir.join(file_name))?;
+    }
+
+    Ok(())
+}
+
+fn sqlite_database_files(database_path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![database_path.to_path_buf()];
+
+    if let Some(file_name) = database_path.file_name() {
+        let file_name = file_name.to_string_lossy();
+        for suffix in ["-wal", "-shm", "-journal"] {
+            paths.push(database_path.with_file_name(format!("{file_name}{suffix}")));
+        }
+    }
+
+    paths
+}
+
+fn normalize_repository_full_name_lookup_key(value: &str) -> String {
+    let trimmed = value.trim().trim_matches(|character: char| {
+        character.is_whitespace() || character == '`' || character == '"' || character == '\''
+    });
+    let lower_trimmed = trimmed.to_ascii_lowercase();
+    let without_host = lower_trimmed
+        .find("github.com/")
+        .map(|index| &trimmed[index + "github.com/".len()..])
+        .unwrap_or(trimmed);
+    let without_suffix = without_host.trim_end_matches('/').trim_end_matches(".git");
+    let parts = without_suffix
+        .split('/')
+        .filter(|part| !part.trim().is_empty())
+        .map(str::trim)
+        .collect::<Vec<_>>();
+
+    if parts.len() >= 2 {
+        format!("{}/{}", parts[0], parts[1]).to_ascii_lowercase()
+    } else {
+        without_suffix.to_ascii_lowercase()
     }
 }
 
@@ -2084,6 +2738,8 @@ pub struct DashboardStatsData {
     pub total_stars: u64,
     pub total_readmes: usize,
     pub total_ai_summaries: usize,
+    pub total_ai_input_tokens: u64,
+    pub total_ai_output_tokens: u64,
     pub total_tags: usize,
     pub total_notes: usize,
     pub language_distribution: Vec<LanguageDistributionItem>,
@@ -2132,6 +2788,8 @@ pub struct ProfileStatsData {
     pub total_stars: u64,
     pub total_notes: usize,
     pub total_ai_words: usize,
+    pub total_ai_input_tokens: u64,
+    pub total_ai_output_tokens: u64,
     pub language_breakdown: Vec<LanguageBreakdownItem>,
     pub monthly_trend: Vec<MonthlyTrendItem>,
     pub recent_repos: Vec<RepositoryListItem>,
@@ -2144,6 +2802,20 @@ pub struct AiSearchResponseData {
     pub mode: String,
     pub results: Vec<AiSearchResultData>,
     pub total_count: usize,
+    pub context_queries_used: Vec<String>,
+    pub context_applied: bool,
+    pub ai_enhanced: bool,
+    pub ai_query: Option<String>,
+    pub ai_rationale_zh: Option<String>,
+    pub ai_error: Option<String>,
+}
+
+pub struct AiSearchMetadata {
+    pub original_query: String,
+    pub ai_enhanced: bool,
+    pub ai_query: Option<String>,
+    pub ai_rationale_zh: Option<String>,
+    pub ai_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2153,6 +2825,7 @@ pub struct AiSearchResultData {
     pub score: f64,
     pub explanation_zh: String,
     pub reasons: Vec<SearchMatchReasonData>,
+    pub citations: Vec<SearchCitationData>,
     pub keywords: Vec<String>,
     pub ai_summary: Option<String>,
 }
@@ -2162,6 +2835,13 @@ pub struct AiSearchResultData {
 pub struct SearchMatchReasonData {
     pub label: String,
     pub detail: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchCitationData {
+    pub title: String,
+    pub snippet: String,
 }
 
 #[derive(Serialize)]
@@ -2216,6 +2896,9 @@ impl TryFrom<RepositoryListRow> for RepositoryListItem {
             .map_err(|error| format!("SQLite topics_json 解析失败：{error}"))?;
         let ai_keywords = parse_optional_json_array(row.ai_keywords_json.as_deref())?;
         let suggested_tags = parse_optional_json_array(row.suggested_tags_json.as_deref())?;
+        let tag_ids = parse_json_string_array(&row.tag_ids_json, "SQLite 仓库标签 ID 解析失败")?;
+        let tag_names =
+            parse_json_string_array(&row.tag_names_json, "SQLite 仓库标签名称解析失败")?;
 
         Ok(Self {
             id: row.id,
@@ -2235,6 +2918,8 @@ impl TryFrom<RepositoryListRow> for RepositoryListItem {
             ai_summary: row.ai_summary,
             ai_keywords,
             suggested_tags,
+            tag_ids,
+            tag_names,
             ai_generated_at: row.ai_generated_at,
         })
     }
@@ -2271,7 +2956,10 @@ fn build_repository_filter_clause(filters: &RepositoryListFilters<'_>) -> String
 fn score_search_row(
     row: SearchRepositoryRow,
     query: &str,
+    query_tokens: &[String],
+    context_tokens: &[String],
     tokens: &[String],
+    context_repository_ids: &HashSet<&str>,
 ) -> Result<Option<AiSearchResultData>, String> {
     let topics = serde_json::from_str::<Vec<String>>(&row.topics_json)
         .map_err(|error| format!("SQLite topics_json 解析失败：{error}"))?;
@@ -2311,20 +2999,52 @@ fn score_search_row(
     let mut score = 0.0_f64;
     let mut reasons = Vec::new();
     let mut matched_keywords = Vec::new();
+    let mut used_context_match = false;
     let lower_query = query.to_lowercase();
+    let is_previous_result = context_repository_ids.contains(row.id.as_str());
+
+    if is_previous_result {
+        score += 14.0;
+        used_context_match = true;
+        reasons.push(SearchMatchReasonData {
+            label: "上一轮结果命中".to_owned(),
+            detail: "该仓库来自本轮对话的上一轮搜索结果".to_owned(),
+        });
+    }
 
     for token in tokens {
         let token_lower = token.to_lowercase();
+        let is_context_only_token =
+            contains_token(context_tokens, token) && !contains_token(query_tokens, token);
         for (label, value, weight) in &fields {
             let value_lower = value.to_lowercase();
             if value_lower.contains(&token_lower) {
                 score += weight;
                 push_unique(&mut matched_keywords, token);
+                if is_context_only_token {
+                    used_context_match = true;
+                }
                 if reasons.len() < 5 {
+                    let reason_label = if is_context_only_token {
+                        format!("上下文{label}命中")
+                    } else {
+                        format!("{label}命中")
+                    };
+                    let detail = if is_context_only_token {
+                        format!("本轮上下文“{token}”在{label}中命中")
+                    } else {
+                        format!("{label}包含“{token}”")
+                    };
                     reasons.push(SearchMatchReasonData {
-                        label: format!("{label}命中"),
-                        detail: format!("{label}包含“{token}”"),
+                        label: reason_label,
+                        detail,
                     });
+                } else if is_context_only_token && !reasons.iter().any(is_context_reason) {
+                    let last_index = reasons.len() - 1;
+                    reasons[last_index] = SearchMatchReasonData {
+                        label: format!("上下文{label}命中"),
+                        detail: format!("本轮上下文“{token}”在{label}中命中"),
+                    };
                 }
                 break;
             }
@@ -2348,6 +3068,25 @@ fn score_search_row(
         return Ok(None);
     }
 
+    let explanation_zh = if let Some(summary) = row.summary_zh.as_deref() {
+        let prefix = if used_context_match {
+            "结合本轮上下文，"
+        } else {
+            ""
+        };
+        format!(
+            "{prefix}该仓库的名称、标签或 AI 摘要与“{query}”相关。摘要：{}",
+            truncate_chars(summary, 120)
+        )
+    } else {
+        let prefix = if used_context_match {
+            "结合本轮上下文，"
+        } else {
+            ""
+        };
+        format!("{prefix}该仓库的基础元数据与“{query}”匹配，可作为候选项目继续查看 README 与笔记。")
+    };
+    let citations = build_search_citations(&row, &matched_keywords, query_tokens);
     score += (row.stars_count as f64 + 1.0).log10().min(6.0);
     let score = score.min(99.0);
     let repository = RepositoryListItem {
@@ -2368,16 +3107,9 @@ fn score_search_row(
         ai_summary: row.summary_zh.clone(),
         ai_keywords: ai_keywords.clone(),
         suggested_tags: suggested_tags.clone(),
+        tag_ids: Vec::new(),
+        tag_names,
         ai_generated_at: None,
-    };
-
-    let explanation_zh = if let Some(summary) = row.summary_zh.as_deref() {
-        format!(
-            "该仓库的名称、标签或 AI 摘要与“{query}”相关。摘要：{}",
-            truncate_chars(summary, 120)
-        )
-    } else {
-        format!("该仓库的基础元数据与“{query}”匹配，可作为候选项目继续查看 README 与笔记。")
     };
 
     Ok(Some(AiSearchResultData {
@@ -2385,9 +3117,92 @@ fn score_search_row(
         score: (score * 10.0).round() / 10.0,
         explanation_zh,
         reasons,
+        citations,
         keywords: matched_keywords,
         ai_summary: row.summary_zh,
     }))
+}
+
+fn build_search_citations(
+    row: &SearchRepositoryRow,
+    matched_keywords: &[String],
+    query_tokens: &[String],
+) -> Vec<SearchCitationData> {
+    let keywords = if matched_keywords.is_empty() {
+        query_tokens
+    } else {
+        matched_keywords
+    };
+    let candidates = [
+        ("仓库描述", row.description.as_deref()),
+        ("AI 中文摘要", row.summary_zh.as_deref()),
+        ("个人笔记", row.note_markdown.as_deref()),
+        ("README 片段", row.readme_excerpt.as_deref()),
+    ];
+
+    candidates
+        .into_iter()
+        .filter_map(|(title, content)| {
+            build_search_citation(title, content.unwrap_or_default(), keywords)
+        })
+        .take(3)
+        .collect()
+}
+
+fn build_search_citation(
+    title: &str,
+    content: &str,
+    keywords: &[String],
+) -> Option<SearchCitationData> {
+    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let normalized_lower = normalized.to_lowercase();
+    let match_keyword = keywords
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|keyword| !keyword.is_empty())
+        .find(|keyword| normalized_lower.contains(&keyword.to_lowercase()));
+
+    match match_keyword {
+        Some(keyword) => Some(SearchCitationData {
+            title: title.to_owned(),
+            snippet: build_keyword_snippet(&normalized, keyword, 180),
+        }),
+        None if keywords.is_empty() => Some(SearchCitationData {
+            title: title.to_owned(),
+            snippet: truncate_chars(&normalized, 180),
+        }),
+        _ => None,
+    }
+}
+
+fn build_keyword_snippet(content: &str, keyword: &str, max_chars: usize) -> String {
+    let content_lower = content.to_lowercase();
+    let keyword_lower = keyword.to_lowercase();
+    let Some(byte_index) = content_lower.find(&keyword_lower) else {
+        return truncate_chars(content, max_chars);
+    };
+    let match_char_index = content[..byte_index].chars().count();
+    let context_before = max_chars / 3;
+    let start_char = match_char_index.saturating_sub(context_before);
+    let mut snippet = content
+        .chars()
+        .skip(start_char)
+        .take(max_chars)
+        .collect::<String>();
+
+    if start_char > 0 {
+        snippet = format!("...{snippet}");
+    }
+    if start_char + max_chars < content.chars().count() {
+        snippet.push_str("...");
+    }
+
+    snippet
 }
 
 fn tokenize_query(query: &str) -> Vec<String> {
@@ -2423,6 +3238,20 @@ fn tokenize_query(query: &str) -> Vec<String> {
     tokens
 }
 
+fn contains_token(tokens: &[String], needle: &str) -> bool {
+    tokens
+        .iter()
+        .any(|token| token.eq_ignore_ascii_case(needle))
+}
+
+fn search_result_uses_context(result: &AiSearchResultData) -> bool {
+    result.reasons.iter().any(is_context_reason)
+}
+
+fn is_context_reason(reason: &SearchMatchReasonData) -> bool {
+    reason.label.starts_with("上下文") || reason.label == "上一轮结果命中"
+}
+
 fn push_unique(values: &mut Vec<String>, value: &str) {
     let normalized = value.trim();
     if !normalized.is_empty() && !values.iter().any(|existing| existing == normalized) {
@@ -2448,37 +3277,139 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 }
 
 fn execute_sqlite(database_path: &Path, sql: &str) -> Result<String, String> {
-    let mut child = Command::new("sqlite3")
-        .arg(database_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("SQLite 进程启动失败：{error}"))?;
+    let (mode, sql_body) = split_sqlite_mode(sql)?;
+    let connection = Connection::open(database_path)
+        .map_err(|error| format!("SQLite 数据库打开失败：{error}"))?;
 
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "SQLite 输入流初始化失败".to_owned())?;
-    stdin
-        .write_all(sql.as_bytes())
-        .map_err(|error| format!("SQLite 写入 SQL 失败：{error}"))?;
-    drop(stdin);
+    match mode {
+        None => {
+            connection
+                .execute_batch(&sql_body)
+                .map_err(|error| format!("SQLite 执行失败：{error}"))?;
+            Ok(String::new())
+        }
+        Some(SqliteOutputMode::Json) => query_sqlite_json(&connection, &sql_body),
+        Some(SqliteOutputMode::List) => query_sqlite_list(&connection, &sql_body),
+    }
+}
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("SQLite 执行失败：{error}"))?;
+#[derive(Clone, Copy)]
+enum SqliteOutputMode {
+    Json,
+    List,
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if stderr.is_empty() {
-            "SQLite 执行失败".to_owned()
+fn split_sqlite_mode(sql: &str) -> Result<(Option<SqliteOutputMode>, String), String> {
+    let mut mode = None;
+    let mut sql_lines = Vec::new();
+    let mut sql_body_started = false;
+
+    for line in sql.lines() {
+        let trimmed = line.trim();
+        if !sql_body_started && trimmed.starts_with('.') {
+            let mut parts = trimmed.split_whitespace();
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(".mode"), Some("json"), None) => mode = Some(SqliteOutputMode::Json),
+                (Some(".mode"), Some("list"), None) => mode = Some(SqliteOutputMode::List),
+                _ => return Err(format!("不支持的 SQLite 元命令：{trimmed}")),
+            }
         } else {
-            format!("SQLite 执行失败：{stderr}")
-        });
+            if !trimmed.is_empty() {
+                sql_body_started = true;
+            }
+            sql_lines.push(line);
+        }
     }
 
-    String::from_utf8(output.stdout).map_err(|_| "SQLite 输出不是有效文本".to_owned())
+    Ok((mode, sql_lines.join("\n")))
+}
+
+fn query_sqlite_json(connection: &Connection, sql: &str) -> Result<String, String> {
+    let mut statement = connection
+        .prepare(sql.trim())
+        .map_err(|error| format!("SQLite 查询准备失败：{error}"))?;
+    let column_names = statement
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("SQLite 查询执行失败：{error}"))?;
+    let mut values = Vec::new();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("SQLite 查询读取失败：{error}"))?
+    {
+        let mut object = serde_json::Map::new();
+        for (index, column_name) in column_names.iter().enumerate() {
+            let value = row
+                .get_ref(index)
+                .map_err(|error| format!("SQLite 字段读取失败：{error}"))?;
+            object.insert(column_name.clone(), sqlite_value_to_json(value));
+        }
+        values.push(serde_json::Value::Object(object));
+    }
+
+    serde_json::to_string(&values).map_err(|error| format!("SQLite JSON 输出序列化失败：{error}"))
+}
+
+fn query_sqlite_list(connection: &Connection, sql: &str) -> Result<String, String> {
+    let mut statement = connection
+        .prepare(sql.trim())
+        .map_err(|error| format!("SQLite 查询准备失败：{error}"))?;
+    let column_count = statement.column_count();
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("SQLite 查询执行失败：{error}"))?;
+    let mut lines = Vec::new();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("SQLite 查询读取失败：{error}"))?
+    {
+        let mut fields = Vec::with_capacity(column_count);
+        for index in 0..column_count {
+            let value = row
+                .get_ref(index)
+                .map_err(|error| format!("SQLite 字段读取失败：{error}"))?;
+            fields.push(sqlite_value_to_list_text(value));
+        }
+        lines.push(fields.join("|"));
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn sqlite_value_to_json(value: ValueRef<'_>) -> serde_json::Value {
+    match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(value) => serde_json::Value::Number(value.into()),
+        ValueRef::Real(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        ValueRef::Text(value) => serde_json::Value::String(String::from_utf8_lossy(value).into()),
+        ValueRef::Blob(value) => serde_json::Value::Array(
+            value
+                .iter()
+                .map(|byte| serde_json::Value::Number((*byte).into()))
+                .collect(),
+        ),
+    }
+}
+
+fn sqlite_value_to_list_text(value: ValueRef<'_>) -> String {
+    match value {
+        ValueRef::Null => String::new(),
+        ValueRef::Integer(value) => value.to_string(),
+        ValueRef::Real(value) => value.to_string(),
+        ValueRef::Text(value) => String::from_utf8_lossy(value).into(),
+        ValueRef::Blob(value) => value
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    }
 }
 
 fn parse_json_rows<T>(output: &str, error_message: &str) -> Result<Vec<T>, String>
@@ -2531,6 +3462,16 @@ fn normalize_reading_status(value: &str) -> Result<&'static str, String> {
     }
 }
 
+fn normalize_recommendation_candidate_status(value: &str) -> Result<&'static str, String> {
+    match value {
+        "new" => Ok("new"),
+        "marked" => Ok("marked"),
+        "ignored" => Ok("ignored"),
+        "starred" => Ok("starred"),
+        _ => Err("推荐候选状态只能是 new、marked、ignored 或 starred".to_owned()),
+    }
+}
+
 fn sql_like_pattern(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
@@ -2555,6 +3496,284 @@ mod tests {
     #[test]
     fn sql_like_pattern_escapes_wildcards_and_quotes() {
         assert_eq!(sql_like_pattern("50%_owner's"), "'%50\\%\\_owner''s%'");
+    }
+
+    #[test]
+    fn embedded_sqlite_executor_keeps_json_and_list_modes() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-embedded-sqlite-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+
+        execute_sqlite(
+            &database_path,
+            r#"
+CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+INSERT INTO items (name) VALUES ('alpha'), ('beta');
+"#,
+        )
+        .expect("内嵌 SQLite 应能执行批量 SQL");
+
+        let list_output = execute_sqlite(
+            &database_path,
+            r#"
+.mode list
+SELECT COUNT(*) FROM items;
+"#,
+        )
+        .expect("内嵌 SQLite 应能输出 list 模式");
+        assert_eq!(list_output.trim(), "2");
+
+        let json_output = execute_sqlite(
+            &database_path,
+            r#"
+.mode json
+SELECT id, name FROM items ORDER BY id;
+"#,
+        )
+        .expect("内嵌 SQLite 应能输出 JSON 模式");
+        let rows =
+            serde_json::from_str::<serde_json::Value>(&json_output).expect("JSON 模式输出应可解析");
+        assert_eq!(rows[0]["id"], 1);
+        assert_eq!(rows[0]["name"], "alpha");
+        assert_eq!(rows[1]["name"], "beta");
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn embedded_sqlite_executor_allows_dot_prefixed_lines_inside_sql_text() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-dot-prefixed-readme-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+
+        execute_sqlite(
+            &database_path,
+            r#"
+CREATE TABLE readmes (content TEXT NOT NULL);
+INSERT INTO readmes (content) VALUES ('README section
+.github/workflows/ GitHub Actions workflows, including GHCR image publishing');
+"#,
+        )
+        .expect("SQL 文本中的行首点号不应被当成 SQLite 元命令");
+
+        let output = execute_sqlite(
+            &database_path,
+            r#"
+.mode list
+SELECT content FROM readmes;
+"#,
+        )
+        .expect("应能读回包含行首点号的文本");
+
+        assert!(output.contains(".github/workflows/ GitHub Actions workflows"));
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn initialization_resets_incompatible_local_test_database() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-incompatible-schema-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        execute_sqlite(
+            &database_path,
+            r#"
+CREATE TABLE schema_migrations (
+  version TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+INSERT INTO schema_migrations(version, name, applied_at)
+VALUES ('001', 'initial_schema', '2026-01-01T00:00:00Z');
+CREATE TABLE repo_ai_documents (
+  repo_id TEXT PRIMARY KEY,
+  summary_zh TEXT NOT NULL
+);
+INSERT INTO repo_ai_documents(repo_id, summary_zh)
+VALUES ('legacy-repo', '旧测试数据');
+"#,
+        )
+        .expect("应能准备旧测试库");
+        let legacy_sidecar_paths: Vec<PathBuf> = sqlite_database_files(&database_path)
+            .into_iter()
+            .filter(|path| path != &database_path)
+            .collect();
+        for path in &legacy_sidecar_paths {
+            std::fs::write(path, "legacy sqlite sidecar").expect("应能准备旧 SQLite 旁路文件");
+        }
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("不兼容旧测试库应自动删除并重建");
+
+        let ai_columns = execute_sqlite(
+            &database_path,
+            r#"
+.mode list
+PRAGMA table_info(repo_ai_documents);
+"#,
+        )
+        .expect("应能读取重建后的 AI 文档表结构");
+        assert!(ai_columns.contains("|readme_zh|"));
+        assert!(ai_columns.contains("|input_tokens|"));
+        assert!(ai_columns.contains("|output_tokens|"));
+
+        let recommendation_table_count = execute_sqlite(
+            &database_path,
+            r#"
+.mode list
+SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'github_recommendation_candidates';
+"#,
+        )
+        .expect("应能读取重建后的推荐候选表");
+        assert_eq!(recommendation_table_count.trim(), "1");
+
+        let legacy_row_count = execute_sqlite(
+            &database_path,
+            r#"
+.mode list
+SELECT COUNT(*) FROM repo_ai_documents WHERE repo_id = 'legacy-repo';
+"#,
+        )
+        .expect("应能确认旧测试数据已清理");
+        assert_eq!(legacy_row_count.trim(), "0");
+        for path in legacy_sidecar_paths {
+            assert!(
+                !path.exists(),
+                "不兼容旧库重建后不应保留 SQLite 旁路文件：{}",
+                path.display()
+            );
+        }
+
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    #[test]
+    fn startup_removes_legacy_local_test_database_without_migrating() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "gsat-legacy-cleanup-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("应能准备本地测试数据目录");
+        let old_named_database_path = data_dir.join("stars-ai-tools.sqlite3");
+        execute_sqlite(
+            &old_named_database_path,
+            r#"
+CREATE TABLE legacy_items (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+INSERT INTO legacy_items (name) VALUES ('old-local-data');
+"#,
+        )
+        .expect("应能准备旧命名测试库");
+        let old_named_paths = sqlite_database_files(&old_named_database_path);
+        for path in old_named_paths
+            .iter()
+            .filter(|path| path != &&old_named_database_path)
+        {
+            std::fs::write(path, "legacy sqlite sidecar").expect("应能准备旧命名 SQLite 旁路文件");
+        }
+
+        remove_legacy_sqlite_database_files(&data_dir).expect("旧命名测试库应被直接清理");
+
+        for path in old_named_paths {
+            assert!(
+                !path.exists(),
+                "旧命名测试库不应保留或迁移：{}",
+                path.display()
+            );
+        }
+        assert!(
+            !data_dir.join("gsat.sqlite3").exists(),
+            "旧测试库清理不应生成新的 GSAT 数据库"
+        );
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn list_active_repositories_uses_supported_mode_and_tracks_renamed_full_name() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-active-repository-list-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+"#,
+            )
+            .expect("写入测试账号");
+
+        let repository = StarredRepository {
+            id: "1001:42".to_owned(),
+            account_id: "1001".to_owned(),
+            owner: "old-owner".to_owned(),
+            name: "old-name".to_owned(),
+            full_name: "old-owner/old-name".to_owned(),
+            description: Some("旧仓库名".to_owned()),
+            language: Some("TypeScript".to_owned()),
+            topics_json: "[]".to_owned(),
+            html_url: "https://github.com/old-owner/old-name".to_owned(),
+            stars_count: 100,
+            forks_count: 10,
+            starred_at: "2026-01-01T00:00:00Z".to_owned(),
+            pushed_at: Some("2026-01-02T00:00:00Z".to_owned()),
+        };
+        storage
+            .upsert_repositories(&[repository])
+            .expect("首次写入仓库");
+
+        let renamed_repository = StarredRepository {
+            id: "1001:42".to_owned(),
+            account_id: "1001".to_owned(),
+            owner: "new-owner".to_owned(),
+            name: "new-name".to_owned(),
+            full_name: "new-owner/new-name".to_owned(),
+            description: Some("新仓库名".to_owned()),
+            language: Some("Rust".to_owned()),
+            topics_json: "[\"desktop\"]".to_owned(),
+            html_url: "https://github.com/new-owner/new-name".to_owned(),
+            stars_count: 120,
+            forks_count: 12,
+            starred_at: "2026-01-01T00:00:00Z".to_owned(),
+            pushed_at: Some("2026-01-03T00:00:00Z".to_owned()),
+        };
+        storage
+            .upsert_repositories(&[renamed_repository])
+            .expect("仓库改名后应可更新");
+
+        let repositories = storage
+            .list_active_repositories(Some("1001"))
+            .expect("活跃仓库列表应使用当前 SQLite 支持的输出模式");
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].id, "1001:42");
+        assert_eq!(repositories[0].full_name, "new-owner/new-name");
+
+        let _ = remove_sqlite_database_files(&database_path);
     }
 
     #[test]
@@ -2613,9 +3832,9 @@ VALUES ('1001', 'alice', 'https://avatars.example/alice.png', 'test', '2026-01-0
     }
 
     #[test]
-    fn migration_scopes_legacy_repository_ids_by_account() {
+    fn disconnected_github_account_is_not_restored_as_connected_user() {
         let database_path = std::env::temp_dir().join(format!(
-            "gsat-storage-test-{}.sqlite3",
+            "gsat-disconnected-account-test-{}.sqlite3",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("系统时间应可用")
@@ -2625,46 +3844,29 @@ VALUES ('1001', 'alice', 'https://avatars.example/alice.png', 'test', '2026-01-0
             database_path: database_path.clone(),
         };
 
-        storage
-            .execute_sql(INITIAL_SCHEMA_SQL)
-            .expect("初始化测试库");
+        storage.migrate().expect("初始化测试库");
         storage
             .execute_sql(
                 r#"
-PRAGMA foreign_keys = ON;
-INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
-INSERT INTO repositories (id, account_id, owner, name, full_name, topics_json, html_url, stars_count, forks_count, starred_at)
-VALUES ('42', '1001', 'owner', 'repo', 'owner/repo', '[]', 'https://github.com/owner/repo', 10, 1, '2026-01-01T00:00:00Z');
-INSERT INTO repo_readmes (repo_id, raw_markdown, content_hash, source_path, fetched_at)
-VALUES ('42', '# README', 'hash', 'README.md', '2026-01-01T00:00:00Z');
-INSERT INTO repo_ai_documents (repo_id, summary_zh, keywords_json, suggested_tags_json, model, prompt_version, source_hash, generated_at)
-VALUES ('42', '摘要', '[]', '[]', 'gpt-test', 'v1', 'hash', '2026-01-01T00:00:00Z');
-INSERT INTO tags (id, account_id, name) VALUES ('tag_1', '1001', '工具');
-INSERT INTO repo_tags (repo_id, tag_id) VALUES ('42', 'tag_1');
-INSERT INTO annotations (repo_id, account_id, note_md) VALUES ('42', '1001', '笔记');
+INSERT INTO github_accounts (id, login, avatar_url, token_ref, updated_at)
+VALUES ('1001', 'alice', 'https://avatars.example/alice.png', 'test', '2026-01-01T00:00:00Z');
 "#,
             )
-            .expect("写入旧格式测试数据");
+            .expect("写入账号");
+
+        assert!(storage
+            .get_recent_github_account()
+            .expect("读取最近账号")
+            .is_some());
 
         storage
-            .migrate_repository_ids_to_account_scope()
-            .expect("迁移仓库 ID");
+            .mark_github_accounts_disconnected()
+            .expect("账号应能标记为已断开");
 
-        let rows = storage
-            .query_sql(
-                r#"
-.mode list
-SELECT
-  (SELECT COUNT(*) FROM repositories WHERE id = '1001:42') || ',' ||
-  (SELECT COUNT(*) FROM repo_readmes WHERE repo_id = '1001:42') || ',' ||
-  (SELECT COUNT(*) FROM repo_ai_documents WHERE repo_id = '1001:42') || ',' ||
-  (SELECT COUNT(*) FROM annotations WHERE repo_id = '1001:42') || ',' ||
-  (SELECT COUNT(*) FROM repo_tags WHERE repo_id = '1001:42');
-"#,
-            )
-            .expect("读取迁移结果");
-
-        assert_eq!(rows.trim(), "1,1,1,1,1");
+        assert!(storage
+            .get_recent_github_account()
+            .expect("读取最近账号")
+            .is_none());
 
         let _ = std::fs::remove_file(database_path);
     }
@@ -2713,6 +3915,8 @@ VALUES ('1001:42', '1001', 'owner', 'repo', '演示仓库', '可验证 README �
                 "gpt-test",
                 "v1",
                 "readme-hash",
+                321,
+                45,
             )
             .expect("保存 AI 文档");
 
@@ -2730,11 +3934,127 @@ VALUES ('1001:42', '1001', 'owner', 'repo', '演示仓库', '可验证 README �
             ai_document.readme_zh.as_deref(),
             Some("这是 README 中文整理")
         );
+        assert_eq!(ai_document.input_tokens, 321);
+        assert_eq!(ai_document.output_tokens, 45);
         assert_eq!(ai_document.keywords, vec!["关键词", "工具"]);
         assert_eq!(ai_document.suggested_tags, vec!["AI 工具", "开发效率"]);
         assert_eq!(ai_document.model, "gpt-test");
         assert_eq!(ai_document.prompt_version, "v1");
         assert_eq!(ai_document.source_hash, "readme-hash");
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn list_repository_tagging_sources_reads_all_repositories_without_limit() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-tagging-sources-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+WITH RECURSIVE numbers(n) AS (
+  SELECT 1
+  UNION ALL
+  SELECT n + 1 FROM numbers WHERE n < 1002
+)
+INSERT INTO repositories (id, account_id, owner, name, full_name, topics_json, html_url, stars_count, forks_count, starred_at)
+SELECT
+  '1001:' || n,
+  '1001',
+  'owner',
+  'repo' || n,
+  'owner/repo' || n,
+  '[]',
+  'https://github.com/owner/repo' || n,
+  n,
+  0,
+  '2026-01-01T00:00:00Z'
+FROM numbers;
+"#,
+            )
+            .expect("写入超过一千个测试仓库");
+
+        let all_sources = storage
+            .list_repository_tagging_sources("1001", None)
+            .expect("无 limit 时应读取全部标签源");
+        let limited_sources = storage
+            .list_repository_tagging_sources("1001", Some(10))
+            .expect("显式 limit 应生效");
+
+        assert_eq!(all_sources.len(), 1002);
+        assert_eq!(limited_sources.len(), 10);
+        assert_eq!(all_sources[0].full_name, "owner/repo1002");
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn profile_stats_counts_only_active_repositories_for_account() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-profile-stats-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('2002', 'bob', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, description, language, topics_json, html_url, stars_count, forks_count, starred_at, sync_status)
+VALUES
+  ('1001:1', '1001', 'owner', 'active', 'owner/active', '当前账号 active 仓库', 'TypeScript', '[]', 'https://github.com/owner/active', 10, 1, '2026-01-03T00:00:00Z', 'active'),
+  ('1001:2', '1001', 'owner', 'removed', 'owner/removed', '当前账号已取消 Star 仓库', 'Rust', '[]', 'https://github.com/owner/removed', 20, 1, '2026-01-02T00:00:00Z', 'removed'),
+  ('2002:1', '2002', 'owner', 'other', 'owner/other', '其他账号仓库', 'Go', '[]', 'https://github.com/owner/other', 30, 1, '2026-01-01T00:00:00Z', 'active');
+INSERT INTO annotations (repo_id, account_id, note_md)
+VALUES
+  ('1001:1', '1001', 'active note'),
+  ('1001:2', '1001', 'removed note'),
+  ('2002:1', '2002', 'other note');
+INSERT INTO repo_ai_documents (repo_id, summary_zh, keywords_json, suggested_tags_json, model, prompt_version, source_hash, input_tokens, output_tokens, generated_at)
+VALUES
+  ('1001:1', '当前账号摘要', '[]', '[]', 'gpt-test', 'v1', 'hash-active', 120, 30, '2026-01-03T00:00:00Z'),
+  ('1001:2', '已移除仓库摘要不应计入', '[]', '[]', 'gpt-test', 'v1', 'hash-removed', 999, 999, '2026-01-02T00:00:00Z'),
+  ('2002:1', '其他账号摘要不应计入', '[]', '[]', 'gpt-test', 'v1', 'hash-other', 888, 888, '2026-01-01T00:00:00Z');
+"#,
+            )
+            .expect("写入个人统计测试数据");
+
+        let stats = storage.get_profile_stats("1001").expect("读取个人统计");
+        let dashboard_stats = storage
+            .get_dashboard_stats(Some("1001"))
+            .expect("读取仪表盘统计");
+
+        assert_eq!(stats.total_stars, 10);
+        assert_eq!(stats.total_notes, 1);
+        assert_eq!(stats.total_ai_words, "当前账号摘要".chars().count());
+        assert_eq!(stats.total_ai_input_tokens, 120);
+        assert_eq!(stats.total_ai_output_tokens, 30);
+        assert_eq!(dashboard_stats.total_ai_input_tokens, 120);
+        assert_eq!(dashboard_stats.total_ai_output_tokens, 30);
+        assert_eq!(stats.language_breakdown.len(), 1);
+        assert_eq!(stats.language_breakdown[0].language, "TypeScript");
+        assert_eq!(stats.recent_repos.len(), 1);
+        assert_eq!(stats.recent_repos[0].id, "1001:1");
 
         let _ = std::fs::remove_file(database_path);
     }
@@ -2805,6 +4125,139 @@ SELECT
     }
 
     #[test]
+    fn export_annotation_snapshot_ignores_removed_repositories() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-export-active-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, topics_json, html_url, stars_count, forks_count, starred_at, sync_status)
+VALUES
+  ('1001:1', '1001', 'owner', 'active', 'owner/active', '[]', 'https://github.com/owner/active', 10, 1, '2026-01-02T00:00:00Z', 'active'),
+  ('1001:2', '1001', 'owner', 'removed', 'owner/removed', '[]', 'https://github.com/owner/removed', 20, 1, '2026-01-01T00:00:00Z', 'removed');
+INSERT INTO tags (id, account_id, name, color)
+VALUES ('tag-1', '1001', '工具', '#3b82f6');
+INSERT INTO annotations (repo_id, account_id, note_md, read_status)
+VALUES
+  ('1001:1', '1001', 'active note', 'later'),
+  ('1001:2', '1001', 'removed note', 'read');
+INSERT INTO repo_tags (repo_id, tag_id)
+VALUES
+  ('1001:1', 'tag-1'),
+  ('1001:2', 'tag-1');
+"#,
+            )
+            .expect("写入导出测试数据");
+
+        let snapshot = storage
+            .export_annotation_snapshot("1001")
+            .expect("导出注解快照");
+
+        assert_eq!(snapshot.repositories.len(), 1);
+        assert_eq!(snapshot.repositories[0].repository_id, "1001:1");
+        assert_eq!(snapshot.repositories[0].full_name, "owner/active");
+        assert_eq!(snapshot.repositories[0].note_markdown, "active note");
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn import_annotation_snapshot_skips_removed_repositories() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-import-active-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, topics_json, html_url, stars_count, forks_count, starred_at, sync_status)
+VALUES
+  ('1001:1', '1001', 'owner', 'active', 'owner/active', '[]', 'https://github.com/owner/active', 10, 1, '2026-01-02T00:00:00Z', 'active'),
+  ('1001:2', '1001', 'owner', 'removed', 'owner/removed', '[]', 'https://github.com/owner/removed', 20, 1, '2026-01-01T00:00:00Z', 'removed');
+INSERT INTO annotations (repo_id, account_id, note_md, read_status)
+VALUES ('1001:2', '1001', '原有已移除仓库注解', 'unread');
+"#,
+            )
+            .expect("写入导入测试数据");
+
+        let snapshot = AnnotationSnapshot {
+            schema_version: 1,
+            exported_at: "2026-01-01T00:00:00Z".to_owned(),
+            account_id: "legacy".to_owned(),
+            tags: vec![AnnotationSnapshotTag {
+                name: "工具".to_owned(),
+                color: Some("#3b82f6".to_owned()),
+            }],
+            repositories: vec![
+                AnnotationSnapshotRepository {
+                    repository_id: "legacy-active".to_owned(),
+                    full_name: "owner/active".to_owned(),
+                    note_markdown: "恢复 active 仓库".to_owned(),
+                    read_status: "read".to_owned(),
+                    tag_names: vec!["工具".to_owned()],
+                },
+                AnnotationSnapshotRepository {
+                    repository_id: "1001:2".to_owned(),
+                    full_name: "owner/removed".to_owned(),
+                    note_markdown: "不应恢复 removed 仓库".to_owned(),
+                    read_status: "later".to_owned(),
+                    tag_names: vec!["工具".to_owned()],
+                },
+            ],
+        };
+
+        let summary = storage
+            .import_annotation_snapshot("1001", &snapshot)
+            .expect("导入注解快照");
+        assert_eq!(summary.repository_count, 1);
+        assert_eq!(summary.skipped_repository_count, 1);
+
+        let rows = storage
+            .query_sql(
+                r#"
+.mode list
+SELECT
+  (SELECT note_md FROM annotations WHERE repo_id = '1001:1') || ',' ||
+  (SELECT read_status FROM annotations WHERE repo_id = '1001:1') || ',' ||
+  (SELECT COUNT(*) FROM repo_tags WHERE repo_id = '1001:1') || ',' ||
+  (SELECT note_md FROM annotations WHERE repo_id = '1001:2') || ',' ||
+  (SELECT read_status FROM annotations WHERE repo_id = '1001:2') || ',' ||
+  (SELECT COUNT(*) FROM repo_tags WHERE repo_id = '1001:2');
+"#,
+            )
+            .expect("读取导入结果");
+
+        assert_eq!(
+            rows.trim(),
+            "恢复 active 仓库,read,1,原有已移除仓库注解,unread,0"
+        );
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
     fn create_tag_reuses_existing_name_for_account() {
         let database_path = std::env::temp_dir().join(format!(
             "gsat-tag-test-{}.sqlite3",
@@ -2850,6 +4303,127 @@ SELECT COUNT(*) FROM tags WHERE account_id = '1001' AND name = '工具';
         assert_eq!(rows.trim(), "1");
 
         let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn ai_tag_assignments_match_repository_full_names_robustly() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-ai-tag-assignment-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, description, language, topics_json, html_url, stars_count, forks_count, starred_at)
+VALUES
+  ('1001:1', '1001', 'Owner', 'React-UI', 'Owner/React-UI', 'React UI toolkit', 'TypeScript', '["react","ui"]', 'https://github.com/Owner/React-UI', 10, 1, '2026-01-03T00:00:00Z');
+"#,
+            )
+            .expect("写入 AI 标签测试数据");
+
+        let summary = storage
+            .apply_ai_tag_assignments(
+                "1001",
+                &[AiTagAssignment {
+                    tag_name: "前端".to_owned(),
+                    color: Some("#3b82f6".to_owned()),
+                    repository_full_names: vec![
+                        "HTTPS://github.com/Owner/React-UI.git".to_owned(),
+                        "`owner/react-ui`".to_owned(),
+                        "missing/repo".to_owned(),
+                    ],
+                }],
+            )
+            .expect("应用 AI 标签建议");
+
+        assert_eq!(summary.tag_count, 1);
+        assert_eq!(summary.linked_count, 1);
+        assert_eq!(summary.skipped_repository_count, 1);
+
+        let rows = storage
+            .query_sql(
+                r#"
+.mode list
+SELECT
+  (SELECT COUNT(*) FROM tags WHERE account_id = '1001' AND name = '前端') || ',' ||
+  (SELECT COUNT(*) FROM repo_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.repo_id = '1001:1' AND t.name = '前端');
+"#,
+            )
+            .expect("读取 AI 标签写入结果");
+
+        assert_eq!(rows.trim(), "1,1");
+
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    #[test]
+    fn ai_tag_assignments_do_not_create_empty_tags_for_unmatched_repositories() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-ai-empty-tag-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, description, language, topics_json, html_url, stars_count, forks_count, starred_at)
+VALUES
+  ('1001:1', '1001', 'owner', 'real-repo', 'owner/real-repo', '真实仓库', 'TypeScript', '[]', 'https://github.com/owner/real-repo', 10, 1, '2026-01-03T00:00:00Z');
+"#,
+            )
+            .expect("写入 AI 空标签测试数据");
+
+        let summary = storage
+            .apply_ai_tag_assignments(
+                "1001",
+                &[AiTagAssignment {
+                    tag_name: "幻觉标签".to_owned(),
+                    color: Some("#ef4444".to_owned()),
+                    repository_full_names: vec![
+                        "ghost/missing-one".to_owned(),
+                        "https://github.com/ghost/missing-two".to_owned(),
+                    ],
+                }],
+            )
+            .expect("应用全未命中 AI 标签建议");
+
+        assert_eq!(summary.tag_count, 0);
+        assert_eq!(summary.linked_count, 0);
+        assert_eq!(summary.skipped_repository_count, 2);
+
+        let rows = storage
+            .query_sql(
+                r#"
+.mode list
+SELECT
+  (SELECT COUNT(*) FROM tags WHERE account_id = '1001' AND name = '幻觉标签') || ',' ||
+  (SELECT COUNT(*) FROM repo_tags);
+"#,
+            )
+            .expect("读取空标签写入结果");
+
+        assert_eq!(rows.trim(), "0,0");
+
+        let _ = remove_sqlite_database_files(&database_path);
     }
 
     #[test]
@@ -2900,6 +4474,88 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:2', 'tag-ui');
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, "1001:1");
         assert_eq!(page.items[0].full_name, "owner/react-ui");
+        assert_eq!(page.items[0].tag_ids, vec!["tag-ui".to_owned()]);
+        assert_eq!(page.items[0].tag_names, vec!["UI".to_owned()]);
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn list_repository_page_matches_keyword_across_readme_ai_and_tags() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-knowledge-filter-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, description, language, topics_json, html_url, stars_count, forks_count, starred_at)
+VALUES
+  ('1001:1', '1001', 'owner', 'plain', 'owner/plain', '基础仓库', 'TypeScript', '[]', 'https://github.com/owner/plain', 10, 1, '2026-01-03T00:00:00Z'),
+  ('1001:2', '1001', 'owner', 'other', 'owner/other', '无关仓库', 'Go', '[]', 'https://github.com/owner/other', 8, 1, '2026-01-02T00:00:00Z');
+INSERT INTO repo_readmes (repo_id, raw_markdown, content_hash, source_path, fetched_at)
+VALUES ('1001:1', 'This README explains vector-search indexing.', 'readme-hash', 'README.md', '2026-01-01T00:00:00Z');
+INSERT INTO repo_ai_documents (repo_id, summary_zh, keywords_json, suggested_tags_json, model, prompt_version, source_hash, generated_at)
+VALUES ('1001:1', '适合构建向量检索索引。', '["向量检索","索引"]', '["知识库"]', 'gpt-test', 'v1', 'readme-hash', '2026-01-01T00:00:00Z');
+INSERT INTO tags (id, account_id, name) VALUES ('tag-knowledge', '1001', '知识库');
+INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
+"#,
+            )
+            .expect("写入知识筛选测试数据");
+
+        let readme_page = storage
+            .list_repository_page(
+                20,
+                0,
+                RepositoryListFilters {
+                    account_id: Some("1001"),
+                    keyword: Some("vector-search"),
+                    language: None,
+                    tag_id: None,
+                },
+            )
+            .expect("README 关键词筛选应可执行");
+        let ai_page = storage
+            .list_repository_page(
+                20,
+                0,
+                RepositoryListFilters {
+                    account_id: Some("1001"),
+                    keyword: Some("向量检索"),
+                    language: None,
+                    tag_id: None,
+                },
+            )
+            .expect("AI 关键词筛选应可执行");
+        let tag_page = storage
+            .list_repository_page(
+                20,
+                0,
+                RepositoryListFilters {
+                    account_id: Some("1001"),
+                    keyword: Some("知识库"),
+                    language: None,
+                    tag_id: None,
+                },
+            )
+            .expect("标签关键词筛选应可执行");
+
+        assert_eq!(readme_page.items[0].id, "1001:1");
+        assert_eq!(ai_page.items[0].id, "1001:1");
+        assert_eq!(tag_page.items[0].id, "1001:1");
+        assert_eq!(readme_page.total_count, 1);
+        assert_eq!(ai_page.total_count, 1);
+        assert_eq!(tag_page.total_count, 1);
 
         let _ = std::fs::remove_file(database_path);
     }
@@ -2910,11 +4566,39 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:2', 'tag-ui');
             database_path: std::env::temp_dir().join("gsat-search-mode-unused.sqlite3"),
         };
         let response = storage
-            .search_repositories("  ", &[], 20, Some("1001"))
+            .search_repositories("  ", &[], &[], 20, Some("1001"), None)
             .expect("空查询应返回空结果");
 
         assert_eq!(response.mode, "local_knowledge");
+        assert!(!response.ai_enhanced);
+        assert_eq!(response.ai_query, None);
         assert!(response.results.is_empty());
+    }
+
+    #[test]
+    fn search_repositories_reports_ai_enhanced_metadata() {
+        let storage = AppStorage {
+            database_path: std::env::temp_dir().join("gsat-search-ai-mode-unused.sqlite3"),
+        };
+        let metadata = AiSearchMetadata {
+            original_query: "帮我找动画库".to_owned(),
+            ai_enhanced: true,
+            ai_query: Some("React animation spring".to_owned()),
+            ai_rationale_zh: Some("AI 已提取 React 动画意图。".to_owned()),
+            ai_error: None,
+        };
+        let response = storage
+            .search_repositories("  ", &[], &[], 20, Some("1001"), Some(metadata))
+            .expect("空查询也应保留 AI 搜索元数据");
+
+        assert_eq!(response.query, "帮我找动画库");
+        assert_eq!(response.mode, "local_knowledge");
+        assert!(response.ai_enhanced);
+        assert_eq!(response.ai_query.as_deref(), Some("React animation spring"));
+        assert_eq!(
+            response.ai_rationale_zh.as_deref(),
+            Some("AI 已提取 React 动画意图。")
+        );
     }
 
     #[test]
@@ -2942,9 +4626,19 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:2', 'tag-ui');
             tag_names_json: r#"["前端框架","UI"]"#.to_owned(),
         };
 
-        let result = score_search_row(row, "组件化 UI", &tokenize_query("组件化 UI"))
-            .expect("搜索评分应可执行")
-            .expect("应命中搜索结果");
+        let query_tokens = tokenize_query("组件化 UI");
+        let context_tokens = Vec::new();
+        let context_repository_ids = HashSet::new();
+        let result = score_search_row(
+            row,
+            "组件化 UI",
+            &query_tokens,
+            &context_tokens,
+            &query_tokens,
+            &context_repository_ids,
+        )
+        .expect("搜索评分应可执行")
+        .expect("应命中搜索结果");
 
         assert_eq!(result.repository.full_name, "facebook/react");
         assert_eq!(result.repository.language.as_deref(), Some("JavaScript"));
@@ -2955,6 +4649,317 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:2', 'tag-ui');
             .reasons
             .iter()
             .any(|reason| reason.label.contains("AI")));
+        assert!(result
+            .citations
+            .iter()
+            .any(|citation| citation.title == "AI 中文摘要"
+                && citation.snippet.contains("组件化 UI")));
         assert!(result.explanation_zh.contains("React 适合构建组件化 UI"));
+    }
+
+    #[test]
+    fn search_row_preserves_context_reason_when_reason_limit_is_full() {
+        let row = SearchRepositoryRow {
+            id: "1001:43".to_owned(),
+            account_id: "1001".to_owned(),
+            owner: "owner".to_owned(),
+            name: "react-ui".to_owned(),
+            full_name: "owner/react-ui".to_owned(),
+            description: Some("React UI component library".to_owned()),
+            language: Some("TypeScript".to_owned()),
+            topics_json: r#"["frontend","hooks","ui"]"#.to_owned(),
+            html_url: "https://github.com/owner/react-ui".to_owned(),
+            stars_count: 10_000,
+            forks_count: 500,
+            starred_at: "2026-01-01T00:00:00Z".to_owned(),
+            pushed_at: Some("2026-01-02T00:00:00Z".to_owned()),
+            has_readme: 1,
+            note_markdown: Some("适合离线缓存场景的组件知识库".to_owned()),
+            summary_zh: Some("React UI 组件库，支持 Hooks 和前端工程化。".to_owned()),
+            keywords_json: Some(r#"["React","UI","Hooks"]"#.to_owned()),
+            suggested_tags_json: Some(r#"["前端","组件库"]"#.to_owned()),
+            readme_excerpt: Some("A frontend hooks component toolkit.".to_owned()),
+            tag_names_json: r#"["前端","组件库"]"#.to_owned(),
+        };
+        let query_tokens = tokenize_query("React UI TypeScript frontend hooks component");
+        let context_tokens = tokenize_query("离线缓存");
+        let mut tokens = query_tokens.clone();
+        for token in &context_tokens {
+            push_unique(&mut tokens, token);
+        }
+        let context_repository_ids = HashSet::new();
+
+        let result = score_search_row(
+            row,
+            "React UI TypeScript frontend hooks component",
+            &query_tokens,
+            &context_tokens,
+            &tokens,
+            &context_repository_ids,
+        )
+        .expect("搜索评分应可执行")
+        .expect("应命中搜索结果");
+
+        assert!(result.reasons.len() <= 5);
+        assert!(result.reasons.iter().any(is_context_reason));
+        assert!(result.explanation_zh.contains("结合本轮上下文"));
+    }
+
+    #[test]
+    fn search_row_returns_readme_citation_when_readme_matches() {
+        let row = SearchRepositoryRow {
+            id: "1001:44".to_owned(),
+            account_id: "1001".to_owned(),
+            owner: "owner".to_owned(),
+            name: "deploy-tool".to_owned(),
+            full_name: "owner/deploy-tool".to_owned(),
+            description: Some("Command line helper".to_owned()),
+            language: Some("Rust".to_owned()),
+            topics_json: r#"["cli"]"#.to_owned(),
+            html_url: "https://github.com/owner/deploy-tool".to_owned(),
+            stars_count: 800,
+            forks_count: 20,
+            starred_at: "2026-01-01T00:00:00Z".to_owned(),
+            pushed_at: Some("2026-01-02T00:00:00Z".to_owned()),
+            has_readme: 1,
+            note_markdown: None,
+            summary_zh: None,
+            keywords_json: None,
+            suggested_tags_json: None,
+            readme_excerpt: Some(
+                "Install the binary, configure deployment target, and run deploy-tool release."
+                    .to_owned(),
+            ),
+            tag_names_json: "[]".to_owned(),
+        };
+        let query_tokens = tokenize_query("deployment target");
+        let context_tokens = Vec::new();
+        let context_repository_ids = HashSet::new();
+
+        let result = score_search_row(
+            row,
+            "deployment target",
+            &query_tokens,
+            &context_tokens,
+            &query_tokens,
+            &context_repository_ids,
+        )
+        .expect("搜索评分应可执行")
+        .expect("README 命中时应返回结果");
+
+        assert!(result
+            .citations
+            .iter()
+            .any(|citation| citation.title == "README 片段"
+                && citation.snippet.contains("deployment target")));
+    }
+
+    #[test]
+    fn search_repositories_uses_recent_context_queries() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-context-search-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, description, language, topics_json, html_url, stars_count, forks_count, starred_at)
+VALUES
+  ('1001:1', '1001', 'pmndrs', 'react-spring', 'pmndrs/react-spring', 'React animation library', 'TypeScript', '["react","animation"]', 'https://github.com/pmndrs/react-spring', 28000, 1200, '2026-01-03T00:00:00Z'),
+  ('1001:2', '1001', 'owner', 'database-tool', 'owner/database-tool', 'SQLite desktop utility', 'Rust', '["sqlite"]', 'https://github.com/owner/database-tool', 900, 80, '2026-01-02T00:00:00Z');
+"#,
+            )
+            .expect("写入上下文搜索测试数据");
+
+        let without_context = storage
+            .search_repositories("弹簧效果", &[], &[], 20, Some("1001"), None)
+            .expect("无上下文搜索应可执行");
+        let with_context = storage
+            .search_repositories(
+                "弹簧效果",
+                &["React 动画库".to_owned()],
+                &[],
+                20,
+                Some("1001"),
+                None,
+            )
+            .expect("上下文搜索应可执行");
+
+        assert!(without_context.results.is_empty());
+        assert!(without_context.context_queries_used.is_empty());
+        assert!(!without_context.context_applied);
+        assert_eq!(with_context.total_count, 1);
+        assert_eq!(with_context.context_queries_used, vec!["React 动画库"]);
+        assert!(with_context.context_applied);
+        assert_eq!(
+            with_context.results[0].repository.full_name,
+            "pmndrs/react-spring"
+        );
+        assert!(with_context.results[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.label.starts_with("上下文")));
+        assert!(with_context.results[0]
+            .explanation_zh
+            .contains("结合本轮上下文"));
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn search_repositories_boosts_previous_result_context() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-context-result-search-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, description, language, topics_json, html_url, stars_count, forks_count, starred_at)
+VALUES
+  ('1001:1', '1001', 'owner', 'previous-result', 'owner/previous-result', 'A project from the previous result set', 'TypeScript', '["context"]', 'https://github.com/owner/previous-result', 100, 10, '2026-01-03T00:00:00Z'),
+  ('1001:2', '1001', 'owner', 'fresh-result', 'owner/fresh-result', 'A fresh result without conversation context', 'TypeScript', '["context"]', 'https://github.com/owner/fresh-result', 100, 10, '2026-01-02T00:00:00Z');
+"#,
+            )
+            .expect("写入上一轮结果上下文测试数据");
+
+        let response = storage
+            .search_repositories(
+                "context",
+                &["上一轮 TypeScript 工具".to_owned()],
+                &["1001:1".to_owned()],
+                20,
+                Some("1001"),
+                None,
+            )
+            .expect("上一轮结果上下文搜索应可执行");
+
+        assert_eq!(response.total_count, 2);
+        assert!(response.context_applied);
+        assert_eq!(
+            response.results[0].repository.full_name,
+            "owner/previous-result"
+        );
+        assert!(response.results[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.label == "上一轮结果命中"));
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn github_recommendation_candidates_persist_status() {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-recommendation-candidates-test-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+
+        storage.migrate().expect("初始化测试库");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+"#,
+            )
+            .expect("写入测试账号");
+
+        let recommendations = vec![GitHubRepositoryRecommendation {
+            candidate_id: None,
+            candidate_status: None,
+            full_name: "better/hello-plus".to_owned(),
+            description: Some("A better demo repository".to_owned()),
+            language: Some("TypeScript".to_owned()),
+            topics: vec!["ai".to_owned(), "stars".to_owned()],
+            html_url: "https://github.com/better/hello-plus".to_owned(),
+            stars_count: 4500,
+            forks_count: 120,
+            pushed_at: Some("2026-01-02T00:00:00Z".to_owned()),
+        }];
+        let states = storage
+            .upsert_github_recommendation_candidates(
+                "1001",
+                "基于参考仓库寻找更完整的实现",
+                &["react animation stars:>1000".to_owned()],
+                &recommendations,
+            )
+            .expect("推荐候选应可保存");
+        assert_eq!(states["better/hello-plus"].status, "new");
+
+        let marked = storage
+            .update_github_recommendation_candidate_status("1001", "better/hello-plus", "marked")
+            .expect("推荐候选应可标记关注");
+        assert_eq!(marked.status, "marked");
+
+        let ignored = storage
+            .update_github_recommendation_candidate_status("1001", "better/hello-plus", "ignored")
+            .expect("推荐候选应可忽略");
+        assert_eq!(ignored.status, "ignored");
+
+        let starred = storage
+            .update_github_recommendation_candidate_status("1001", "better/hello-plus", "starred")
+            .expect("推荐候选应可记录已加入 Stars");
+        assert_eq!(starred.status, "starred");
+
+        let refreshed = storage
+            .upsert_github_recommendation_candidates(
+                "1001",
+                "再次发现",
+                &["react animation".to_owned()],
+                &recommendations,
+            )
+            .expect("重复发现应更新候选元数据");
+        assert_eq!(refreshed["better/hello-plus"].status, "starred");
+
+        let history = storage
+            .list_github_recommendation_candidates("1001", None, 12)
+            .expect("推荐候选应可从本地列表恢复");
+        assert_eq!(history.rationale_zh, "再次发现");
+        assert_eq!(history.queries, vec!["react animation"]);
+        assert_eq!(history.repositories.len(), 1);
+        assert_eq!(history.repositories[0].full_name, "better/hello-plus");
+        assert_eq!(
+            history.repositories[0].candidate_status.as_deref(),
+            Some("starred")
+        );
+
+        let starred_history = storage
+            .list_github_recommendation_candidates("1001", Some("starred"), 12)
+            .expect("推荐候选应支持按状态读取");
+        assert_eq!(starred_history.repositories.len(), 1);
+
+        let marked_history = storage
+            .list_github_recommendation_candidates("1001", Some("marked"), 12)
+            .expect("推荐候选应支持读取空状态列表");
+        assert!(marked_history.repositories.is_empty());
+
+        let _ = std::fs::remove_file(database_path);
     }
 }
