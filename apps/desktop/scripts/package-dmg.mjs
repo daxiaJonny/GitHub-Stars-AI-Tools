@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,6 +22,7 @@ if (process.platform !== 'darwin') {
 const appDir = findBuiltApp(targetArg);
 const releaseBundleDir = findReleaseBundleDir(appDir);
 const bundleScript = findBundleDmgScript(releaseBundleDir);
+patchBundleDmgAppleScript(releaseBundleDir);
 const dmgDir = path.join(releaseBundleDir, 'dmg');
 const outputDir = path.join(desktopDir, 'dist-dmg');
 const stageDir = path.join(dmgDir, `.stage-${targetArg || 'host'}`);
@@ -46,24 +47,24 @@ const result = spawnSync(
     '--volname',
     productName,
     '--window-size',
-    '900',
-    '560',
+    '760',
+    '460',
     '--window-pos',
     '120',
     '80',
     '--icon-size',
-    '128',
+    '192',
     '--text-size',
     '16',
     '--icon',
     appName,
-    '300',
-    '285',
+    '235',
+    '240',
     '--hide-extension',
     appName,
     '--app-drop-link',
-    '620',
-    '285',
+    '525',
+    '240',
     outputDmg,
     stageDir,
   ],
@@ -123,6 +124,65 @@ function findBundleDmgScript(releaseBundleDir) {
   }
 
   throw new Error('没有找到 Tauri 生成的 bundle_dmg.sh，请先运行一次 tauri build --bundles dmg。');
+}
+
+function patchBundleDmgAppleScript(releaseBundleDir) {
+  const templatePath = path.join(
+    releaseBundleDir,
+    'share',
+    'create-dmg',
+    'support',
+    'template.applescript',
+  );
+  if (!existsSync(templatePath)) {
+    return;
+  }
+
+  const original = `\t\trepeat while ejectMe is false
+\t\t\tdelay 1
+\t\t\tset waitTime to waitTime + 1
+\t\t\t
+\t\t\tif (do shell script "[ -f " & dsStore & " ]; echo $?") = "0" then set ejectMe to true
+\t\tend repeat`;
+  const patched = `\t\trepeat while ejectMe is false
+\t\t\tdelay 1
+\t\t\tset waitTime to waitTime + 1
+\t\t\t
+\t\t\tif (do shell script "[ -f " & dsStore & " ]; echo $?") = "0" then set ejectMe to true
+\t\t\tif waitTime is greater than or equal to 15 then
+\t\t\t\tdo shell script "touch " & dsStore
+\t\t\t\tset ejectMe to true
+\t\t\tend if
+\t\tend repeat`;
+  const template = readFileSync(templatePath, 'utf8');
+  let patchedTemplate = template;
+  if (patchedTemplate.includes(original) && !patchedTemplate.includes('if waitTime is greater than or equal to 15 then')) {
+    patchedTemplate = patchedTemplate.replace(original, patched);
+  }
+
+  const reopenBoundsBlock = `\t\t\ttell container window
+\t\t\t\tset statusbar visible to false
+\t\t\t\tset the bounds to {theXOrigin, theYOrigin, theBottomRightX, theBottomRightY}
+\t\t\tend tell`;
+  const reopenViewOptionsBlock = `${reopenBoundsBlock}
+
+\t\t\t-- 重新打开 Finder 窗口后再次应用图标视图选项。
+\t\t\tset opts to the icon view options of container window
+\t\t\ttell opts
+\t\t\t\tset icon size to ICON_SIZE
+\t\t\t\tset text size to TEXT_SIZE
+\t\t\t\tset arrangement to not arranged
+\t\t\tend tell`;
+  if (
+    patchedTemplate.includes(reopenBoundsBlock)
+    && !patchedTemplate.includes('重新打开 Finder 窗口后再次应用图标视图选项')
+  ) {
+    patchedTemplate = patchedTemplate.replace(reopenBoundsBlock, reopenViewOptionsBlock);
+  }
+
+  if (patchedTemplate !== template) {
+    writeFileSync(templatePath, patchedTemplate);
+  }
 }
 
 function getArchSuffix(target) {
