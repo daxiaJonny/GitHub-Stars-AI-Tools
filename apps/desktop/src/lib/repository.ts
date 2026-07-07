@@ -30,7 +30,7 @@ export function getRepositoryStats(page: RepositoryListPage | null): RepositoryS
 
 export function buildRepositoryPanelSubtitle(page: RepositoryListPage | null, isLoading: boolean) {
   if (isLoading && !page) {
-    return '正在读取本地 SQLite 索引';
+    return '正在读取本地索引';
   }
 
   if (!page) {

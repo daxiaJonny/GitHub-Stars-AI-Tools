@@ -13,6 +13,7 @@ import {
 } from 'chart.js';
 import { Radar, Line } from 'react-chartjs-2';
 import { useWorkspace } from '@/providers/workspace-provider';
+import { useAppSettings } from '@/providers/settings-provider';
 import { Icon } from '@/components/ui/icon';
 import { compactNumber } from '@/lib/format';
 import type { ProfileStats, RepositoryListItem } from '@/types';
@@ -28,11 +29,16 @@ ChartJS.register(
   LinearScale,
 );
 
-const CHART_COLORS = {
+const DEFAULT_CHART_THEME = {
   primary: '#2563eb',
-  primaryContainer: '#eeefff',
+  primarySoft: 'rgb(37 99 235 / 0.18)',
+  primaryMuted: 'rgb(37 99 235 / 0.4)',
+  primaryTransparent: 'rgb(37 99 235 / 0)',
   onSurfaceVariant: '#434655',
-  gridColor: 'rgba(67, 70, 85, 0.1)',
+  onSurface: '#191b23',
+  surface: '#ffffff',
+  surfaceHigh: '#f3f3fe',
+  gridColor: 'rgb(195 198 215 / 0.36)',
 };
 
 const LANGUAGE_COLORS: Record<string, string> = {
@@ -46,12 +52,15 @@ const LANGUAGE_COLORS: Record<string, string> = {
 
 type ProfilePageProps = {
   onOpenRepository: (repository: RepositoryListItem) => void;
+  onOpenSettings: () => void;
 };
 
 const EMPTY_PROFILE_STATS: ProfileStats = {
   totalStars: 0,
   totalNotes: 0,
   totalAiWords: 0,
+  totalAiInputTokens: 0,
+  totalAiOutputTokens: 0,
   languageBreakdown: [],
   monthlyTrend: [],
   recentRepos: [],
@@ -59,9 +68,31 @@ const EMPTY_PROFILE_STATS: ProfileStats = {
 
 export function ProfilePage(props: ProfilePageProps) {
   const workspace = useWorkspace();
+  const settingsHook = useAppSettings();
   const user = workspace.authState.user;
   const [stats, setStats] = useState<ProfileStats>(EMPTY_PROFILE_STATS);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [chartTheme, setChartTheme] = useState<ChartTheme>(DEFAULT_CHART_THEME);
+
+  useEffect(() => {
+    const refreshChartTheme = () => {
+      const nextTheme = readChartTheme();
+      setChartTheme((currentTheme) => (
+        areChartThemesEqual(currentTheme, nextTheme) ? currentTheme : nextTheme
+      ));
+    };
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const observer = new MutationObserver(refreshChartTheme);
+
+    refreshChartTheme();
+    mediaQuery.addEventListener('change', refreshChartTheme);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] });
+
+    return () => {
+      mediaQuery.removeEventListener('change', refreshChartTheme);
+      observer.disconnect();
+    };
+  }, [settingsHook.settings.theme]);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,28 +123,28 @@ export function ProfilePage(props: ProfilePageProps) {
         {
           label: 'Stars 占比',
           data: topLangs.map((l) => l.percentage),
-          backgroundColor: 'rgba(37, 99, 235, 0.2)',
-          borderColor: CHART_COLORS.primary,
-          pointBackgroundColor: CHART_COLORS.primary,
-          pointBorderColor: '#fff',
-          pointHoverBackgroundColor: '#fff',
-          pointHoverBorderColor: CHART_COLORS.primary,
+          backgroundColor: chartTheme.primarySoft,
+          borderColor: chartTheme.primary,
+          pointBackgroundColor: chartTheme.primary,
+          pointBorderColor: chartTheme.surface,
+          pointHoverBackgroundColor: chartTheme.surface,
+          pointHoverBorderColor: chartTheme.primary,
           borderWidth: 2,
         },
       ],
     };
-  }, [stats.languageBreakdown]);
+  }, [chartTheme, stats.languageBreakdown]);
 
-  const radarOptions = {
+  const radarOptions = useMemo(() => ({
     responsive: true,
     maintainAspectRatio: false,
     scales: {
       r: {
-        angleLines: { color: CHART_COLORS.gridColor },
-        grid: { color: CHART_COLORS.gridColor },
+        angleLines: { color: chartTheme.gridColor },
+        grid: { color: chartTheme.gridColor },
         pointLabels: {
           font: { family: 'Inter', size: 12 },
-          color: CHART_COLORS.onSurfaceVariant,
+          color: chartTheme.onSurfaceVariant,
         },
         ticks: { display: false },
         suggestedMin: 0,
@@ -123,7 +154,7 @@ export function ProfilePage(props: ProfilePageProps) {
     plugins: {
       legend: { display: false },
     },
-  };
+  }), [chartTheme]);
 
   // 折线图数据
   const lineData = useMemo(() => {
@@ -137,32 +168,32 @@ export function ProfilePage(props: ProfilePageProps) {
         {
           label: '新增收藏仓库',
           data: months.map((m) => m.count),
-          borderColor: CHART_COLORS.primary,
+          borderColor: chartTheme.primary,
           backgroundColor: (ctx: any) => {
             const chart = ctx.chart;
             const { ctx: canvasCtx, chartArea } = chart;
-            if (!chartArea) return 'rgba(37, 99, 235, 0.1)';
+            if (!chartArea) return chartTheme.primarySoft;
             const gradient = canvasCtx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
-            gradient.addColorStop(0, 'rgba(37, 99, 235, 0.4)');
-            gradient.addColorStop(1, 'rgba(37, 99, 235, 0)');
+            gradient.addColorStop(0, chartTheme.primaryMuted);
+            gradient.addColorStop(1, chartTheme.primaryTransparent);
             return gradient;
           },
           borderWidth: 2,
           tension: 0.4,
           fill: true,
-          pointBackgroundColor: CHART_COLORS.primaryContainer,
-          pointBorderColor: CHART_COLORS.primary,
+          pointBackgroundColor: chartTheme.surface,
+          pointBorderColor: chartTheme.primary,
           pointBorderWidth: 2,
           pointRadius: 4,
           pointHoverRadius: 6,
         },
       ],
     };
-  }, [stats.monthlyTrend]);
+  }, [chartTheme, stats.monthlyTrend]);
   const hasLanguageBreakdown = stats.languageBreakdown.length > 0;
   const hasMonthlyTrend = stats.monthlyTrend.length > 0;
 
-  const lineOptions = {
+  const lineOptions = useMemo(() => ({
     responsive: true,
     maintainAspectRatio: false,
     interaction: {
@@ -174,14 +205,14 @@ export function ProfilePage(props: ProfilePageProps) {
         grid: { display: false },
         ticks: {
           font: { family: 'Inter', size: 12 },
-          color: CHART_COLORS.onSurfaceVariant,
+          color: chartTheme.onSurfaceVariant,
         },
       },
       y: {
-        grid: { color: CHART_COLORS.gridColor },
+        grid: { color: chartTheme.gridColor },
         ticks: {
           font: { family: 'Inter', size: 12 },
-          color: CHART_COLORS.onSurfaceVariant,
+          color: chartTheme.onSurfaceVariant,
         },
         beginAtZero: true,
       },
@@ -189,7 +220,9 @@ export function ProfilePage(props: ProfilePageProps) {
     plugins: {
       legend: { display: false },
       tooltip: {
-        backgroundColor: 'rgba(25, 27, 35, 0.9)',
+        backgroundColor: chartTheme.surfaceHigh,
+        titleColor: chartTheme.onSurface,
+        bodyColor: chartTheme.onSurface,
         titleFont: { family: 'Inter', size: 13 },
         bodyFont: { family: 'Inter', size: 13 },
         padding: 10,
@@ -197,15 +230,15 @@ export function ProfilePage(props: ProfilePageProps) {
         displayColors: false,
       },
     },
-  };
+  }), [chartTheme]);
 
   return (
     <div className="overflow-y-auto h-full">
       <div className="p-margin-page pb-24">
-        {/* Header Profile Section */}
+        {/* 个人资料标题区 */}
         <div className="glass-card rounded-xl p-8 mb-8 flex flex-col md:flex-row items-center md:items-start gap-8 relative overflow-hidden">
           <div className="absolute -right-20 -top-20 w-64 h-64 bg-primary/5 rounded-full blur-3xl pointer-events-none" />
-          {/* Avatar */}
+          {/* 头像 */}
           <div className="relative w-32 h-32 rounded-full overflow-hidden border-4 border-surface shadow-sm shrink-0">
             {user?.avatarUrl ? (
               <img src={user.avatarUrl} alt={user.login} className="w-full h-full object-cover" />
@@ -215,7 +248,7 @@ export function ProfilePage(props: ProfilePageProps) {
               </div>
             )}
           </div>
-          {/* Info */}
+          {/* 资料信息 */}
           <div className="flex-1 text-center md:text-left z-10">
             <div className="flex flex-col md:flex-row items-center gap-3 mb-2">
               <h2 className="font-headline-lg text-on-surface">{user?.login ?? '未连接'}</h2>
@@ -232,14 +265,24 @@ export function ProfilePage(props: ProfilePageProps) {
                   </a>
                 </div>
               )}
+              {!user && (
+                <button
+                  type="button"
+                  onClick={props.onOpenSettings}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:brightness-110 active:scale-[0.98]"
+                >
+                  <Icon name="login" size={17} />
+                  连接 GitHub 账号
+                </button>
+              )}
             </div>
           </div>
         </div>
         {errorMessage && <div className="mb-6 rounded-lg border border-error/20 bg-error/10 px-4 py-3 text-error">{errorMessage}</div>}
 
-        {/* Bento Grid Layout */}
+        {/* Bento 网格布局 */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-          {/* Radar Chart (Skills) */}
+          {/* 雷达图 */}
           <div className="glass-card flex min-h-[320px] flex-col rounded-xl p-5 sm:p-6 lg:col-span-1 xl:min-h-[380px]">
             <div className="flex items-center gap-2 mb-6">
               <Icon name="radar" size={20} className="text-primary" />
@@ -255,9 +298,9 @@ export function ProfilePage(props: ProfilePageProps) {
             <p className="font-label-sm text-on-surface-variant text-center mt-4">基于 Stars 仓库主要语言分析</p>
           </div>
 
-          {/* Stats & Recent Activity (2 cols) */}
+          {/* 统计与最近动态 */}
           <div className="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
-            {/* Stat Card 1: Notes */}
+            {/* 统计卡片：笔记 */}
             <div className="glass-card rounded-xl p-6 flex flex-col justify-center relative overflow-hidden group">
               <div className="absolute -right-8 -bottom-8 w-32 h-32 bg-primary/5 rounded-full blur-2xl group-hover:bg-primary/10 transition-colors duration-500" />
               <div className="flex items-center gap-3 mb-4 text-on-surface-variant z-10">
@@ -269,7 +312,7 @@ export function ProfilePage(props: ProfilePageProps) {
                 <span className="font-body-md text-on-surface-variant">条</span>
               </div>
             </div>
-            {/* Stat Card 2: AI Words */}
+            {/* 统计卡片：AI 字数 */}
             <div className="glass-card rounded-xl p-6 flex flex-col justify-center relative overflow-hidden group">
               <div className="absolute -right-8 -bottom-8 w-32 h-32 bg-tertiary-container/5 rounded-full blur-2xl group-hover:bg-tertiary-container/10 transition-colors duration-500" />
               <div className="flex items-center gap-3 mb-4 text-on-surface-variant z-10">
@@ -280,8 +323,11 @@ export function ProfilePage(props: ProfilePageProps) {
                 <span className="font-headline-lg text-4xl">{compactNumber(stats.totalAiWords)}</span>
                 <span className="font-body-md text-on-surface-variant">字</span>
               </div>
+              <p className="z-10 mt-3 font-body-md text-xs text-on-surface-variant">
+                输入 {compactNumber(stats.totalAiInputTokens)} tokens · 输出 {compactNumber(stats.totalAiOutputTokens)} tokens
+              </p>
             </div>
-            {/* Recent Collections List */}
+            {/* 最近收藏列表 */}
             <div className="glass-card rounded-xl p-6 sm:col-span-2 flex flex-col h-full">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
@@ -307,8 +353,8 @@ export function ProfilePage(props: ProfilePageProps) {
                         <div
                           className="w-8 h-8 rounded flex items-center justify-center font-bold text-sm"
                           style={{
-                            backgroundColor: `${LANGUAGE_COLORS[repo.language ?? ''] ?? '#c3c6d7'}20`,
-                            color: LANGUAGE_COLORS[repo.language ?? ''] ?? '#434655',
+                            backgroundColor: colorWithAlpha(LANGUAGE_COLORS[repo.language ?? ''] ?? chartTheme.onSurfaceVariant, 0.14),
+                            color: LANGUAGE_COLORS[repo.language ?? ''] ?? chartTheme.onSurfaceVariant,
                           }}
                         >
                           {repo.language?.slice(0, 2).toUpperCase() ?? '??'}
@@ -331,7 +377,7 @@ export function ProfilePage(props: ProfilePageProps) {
           </div>
         </div>
 
-        {/* Annual Trend Chart */}
+        {/* 年度趋势图 */}
         <div className="glass-card flex min-h-[300px] w-full flex-col rounded-xl p-5 sm:p-6 xl:min-h-[350px]">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -350,6 +396,68 @@ export function ProfilePage(props: ProfilePageProps) {
       </div>
     </div>
   );
+}
+
+type ChartTheme = typeof DEFAULT_CHART_THEME;
+
+function readChartTheme(): ChartTheme {
+  const styles = window.getComputedStyle(document.documentElement);
+  const primary = readCssColor(styles, '--color-primary', DEFAULT_CHART_THEME.primary);
+  const onSurfaceVariant = readCssColor(styles, '--color-on-surface-variant', DEFAULT_CHART_THEME.onSurfaceVariant);
+  const onSurface = readCssColor(styles, '--color-on-surface', DEFAULT_CHART_THEME.onSurface);
+  const surface = readCssColor(styles, '--color-surface-container-lowest', DEFAULT_CHART_THEME.surface);
+  const surfaceHigh = readCssColor(styles, '--color-surface-container-highest', DEFAULT_CHART_THEME.surfaceHigh);
+  const outlineVariant = readCssColor(styles, '--color-outline-variant', DEFAULT_CHART_THEME.gridColor);
+
+  return {
+    primary,
+    primarySoft: colorWithAlpha(primary, 0.18),
+    primaryMuted: colorWithAlpha(primary, 0.42),
+    primaryTransparent: colorWithAlpha(primary, 0),
+    onSurfaceVariant,
+    onSurface,
+    surface,
+    surfaceHigh,
+    gridColor: colorWithAlpha(outlineVariant, 0.38),
+  };
+}
+
+function readCssColor(styles: CSSStyleDeclaration, token: string, fallback: string) {
+  const value = styles.getPropertyValue(token).trim();
+  return value || fallback;
+}
+
+function colorWithAlpha(color: string, alpha: number) {
+  const normalizedAlpha = Math.max(0, Math.min(alpha, 1));
+  const normalizedColor = color.trim();
+  const hexMatch = normalizedColor.match(/^#([0-9a-f]{6})$/i);
+  if (hexMatch) {
+    const red = parseInt(hexMatch[1].slice(0, 2), 16);
+    const green = parseInt(hexMatch[1].slice(2, 4), 16);
+    const blue = parseInt(hexMatch[1].slice(4, 6), 16);
+    return `rgb(${red} ${green} ${blue} / ${normalizedAlpha})`;
+  }
+
+  const rgbMatch = normalizedColor.match(/^rgba?\(([^)]+)\)$/i);
+  if (rgbMatch) {
+    const channels = rgbMatch[1]
+      .replace(/\//g, ' ')
+      .replace(/,/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .slice(0, 3);
+    if (channels.length === 3) {
+      return `rgb(${channels.join(' ')} / ${normalizedAlpha})`;
+    }
+  }
+
+  return normalizedAlpha === 1 ? normalizedColor : DEFAULT_CHART_THEME.primarySoft;
+}
+
+function areChartThemesEqual(firstTheme: ChartTheme, secondTheme: ChartTheme) {
+  return Object.keys(firstTheme).every((key) => (
+    firstTheme[key as keyof ChartTheme] === secondTheme[key as keyof ChartTheme]
+  ));
 }
 
 function ChartEmptyState(props: { icon: string; text: string }) {
