@@ -181,14 +181,17 @@ jobs:
             }
           }
 
-          const cargo = readFileSync('apps/desktop/src-tauri/Cargo.toml', 'utf8');
+          const cargo = readFileSync('apps/desktop/src-tauri/Cargo.toml', 'utf8').replace(/\r\n/g, '\n');
           const cargoVersion = cargo.match(/^version = "([^"]+)"$/m)?.[1];
           if (cargoVersion !== expectedVersion) {
             throw new Error(`Cargo.toml 版本号为 ${cargoVersion ?? '空'}，预期为 ${expectedVersion}`);
           }
 
-          const cargoLock = readFileSync('apps/desktop/src-tauri/Cargo.lock', 'utf8');
-          const localPackage = cargoLock.match(/\[\[package\]\]\nname = "gsat-desktop"\nversion = "([^"]+)"/)?.[1];
+          const cargoLock = readFileSync('apps/desktop/src-tauri/Cargo.lock', 'utf8').replace(/\r\n/g, '\n');
+          const localPackageBlock = cargoLock
+            .split('\n[[package]]\n')
+            .find((block) => /^name = "gsat-desktop"$/m.test(block));
+          const localPackage = localPackageBlock?.match(/^version = "([^"]+)"$/m)?.[1];
           if (localPackage !== expectedVersion) {
             throw new Error(`Cargo.lock 中 gsat-desktop 版本号为 ${localPackage ?? '空'}，预期为 ${expectedVersion}`);
           }
