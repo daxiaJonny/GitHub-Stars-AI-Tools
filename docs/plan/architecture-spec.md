@@ -14,13 +14,13 @@
 | --- | --- | --- |
 | 桌面壳 | Tauri 2 | 本地优先、体积小、系统能力强 |
 | 前端 | React 19 + Vite + TypeScript | 生态成熟，适合复杂工作台 |
-| 路由 | TanStack Router | 类型安全路由 |
-| 数据请求 | TanStack Query | 管理本地 API 请求状态 |
-| UI | shadcn/ui + Tailwind | 快速构建高质量界面 |
+| 路由 | 应用内页面状态 | 当前桌面端以轻量页面状态切换为主，后续再评估独立路由库 |
+| 数据请求 | Tauri Commands + React 状态 | 通过本地 IPC 调用 Rust 能力，避免引入远端 API 层 |
+| UI | Tailwind CSS + 项目内组件 | 统一 Material Symbols 图标、玻璃面板、响应式布局和深色模式 |
 | 本地存储 | SQLite | 单用户本地数据稳定可靠 |
 | 全文检索 | SQLite FTS5 | MVP 足够，维护成本低 |
-| 向量检索 | sqlite-vec / pgvector / Qdrant | 分阶段演进 |
-| AI Provider | 统一 Provider 接口 | 支持 MiniMax、OpenAI、DeepSeek、Ollama |
+| 向量检索 | zvec 或其他本地向量索引 | 后续可选增强，当前上线主链路不要求向量模型 |
+| AI 服务适配层 | 统一 AI 请求接口 | 支持 OpenAI、OpenAI 兼容接口和 Anthropic |
 
 ## 目标目录结构
 
@@ -29,10 +29,10 @@ apps/desktop/              # Tauri 桌面应用
 apps/desktop/src/          # React UI
 apps/desktop/src-tauri/    # Tauri/Rust 桌面壳
 packages/domain/           # 领域模型、状态机、查询 DSL
-packages/github/           # GitHub Provider
-packages/ai/               # AI Provider 抽象与实现
-packages/storage/          # SQLite schema、迁移、Repository
-packages/search/           # FTS、向量检索、重排序
+packages/github/           # GitHub 数据适配
+packages/ai/               # AI 服务适配层
+packages/storage/          # SQLite schema、初始化、Repository
+packages/search/           # FTS、本地知识检索、后续可选向量检索
 packages/worker/           # 同步、README、AI 处理任务
 packages/ui/               # 共享 UI 组件
 docs/                      # spec、计划、进度
@@ -49,7 +49,7 @@ flowchart TD
   Domain --> Search[Search Engine]
   Domain --> Queue[Job Queue]
   Queue --> Pipeline[Knowledge Pipeline]
-  Pipeline --> AI[AI Provider Layer]
+  Pipeline --> AI[AI Service Layer]
   Pipeline --> Storage
   Search --> Storage
 ```
@@ -102,7 +102,7 @@ flowchart TD
 | --- | --- |
 | `repo_id` | 仓库 ID |
 | `summary_zh` | 中文摘要 |
-| `readme_zh` | 中文全文译文，V0.5 |
+| `readme_zh` | 中文全文译文，后续增强 |
 | `keywords_json` | 关键词 |
 | `suggested_tags_json` | AI 推荐标签 |
 | `model` | 模型名 |
@@ -130,7 +130,7 @@ flowchart TD
 | 字段 | 说明 |
 | --- | --- |
 | `id` | 任务 ID |
-| `type` | sync_stars/fetch_readme/summarize/translate/embed |
+| `type` | sync_stars/fetch_readme/summarize/translate，embed 仅用于后续可选向量索引 |
 | `payload_json` | 任务参数 |
 | `status` | pending/running/succeeded/failed/skipped |
 | `idempotency_key` | 幂等键 |
@@ -146,10 +146,9 @@ stateDiagram-v2
   SyncingStars --> FetchingReadme: Star 元数据写入完成
   FetchingReadme --> Summarizing: README hash 变化
   FetchingReadme --> Indexed: README 未变化
-  Summarizing --> Translating: V0.5 开启全文翻译
-  Summarizing --> Embedding: MVP 只生成摘要
-  Translating --> Embedding
-  Embedding --> Indexed
+  Summarizing --> Translating: 后续开启全文翻译
+  Summarizing --> Indexed: 当前上线主链路
+  Translating --> Indexed
   SyncingStars --> Failed: GitHub API 失败
   FetchingReadme --> Failed: README 抓取失败
   Summarizing --> Failed: AI 失败
@@ -157,24 +156,27 @@ stateDiagram-v2
   Indexed --> Idle
 ```
 
-## AI Provider 接口
+## AI 服务接口
 
 ```ts
 // 伪代码：业务层只能依赖这个端口，不依赖具体模型 SDK
 export interface AiProvider {
   summarizeReadme(input: SummarizeInput): Promise<SummaryResult>;
   translateReadme(input: TranslateInput): Promise<TranslateResult>;
-  embed(input: EmbedInput): Promise<EmbeddingResult>;
+  embed?(input: EmbedInput): Promise<EmbeddingResult>;
   understandQuery(input: QueryInput): Promise<QueryUnderstanding>;
 }
 ```
 
-实现：
+当前实现：
 
-- `MiniMaxProvider`
-- `OpenAIProvider`
-- `DeepSeekProvider`
-- `OllamaProvider`
+- `OpenAI` 官方接口
+- `OpenAI-compatible` 兼容 Chat Completions 的第三方接口
+- `Anthropic` Claude Messages API
+
+当前知识库 AI 只要求聊天协议，不要求用户配置向量模型，也不会在自然语言搜索、README 摘要、标签网络或 GitHub 相似推荐中自动调用 Embeddings 接口。`embed?` 仅为后续 zvec 本地向量索引保留能力边界。
+
+后续新增服务时继续挂在同一适配层，不把模型 SDK 直接暴露给 UI。
 
 ## 查询 DSL
 
@@ -199,11 +201,12 @@ MVP：
 
 1. `repositories` 元数据过滤。
 2. `SQLite FTS5` 检索 name、description、topics、note、summary_zh。
-3. 返回基础匹配理由。
+3. 结合 README 缓存、AI 摘要、标签、笔记和最近对话上下文返回中文匹配理由。
+4. 不生成 query embedding，不要求向量模型。
 
-V0.5：
+后续 zvec 混合检索：
 
-1. Query Embedding。
+1. 后续在用户配置 Embedding 后生成 query embedding。
 2. FTS 与向量双路召回。
 3. 合并候选。
 4. 用规则或 reranker 重排序。
