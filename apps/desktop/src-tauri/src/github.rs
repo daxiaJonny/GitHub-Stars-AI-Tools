@@ -1,9 +1,11 @@
-use crate::auth::{github_api_get, github_api_get_optional, github_api_post};
+use crate::auth::{github_api_get, github_api_get_optional, github_api_post, github_api_put_empty};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const STARRED_REPOSITORIES_API: &str = "https://api.github.com/user/starred";
+const STAR_REPOSITORY_API: &str = "https://api.github.com/user/starred";
 const STARRED_ACCEPT: &str = "application/vnd.github.star+json";
 const README_ACCEPT: &str = "application/vnd.github+json";
 const GIST_API: &str = "https://api.github.com/gists";
@@ -50,6 +52,8 @@ pub struct GistExportResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHubRepositoryRecommendation {
+    pub candidate_id: Option<String>,
+    pub candidate_status: Option<String>,
     pub full_name: String,
     pub description: Option<String>,
     pub language: Option<String>,
@@ -216,11 +220,7 @@ pub fn search_repositories(
         return Ok(Vec::new());
     }
 
-    let url = format!(
-        "{SEARCH_REPOSITORIES_API}?q={query}&sort=stars&order=desc&per_page={per_page}",
-        query = percent_encode(normalized_query),
-        per_page = per_page.clamp(1, 30),
-    );
+    let url = build_repository_search_url(normalized_query, per_page);
     let body = github_api_get(token, &url, README_ACCEPT)?;
     let response = serde_json::from_str::<GitHubSearchRepositoryResponse>(&body)
         .map_err(|error| format!("GitHub 搜索响应解析失败：{error}"))?;
@@ -229,6 +229,8 @@ pub fn search_repositories(
         .items
         .into_iter()
         .map(|item| GitHubRepositoryRecommendation {
+            candidate_id: None,
+            candidate_status: None,
             full_name: item.full_name,
             description: item.description,
             language: item.language,
@@ -239,6 +241,35 @@ pub fn search_repositories(
             pushed_at: item.pushed_at,
         })
         .collect())
+}
+
+pub fn star_repository(token: &str, full_name: &str) -> Result<(), String> {
+    let (owner, name) = split_repository_full_name(full_name)?;
+    let url = format!(
+        "{STAR_REPOSITORY_API}/{owner}/{name}",
+        owner = percent_encode(owner),
+        name = percent_encode(name),
+    );
+    github_api_put_empty(token, &url, README_ACCEPT)
+}
+
+fn build_repository_search_url(query: &str, per_page: usize) -> String {
+    format!(
+        "{SEARCH_REPOSITORIES_API}?q={query}&sort=stars&order=desc&per_page={per_page}",
+        query = percent_encode(query.trim()),
+        per_page = per_page.clamp(1, 30),
+    )
+}
+
+fn split_repository_full_name(full_name: &str) -> Result<(&str, &str), String> {
+    let normalized = full_name.trim();
+    let Some((owner, name)) = normalized.split_once('/') else {
+        return Err("GitHub 仓库名称必须是 owner/repo 格式".to_owned());
+    };
+    if owner.trim().is_empty() || name.trim().is_empty() || name.contains('/') {
+        return Err("GitHub 仓库名称必须是 owner/repo 格式".to_owned());
+    }
+    Ok((owner.trim(), name.trim()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -259,18 +290,9 @@ fn percent_encode(value: &str) -> String {
 }
 
 fn current_iso_timestamp() -> Result<String, String> {
-    let output = std::process::Command::new("date")
-        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-        .output()
-        .map_err(|error| format!("系统时间读取失败：{error}"))?;
-
-    if !output.status.success() {
-        return Err("系统时间读取失败".to_owned());
-    }
-
-    String::from_utf8(output.stdout)
-        .map(|value| value.trim().to_owned())
-        .map_err(|_| "系统时间输出不是有效文本".to_owned())
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|error| format!("系统时间格式化失败：{error}"))
 }
 
 pub fn fetch_starred_repositories_page(
@@ -330,5 +352,41 @@ mod tests {
             repository_local_id("1001", 42),
             repository_local_id("1002", 42)
         );
+    }
+
+    #[test]
+    fn build_repository_search_url_encodes_query_and_clamps_page_size() {
+        let url =
+            build_repository_search_url("react animation language:TypeScript stars:>1000", 100);
+
+        assert_eq!(
+            url,
+            "https://api.github.com/search/repositories?q=react%20animation%20language%3ATypeScript%20stars%3A%3E1000&sort=stars&order=desc&per_page=30"
+        );
+    }
+
+    #[test]
+    fn split_repository_full_name_accepts_owner_repo() {
+        let (owner, name) =
+            split_repository_full_name(" octo-org/hello-world ").expect("应接受 owner/repo");
+
+        assert_eq!(owner, "octo-org");
+        assert_eq!(name, "hello-world");
+    }
+
+    #[test]
+    fn split_repository_full_name_rejects_invalid_values() {
+        assert!(split_repository_full_name("missing-slash").is_err());
+        assert!(split_repository_full_name("/missing-owner").is_err());
+        assert!(split_repository_full_name("owner/").is_err());
+        assert!(split_repository_full_name("owner/repo/extra").is_err());
+    }
+
+    #[test]
+    fn current_iso_timestamp_returns_rfc3339_utc_time() {
+        let timestamp = current_iso_timestamp().expect("应能生成 UTC 时间戳");
+
+        assert!(timestamp.ends_with('Z'));
+        OffsetDateTime::parse(&timestamp, &Rfc3339).expect("时间戳必须符合 RFC3339");
     }
 }

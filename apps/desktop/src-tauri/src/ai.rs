@@ -1,17 +1,21 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io::Write;
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
 const PROMPT_VERSION: &str = "readme-summary-v1";
 const TAG_NETWORK_PROMPT_VERSION: &str = "tag-network-v1";
 const MAX_README_CHARS: usize = 18_000;
-const MAX_TAG_NETWORK_REPOSITORIES: usize = 300;
+pub(crate) const MAX_TAG_NETWORK_REPOSITORIES: usize = 300;
 const AI_CONNECT_TIMEOUT_SECONDS: u16 = 15;
 const AI_REQUEST_TIMEOUT_SECONDS: u16 = 120;
+const AI_API_MAX_ATTEMPTS: usize = 3;
+const AI_API_RETRY_BASE_DELAY_MS: u64 = 350;
+const ANTHROPIC_SUMMARY_MAX_TOKENS: u16 = 1600;
+const ANTHROPIC_TAG_NETWORK_MAX_TOKENS: u16 = 2400;
+const ANTHROPIC_RECOMMENDATION_MAX_TOKENS: u16 = 1000;
+const ANTHROPIC_SEARCH_PLAN_MAX_TOKENS: u16 = 800;
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +35,16 @@ pub struct AiSummaryDocument {
     pub suggested_tags: Vec<String>,
     pub model: String,
     pub prompt_version: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiModelOption {
+    pub id: String,
+    pub display_name: Option<String>,
+    pub owned_by: Option<String>,
 }
 
 pub struct AiTagRepositoryBrief {
@@ -51,11 +65,19 @@ pub struct AiTagNetworkSuggestion {
     pub repository_full_names: Vec<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiGithubRecommendationPlan {
     pub rationale_zh: String,
     pub queries: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSearchPlan {
+    pub search_query: String,
+    pub keywords: Vec<String>,
+    pub rationale_zh: String,
 }
 
 #[derive(Deserialize)]
@@ -85,6 +107,13 @@ struct AiGithubRecommendationJson {
 }
 
 #[derive(Deserialize)]
+struct AiSearchPlanJson {
+    search_query: Option<String>,
+    keywords: Option<Vec<String>>,
+    rationale_zh: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct OpenAiChatResponse {
     choices: Vec<OpenAiChoice>,
 }
@@ -96,7 +125,19 @@ struct OpenAiChoice {
 
 #[derive(Deserialize)]
 struct OpenAiMessage {
-    content: Option<String>,
+    content: Option<OpenAiMessageContent>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OpenAiMessageContent {
+    Text(String),
+    Parts(Vec<OpenAiMessageContentPart>),
+}
+
+#[derive(Deserialize)]
+struct OpenAiMessageContentPart {
+    text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -109,9 +150,37 @@ struct AnthropicContentBlock {
     text: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModelRecord>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiModelRecord {
+    id: String,
+    owned_by: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicModelsResponse {
+    data: Vec<AnthropicModelRecord>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicModelRecord {
+    id: String,
+    display_name: Option<String>,
+}
+
 struct HttpResponse {
     status_success: bool,
     http_code: Option<u16>,
+    body: String,
+}
+
+struct JsonPostRequest {
+    endpoint: String,
+    headers: Vec<(&'static str, String)>,
     body: String,
 }
 
@@ -126,8 +195,8 @@ pub fn summarize_readme(
     let prompt = build_summary_prompt(repository_full_name, description, readme_markdown);
     let content = match provider.as_str() {
         "openai" => request_openai(config, &prompt)?,
-        "anthropic" => request_anthropic(config, &prompt)?,
-        _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI Provider".to_owned()),
+        "anthropic" => request_anthropic(config, &prompt, ANTHROPIC_SUMMARY_MAX_TOKENS)?,
+        _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
     };
     let document = parse_ai_document(&content)?;
 
@@ -138,6 +207,8 @@ pub fn summarize_readme(
         suggested_tags: document.suggested_tags.unwrap_or_default(),
         model: config.model.trim().to_owned(),
         prompt_version: PROMPT_VERSION.to_owned(),
+        input_tokens: estimate_tokens(&prompt),
+        output_tokens: estimate_tokens(&content),
     })
 }
 
@@ -153,8 +224,8 @@ pub fn generate_tag_network(
     let prompt = build_tag_network_prompt(repositories);
     let content = match provider.as_str() {
         "openai" => request_openai(config, &prompt)?,
-        "anthropic" => request_anthropic(config, &prompt)?,
-        _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI Provider".to_owned()),
+        "anthropic" => request_anthropic(config, &prompt, ANTHROPIC_TAG_NETWORK_MAX_TOKENS)?,
+        _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
     };
 
     parse_tag_network_document(&content, repositories)
@@ -172,73 +243,151 @@ pub fn plan_github_recommendations(
     let prompt = build_github_recommendation_prompt(repositories);
     let content = match provider.as_str() {
         "openai" => request_openai(config, &prompt)?,
-        "anthropic" => request_anthropic(config, &prompt)?,
-        _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI Provider".to_owned()),
+        "anthropic" => request_anthropic(config, &prompt, ANTHROPIC_RECOMMENDATION_MAX_TOKENS)?,
+        _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
     };
 
     parse_github_recommendation_plan(&content)
 }
 
+pub fn plan_search_query(
+    config: &AiRequestConfig,
+    query: &str,
+    context_queries: &[String],
+) -> Result<AiSearchPlan, String> {
+    let provider = validate_request_config(config)?;
+    let normalized_query =
+        normalize_text(Some(query)).ok_or_else(|| "请输入要搜索的自然语言问题".to_owned())?;
+    let prompt = build_search_query_prompt(&normalized_query, context_queries);
+    let content = match provider.as_str() {
+        "openai" => request_openai(config, &prompt)?,
+        "anthropic" => request_anthropic(config, &prompt, ANTHROPIC_SEARCH_PLAN_MAX_TOKENS)?,
+        _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
+    };
+
+    parse_search_plan(&content, &normalized_query)
+}
+
+pub fn list_models(config: &AiRequestConfig) -> Result<Vec<AiModelOption>, String> {
+    let provider = validate_model_list_config(config)?;
+    match provider.as_str() {
+        "openai" => list_openai_models(config),
+        "anthropic" => list_anthropic_models(config),
+        _ => Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
+    }
+}
+
 fn validate_request_config(config: &AiRequestConfig) -> Result<String, String> {
     let provider = config.provider.trim().to_ascii_lowercase();
     if provider == "none" || provider.is_empty() {
-        return Err("请先在设置中配置 AI Provider".to_owned());
-    }
-
-    if config.api_key.trim().is_empty() {
-        return Err("请先填写 AI API Key".to_owned());
+        return Err("请先在设置中配置 AI 服务".to_owned());
     }
 
     let base_url = config.base_url.as_deref().map(str::trim).unwrap_or("");
     if provider == "openai-compatible" && base_url.is_empty() {
         return Err("请填写 OpenAI 兼容接口的请求地址".to_owned());
     }
-    if !base_url.is_empty()
-        && !(base_url.starts_with("http://") || base_url.starts_with("https://"))
-    {
-        return Err("AI 请求地址必须以 http:// 或 https:// 开头".to_owned());
+    if !base_url.is_empty() && !is_allowed_ai_base_url(base_url) {
+        return Err("AI 请求地址必须使用 https://；只有本机调试地址可以使用 http://。".to_owned());
     }
 
     if config.model.trim().is_empty() {
         return Err("请先填写 AI 模型 ID".to_owned());
     }
 
+    if config.api_key.trim().is_empty()
+        && !(provider == "openai-compatible" && is_local_ai_base_url(base_url))
+    {
+        return Err("请先填写 AI API Key".to_owned());
+    }
+
     match provider.as_str() {
         "openai" | "openai-compatible" => Ok("openai".to_owned()),
         "anthropic" => Ok("anthropic".to_owned()),
-        _ => Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI Provider".to_owned()),
+        _ => Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
     }
 }
 
+fn validate_model_list_config(config: &AiRequestConfig) -> Result<String, String> {
+    let provider = config.provider.trim().to_ascii_lowercase();
+    if provider == "none" || provider.is_empty() {
+        return Err("请先选择要获取模型列表的 AI 服务".to_owned());
+    }
+
+    let base_url = config.base_url.as_deref().map(str::trim).unwrap_or("");
+    if provider == "openai-compatible" && base_url.is_empty() {
+        return Err("请填写 OpenAI 兼容接口的请求地址".to_owned());
+    }
+    if !base_url.is_empty() && !is_allowed_ai_base_url(base_url) {
+        return Err("AI 请求地址必须使用 https://；只有本机调试地址可以使用 http://。".to_owned());
+    }
+
+    if config.api_key.trim().is_empty()
+        && !(provider == "openai-compatible" && is_local_ai_base_url(base_url))
+    {
+        return Err("请先填写 AI API Key 后再获取模型列表".to_owned());
+    }
+
+    match provider.as_str() {
+        "openai" | "openai-compatible" => Ok("openai".to_owned()),
+        "anthropic" => Ok("anthropic".to_owned()),
+        _ => Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
+    }
+}
+
+fn is_allowed_ai_base_url(base_url: &str) -> bool {
+    let normalized = base_url.trim().to_ascii_lowercase();
+    if normalized.starts_with("https://") {
+        return true;
+    }
+
+    if !normalized.starts_with("http://") {
+        return false;
+    }
+
+    let host_with_port = normalized
+        .trim_start_matches("http://")
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    if host_with_port.is_empty() || host_with_port.contains('@') {
+        return false;
+    }
+
+    let host = if let Some(rest) = host_with_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host_with_port.split(':').next().unwrap_or("")
+    };
+
+    matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+}
+
+fn is_local_ai_base_url(base_url: &str) -> bool {
+    let normalized = base_url.trim().to_ascii_lowercase();
+    let Some(host_with_port) = normalized
+        .strip_prefix("http://")
+        .or_else(|| normalized.strip_prefix("https://"))
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+    else {
+        return false;
+    };
+    if host_with_port.is_empty() || host_with_port.contains('@') {
+        return false;
+    }
+
+    let host = if let Some(rest) = host_with_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host_with_port.split(':').next().unwrap_or("")
+    };
+
+    matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+}
+
 fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, String> {
-    let endpoint = build_endpoint(
-        config.base_url.as_deref(),
-        DEFAULT_OPENAI_BASE_URL,
-        "chat/completions",
-    );
-    let body = serde_json::json!({
-        "model": config.model.trim(),
-        "temperature": 0.2,
-        "messages": [
-            {
-                "role": "system",
-                "content": "你是开源项目知识库助手。只输出 JSON，不要输出 Markdown。"
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    })
-    .to_string();
-    let response = execute_json_post(
-        &endpoint,
-        &[
-            ("Authorization", format!("Bearer {}", config.api_key.trim())),
-            ("Content-Type", "application/json".to_owned()),
-        ],
-        &body,
-    )?;
+    let request = build_openai_chat_request(config, prompt);
+    let response = execute_json_post(&request.endpoint, &request.headers, &request.body)?;
 
     if !response.status_success {
         return Err(format_ai_http_error(
@@ -253,38 +402,18 @@ fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, Stri
     parsed
         .choices
         .into_iter()
-        .find_map(|choice| choice.message.content)
+        .filter_map(|choice| choice.message.content.and_then(openai_content_to_text))
+        .find(|content| !content.trim().is_empty())
         .ok_or_else(|| "OpenAI 响应中没有摘要内容".to_owned())
 }
 
-fn request_anthropic(config: &AiRequestConfig, prompt: &str) -> Result<String, String> {
-    let endpoint = build_endpoint(
-        config.base_url.as_deref(),
-        DEFAULT_ANTHROPIC_BASE_URL,
-        "messages",
-    );
-    let body = serde_json::json!({
-        "model": config.model.trim(),
-        "max_tokens": 1200,
-        "temperature": 0.2,
-        "system": "你是开源项目知识库助手。只输出 JSON，不要输出 Markdown。",
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    })
-    .to_string();
-    let response = execute_json_post(
-        &endpoint,
-        &[
-            ("x-api-key", config.api_key.trim().to_owned()),
-            ("anthropic-version", "2023-06-01".to_owned()),
-            ("Content-Type", "application/json".to_owned()),
-        ],
-        &body,
-    )?;
+fn request_anthropic(
+    config: &AiRequestConfig,
+    prompt: &str,
+    max_tokens: u16,
+) -> Result<String, String> {
+    let request = build_anthropic_message_request(config, prompt, max_tokens);
+    let response = execute_json_post(&request.endpoint, &request.headers, &request.body)?;
 
     if !response.status_success {
         return Err(format_ai_http_error(
@@ -296,11 +425,150 @@ fn request_anthropic(config: &AiRequestConfig, prompt: &str) -> Result<String, S
 
     let parsed = serde_json::from_str::<AnthropicMessageResponse>(&response.body)
         .map_err(|error| format!("Anthropic 响应解析失败：{error}"))?;
-    parsed
+    let content = parsed
         .content
         .into_iter()
-        .find_map(|block| block.text)
-        .ok_or_else(|| "Anthropic 响应中没有摘要内容".to_owned())
+        .filter_map(|block| normalize_text(block.text.as_deref()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    normalize_text(Some(&content)).ok_or_else(|| "Anthropic 响应中没有摘要内容".to_owned())
+}
+
+fn list_openai_models(config: &AiRequestConfig) -> Result<Vec<AiModelOption>, String> {
+    let mut headers = Vec::new();
+    let api_key = config.api_key.trim();
+    if !api_key.is_empty() {
+        headers.push(("Authorization", format!("Bearer {api_key}")));
+    }
+
+    let endpoint = build_endpoint(
+        config.base_url.as_deref(),
+        DEFAULT_OPENAI_BASE_URL,
+        "models",
+    );
+    let response = execute_json_get(&endpoint, &headers)?;
+    if !response.status_success {
+        return Err(format_ai_http_error(
+            "OpenAI",
+            response.http_code,
+            &response.body,
+        ));
+    }
+
+    let parsed = serde_json::from_str::<OpenAiModelsResponse>(&response.body)
+        .map_err(|error| format!("OpenAI 模型列表解析失败：{error}"))?;
+    Ok(parsed
+        .data
+        .into_iter()
+        .filter_map(|model| {
+            normalize_text(Some(&model.id)).map(|id| AiModelOption {
+                id,
+                display_name: None,
+                owned_by: model.owned_by,
+            })
+        })
+        .collect())
+}
+
+fn list_anthropic_models(config: &AiRequestConfig) -> Result<Vec<AiModelOption>, String> {
+    let endpoint = build_endpoint(
+        config.base_url.as_deref(),
+        DEFAULT_ANTHROPIC_BASE_URL,
+        "models",
+    );
+    let response = execute_json_get(
+        &endpoint,
+        &[
+            ("x-api-key", config.api_key.trim().to_owned()),
+            ("anthropic-version", "2023-06-01".to_owned()),
+        ],
+    )?;
+    if !response.status_success {
+        return Err(format_ai_http_error(
+            "Anthropic",
+            response.http_code,
+            &response.body,
+        ));
+    }
+
+    let parsed = serde_json::from_str::<AnthropicModelsResponse>(&response.body)
+        .map_err(|error| format!("Anthropic 模型列表解析失败：{error}"))?;
+    Ok(parsed
+        .data
+        .into_iter()
+        .filter_map(|model| {
+            normalize_text(Some(&model.id)).map(|id| AiModelOption {
+                id,
+                display_name: normalize_text(model.display_name.as_deref()),
+                owned_by: None,
+            })
+        })
+        .collect())
+}
+
+fn build_openai_chat_request(config: &AiRequestConfig, prompt: &str) -> JsonPostRequest {
+    let mut headers = vec![("Content-Type", "application/json".to_owned())];
+    let api_key = config.api_key.trim();
+    if !api_key.is_empty() {
+        headers.insert(0, ("Authorization", format!("Bearer {api_key}")));
+    }
+
+    JsonPostRequest {
+        endpoint: build_endpoint(
+            config.base_url.as_deref(),
+            DEFAULT_OPENAI_BASE_URL,
+            "chat/completions",
+        ),
+        headers,
+        body: serde_json::json!({
+            "model": config.model.trim(),
+            "temperature": 0.2,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是开源项目知识库助手。只输出 JSON，不要输出 Markdown。"
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        })
+        .to_string(),
+    }
+}
+
+fn build_anthropic_message_request(
+    config: &AiRequestConfig,
+    prompt: &str,
+    max_tokens: u16,
+) -> JsonPostRequest {
+    JsonPostRequest {
+        endpoint: build_endpoint(
+            config.base_url.as_deref(),
+            DEFAULT_ANTHROPIC_BASE_URL,
+            "messages",
+        ),
+        headers: vec![
+            ("x-api-key", config.api_key.trim().to_owned()),
+            ("anthropic-version", "2023-06-01".to_owned()),
+            ("Content-Type", "application/json".to_owned()),
+        ],
+        body: serde_json::json!({
+            "model": config.model.trim(),
+            "max_tokens": max_tokens,
+            "temperature": 0.2,
+            "system": "你是开源项目知识库助手。只输出 JSON，不要输出 Markdown。",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        })
+        .to_string(),
+    }
 }
 
 fn build_summary_prompt(
@@ -360,7 +628,7 @@ fn build_tag_network_prompt(repositories: &[AiTagRepositoryBrief]) -> String {
             "仓库数量较多，本次只发送 Star 数和最近收藏排序靠前的 {MAX_TAG_NETWORK_REPOSITORIES} 个仓库。"
         )
     } else {
-        "已发送当前账号全部可用仓库简略信息。".to_owned()
+        "已发送本批可用仓库简略信息。".to_owned()
     };
 
     format!(
@@ -430,14 +698,54 @@ fn build_github_recommendation_prompt(repositories: &[AiTagRepositoryBrief]) -> 
     )
 }
 
+fn build_search_query_prompt(query: &str, context_queries: &[String]) -> String {
+    let context = context_queries
+        .iter()
+        .rev()
+        .take(4)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n- ");
+    let context_block = if context.is_empty() {
+        "无".to_owned()
+    } else {
+        format!("- {context}")
+    };
+
+    format!(
+        r#"请把用户对 GitHub Stars 知识库的自然语言问题改写成适合本地知识检索的短查询。
+检索范围包括：仓库名称、描述、语言、Topics、README 摘要、AI 关键词、建议标签、个人标签和笔记。
+
+要求：
+- search_query 只保留核心功能、技术栈、场景词，适合 substring/token 本地召回。
+- keywords 给出 3 到 8 个可参与召回的中英文关键词。
+- 若本轮上下文能帮助理解当前问题，请合并上下文中的重要约束。
+- 不要编造仓库名，不要输出 Markdown。
+
+输出严格 JSON：
+{{
+  "search_query": "react animation transition spring",
+  "keywords": ["React", "动画", "transition", "spring"],
+  "rationale_zh": "一句中文说明如何理解用户意图"
+}}
+
+本轮上下文：
+{context_block}
+
+当前问题：
+{query}
+"#
+    )
+}
+
 fn parse_ai_document(content: &str) -> Result<AiJsonDocument, String> {
     let json_text = extract_json_object(content).unwrap_or_else(|| content.trim().to_owned());
     let parsed = match serde_json::from_str::<AiJsonDocument>(&json_text) {
         Ok(parsed) => parsed,
         Err(_) => {
-            let fallback = normalize_text(Some(content))
-                .map(|value| truncate_chars(&value, 180))
-                .ok_or_else(|| "AI 返回内容为空，无法生成摘要".to_owned())?;
+            let fallback = normalize_plain_text_summary_fallback(content)?;
             return Ok(AiJsonDocument {
                 summary_zh: Some(fallback),
                 readme_zh: None,
@@ -457,14 +765,38 @@ fn parse_ai_document(content: &str) -> Result<AiJsonDocument, String> {
     })
 }
 
+fn normalize_plain_text_summary_fallback(content: &str) -> Result<String, String> {
+    let fallback = normalize_text(Some(content))
+        .map(|value| truncate_chars(&value, 180))
+        .ok_or_else(|| "AI 返回内容为空，无法生成摘要".to_owned())?;
+    let normalized = fallback.to_ascii_lowercase();
+    if fallback.contains('{')
+        || fallback.contains('}')
+        || fallback.contains("```")
+        || normalized.contains("summary_zh")
+        || normalized.contains("readme_zh")
+        || normalized.contains("keywords")
+        || normalized.contains("suggested_tags")
+    {
+        return Err("AI 返回内容不是可解析的结构化 JSON，请重试或更换模型。".to_owned());
+    }
+
+    Ok(fallback)
+}
+
 fn parse_tag_network_document(
     content: &str,
     repositories: &[AiTagRepositoryBrief],
 ) -> Result<Vec<AiTagNetworkSuggestion>, String> {
     let known_repositories = repositories
         .iter()
-        .map(|repository| repository.full_name.as_str())
-        .collect::<std::collections::HashSet<_>>();
+        .map(|repository| {
+            (
+                normalize_repository_full_name_lookup_key(&repository.full_name),
+                repository.full_name.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let json_text = extract_json_object(content).unwrap_or_else(|| content.trim().to_owned());
     let parsed = serde_json::from_str::<AiTagNetworkJson>(&json_text)
         .map_err(|error| format!("AI 标签网络响应解析失败：{error}"))?;
@@ -474,10 +806,17 @@ fn parse_tag_network_document(
         let Some(tag_name) = normalize_text(tag.tag_name.as_deref()) else {
             continue;
         };
+        let mut seen_repository_keys = HashSet::new();
         let repository_full_names =
             normalize_list(tag.repository_full_names.unwrap_or_default(), 30)
                 .into_iter()
-                .filter(|full_name| known_repositories.contains(full_name.as_str()))
+                .filter_map(|full_name| {
+                    let lookup_key = normalize_repository_full_name_lookup_key(&full_name);
+                    if lookup_key.is_empty() || !seen_repository_keys.insert(lookup_key.clone()) {
+                        return None;
+                    }
+                    known_repositories.get(&lookup_key).cloned()
+                })
                 .collect::<Vec<_>>();
 
         if repository_full_names.is_empty() {
@@ -521,6 +860,46 @@ fn parse_github_recommendation_plan(content: &str) -> Result<AiGithubRecommendat
     })
 }
 
+fn normalize_repository_full_name_lookup_key(value: &str) -> String {
+    let trimmed = value.trim().trim_matches(|character: char| {
+        character.is_whitespace() || character == '`' || character == '"' || character == '\''
+    });
+    let lower_trimmed = trimmed.to_ascii_lowercase();
+    let without_host = lower_trimmed
+        .find("github.com/")
+        .map(|index| &trimmed[index + "github.com/".len()..])
+        .unwrap_or(trimmed);
+    let without_suffix = without_host.trim_end_matches('/').trim_end_matches(".git");
+    let parts = without_suffix
+        .split('/')
+        .filter(|part| !part.trim().is_empty())
+        .map(str::trim)
+        .collect::<Vec<_>>();
+
+    if parts.len() >= 2 {
+        format!("{}/{}", parts[0], parts[1]).to_ascii_lowercase()
+    } else {
+        without_suffix.to_ascii_lowercase()
+    }
+}
+
+fn parse_search_plan(content: &str, fallback_query: &str) -> Result<AiSearchPlan, String> {
+    let json_text = extract_json_object(content).unwrap_or_else(|| content.trim().to_owned());
+    let parsed = serde_json::from_str::<AiSearchPlanJson>(&json_text)
+        .map_err(|error| format!("AI 搜索意图解析失败：{error}"))?;
+    let search_query =
+        normalize_text(parsed.search_query.as_deref()).unwrap_or_else(|| fallback_query.to_owned());
+    let keywords = normalize_list(parsed.keywords.unwrap_or_default(), 8);
+    let rationale_zh = normalize_text(parsed.rationale_zh.as_deref())
+        .unwrap_or_else(|| "已将自然语言问题改写为本地知识库检索词。".to_owned());
+
+    Ok(AiSearchPlan {
+        search_query,
+        keywords,
+        rationale_zh,
+    })
+}
+
 fn normalize_color(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -557,10 +936,64 @@ fn normalize_list(values: Vec<String>, limit: usize) -> Vec<String> {
     normalized
 }
 
+fn openai_content_to_text(content: OpenAiMessageContent) -> Option<String> {
+    match content {
+        OpenAiMessageContent::Text(text) => normalize_text(Some(&text)),
+        OpenAiMessageContent::Parts(parts) => {
+            let text = parts
+                .into_iter()
+                .filter_map(|part| normalize_text(part.text.as_deref()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            normalize_text(Some(&text))
+        }
+    }
+}
+
 fn extract_json_object(content: &str) -> Option<String> {
-    let start = content.find('{')?;
-    let end = content.rfind('}')?;
-    (start <= end).then(|| content[start..=end].to_owned())
+    for (start, character) in content.char_indices() {
+        if character != '{' {
+            continue;
+        }
+
+        let mut depth = 0_u32;
+        let mut in_string = false;
+        let mut escaped = false;
+
+        for (offset, current) in content[start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if current == '\\' {
+                    escaped = true;
+                } else if current == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            match current {
+                '"' => in_string = true,
+                '{' => depth = depth.saturating_add(1),
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        let end = start + offset + current.len_utf8();
+                        let candidate = &content[start..end];
+                        if serde_json::from_str::<serde_json::Value>(candidate)
+                            .is_ok_and(|value| value.is_object())
+                        {
+                            return Some(candidate.to_owned());
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    None
 }
 
 fn build_endpoint(base_url: Option<&str>, default_base_url: &str, suffix: &str) -> String {
@@ -582,123 +1015,118 @@ fn execute_json_post(
     headers: &[(&str, String)],
     body: &str,
 ) -> Result<HttpResponse, String> {
-    let body_path = write_temp_request_body(body)?;
-    let mut config = format!(
-        r#"
-		silent
-	show-error
-	location
-	connect-timeout = "{AI_CONNECT_TIMEOUT_SECONDS}"
-	max-time = "{AI_REQUEST_TIMEOUT_SECONDS}"
-	url = "{}"
-		request = "POST"
-	write-out = "\n__GITHUB_STARS_AI_HTTP_STATUS__:%{{http_code}}"
-	data-binary = "@{}"
-	"#,
-        curl_config_string(url),
-        curl_config_string(&body_path.to_string_lossy()),
-    );
-
-    for (name, value) in headers {
-        config.push_str(&format!(
-            "header = \"{}: {}\"\n",
-            curl_config_string(name),
-            curl_config_string(value)
-        ));
-    }
-
-    let mut child = Command::new("curl")
-        .args(["--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            let _ = fs::remove_file(&body_path);
-            format!("AI 接口请求失败：{error}")
-        })?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "AI 接口请求初始化失败".to_owned())?;
-    stdin.write_all(config.as_bytes()).map_err(|error| {
-        let _ = fs::remove_file(&body_path);
-        format!("AI 接口请求写入失败：{error}")
-    })?;
-    drop(stdin);
-
-    let output = child.wait_with_output().map_err(|error| {
-        let _ = fs::remove_file(&body_path);
-        format!("AI 接口请求执行失败：{error}")
-    })?;
-    let _ = fs::remove_file(&body_path);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        if stderr.to_ascii_lowercase().contains("timed out")
-            || stderr.to_ascii_lowercase().contains("timeout")
-        {
-            return Err(format!(
-                "AI 接口请求超时，请检查请求地址、模型 ID 或网络连接（已等待 {AI_REQUEST_TIMEOUT_SECONDS} 秒）。"
-            ));
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(AI_CONNECT_TIMEOUT_SECONDS.into()))
+        .timeout(Duration::from_secs(AI_REQUEST_TIMEOUT_SECONDS.into()))
+        .build()
+        .map_err(|error| format!("AI 接口请求初始化失败：{error}"))?;
+    for attempt in 1..=AI_API_MAX_ATTEMPTS {
+        let mut request = client.post(url);
+        for (name, value) in headers {
+            request = request.header(*name, value);
         }
-        return Err(if stderr.is_empty() {
-            "AI 接口请求失败".to_owned()
-        } else {
-            format!("AI 接口请求失败：{stderr}")
-        });
+
+        let response = match request.body(body.to_owned()).send() {
+            Ok(response) => response,
+            Err(error) if should_retry_ai_transport_error(&error, attempt) => {
+                sleep_before_ai_retry(attempt);
+                continue;
+            }
+            Err(error) => return Err(format_ai_request_error(error)),
+        };
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| format!("AI 接口响应读取失败：{error}"))?;
+        let api_response = HttpResponse {
+            status_success: status.is_success(),
+            http_code: Some(status.as_u16()),
+            body,
+        };
+
+        if should_retry_ai_response(&api_response, attempt) {
+            sleep_before_ai_retry(attempt);
+            continue;
+        }
+
+        return Ok(api_response);
     }
 
-    let stdout =
-        String::from_utf8(output.stdout).map_err(|_| "AI 接口响应不是有效文本".to_owned())?;
-    let marker = "\n__GITHUB_STARS_AI_HTTP_STATUS__:";
-    let (body, http_code) = match stdout.rsplit_once(marker) {
-        Some((body, status)) => (body.to_owned(), status.trim().parse::<u16>().ok()),
-        None => (stdout, None),
-    };
-
-    Ok(HttpResponse {
-        status_success: http_code
-            .map(|code| (200..300).contains(&code))
-            .unwrap_or(false),
-        http_code,
-        body,
-    })
+    Err("AI 接口多次重试后仍未成功，请稍后再试。".to_owned())
 }
 
-fn write_temp_request_body(body: &str) -> Result<std::path::PathBuf, String> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("AI 请求临时文件时间戳生成失败：{error}"))?
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "gsat-ai-request-{}-{timestamp}.json",
-        std::process::id()
+fn execute_json_get(url: &str, headers: &[(&str, String)]) -> Result<HttpResponse, String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(AI_CONNECT_TIMEOUT_SECONDS.into()))
+        .timeout(Duration::from_secs(AI_CONNECT_TIMEOUT_SECONDS.into()))
+        .build()
+        .map_err(|error| format!("AI 模型列表请求初始化失败：{error}"))?;
+    for attempt in 1..=AI_API_MAX_ATTEMPTS {
+        let mut request = client.get(url);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+
+        let response = match request.send() {
+            Ok(response) => response,
+            Err(error) if should_retry_ai_transport_error(&error, attempt) => {
+                sleep_before_ai_retry(attempt);
+                continue;
+            }
+            Err(error) => return Err(format_ai_request_error(error)),
+        };
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| format!("AI 模型列表响应读取失败：{error}"))?;
+        let api_response = HttpResponse {
+            status_success: status.is_success(),
+            http_code: Some(status.as_u16()),
+            body,
+        };
+
+        if should_retry_ai_response(&api_response, attempt) {
+            sleep_before_ai_retry(attempt);
+            continue;
+        }
+
+        return Ok(api_response);
+    }
+
+    Err("AI 模型列表多次重试后仍未成功，请稍后再试。".to_owned())
+}
+
+fn format_ai_request_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        return format!(
+            "AI 接口请求超时，请检查请求地址、模型 ID 或网络连接（已等待 {AI_REQUEST_TIMEOUT_SECONDS} 秒）。"
+        );
+    }
+
+    format!("AI 接口请求失败：{error}")
+}
+
+fn should_retry_ai_transport_error(error: &reqwest::Error, attempt: usize) -> bool {
+    attempt < AI_API_MAX_ATTEMPTS
+        && (error.is_timeout() || error.is_connect() || error.is_request())
+}
+
+fn should_retry_ai_response(response: &HttpResponse, attempt: usize) -> bool {
+    if attempt >= AI_API_MAX_ATTEMPTS || response.status_success {
+        return false;
+    }
+
+    matches!(response.http_code, Some(429 | 500 | 502 | 503 | 504))
+}
+
+fn sleep_before_ai_retry(attempt: usize) {
+    std::thread::sleep(Duration::from_millis(
+        AI_API_RETRY_BASE_DELAY_MS.saturating_mul(attempt as u64),
     ));
-    fs::write(&path, body).map_err(|error| format!("AI 请求临时文件写入失败：{error}"))?;
-    Ok(path)
-}
-
-fn curl_config_string(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
 }
 
 fn format_ai_http_error(provider: &str, http_code: Option<u16>, body: &str) -> String {
-    let detail = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/message")
-                .or_else(|| value.pointer("/error/type"))
-                .and_then(|message| message.as_str())
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| truncate_chars(body.trim(), 180));
+    let detail = extract_ai_error_detail(body);
 
     if is_token_limit_error(http_code, &detail) {
         return match http_code {
@@ -707,9 +1135,75 @@ fn format_ai_http_error(provider: &str, http_code: Option<u16>, body: &str) -> S
         };
     }
 
+    let status_hint = ai_http_status_hint(http_code);
     match http_code {
-        Some(code) => format!("{provider} 接口请求失败（HTTP {code}）：{detail}"),
-        None => format!("{provider} 接口请求失败：{detail}"),
+        Some(code) => format!("{provider} 接口请求失败（HTTP {code}）：{status_hint}：{detail}"),
+        None => format!("{provider} 接口请求失败：{status_hint}：{detail}"),
+    }
+}
+
+fn ai_http_status_hint(http_code: Option<u16>) -> &'static str {
+    match http_code {
+        Some(401) | Some(403) => "API Key 无效或权限不足，请检查密钥、账号额度和模型权限",
+        Some(404) => "请求地址或模型 ID 不存在，请检查服务地址是否完整、模型名称是否正确",
+        Some(408) => "请求超时，请稍后重试或换用更快的模型",
+        Some(429) => "请求过于频繁或额度不足，请稍后重试或检查服务商额度",
+        Some(500..=599) => "AI 服务暂时不可用，请稍后重试",
+        _ => "请检查请求地址、API Key、模型 ID 或服务商返回信息",
+    }
+}
+
+fn extract_ai_error_detail(body: &str) -> String {
+    let trimmed_body = body.trim();
+    if trimmed_body.is_empty() {
+        return "响应体为空".to_owned();
+    }
+
+    serde_json::from_str::<serde_json::Value>(trimmed_body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .and_then(extract_json_error_message)
+                .or_else(|| {
+                    value
+                        .pointer("/message")
+                        .and_then(extract_json_error_message)
+                })
+                .or_else(|| {
+                    value
+                        .pointer("/detail")
+                        .and_then(extract_json_error_message)
+                })
+                .or_else(|| {
+                    value
+                        .pointer("/error_description")
+                        .and_then(extract_json_error_message)
+                })
+                .or_else(|| value.pointer("/error").and_then(extract_json_error_message))
+                .or_else(|| {
+                    value
+                        .pointer("/errors")
+                        .and_then(extract_json_error_message)
+                })
+                .or_else(|| extract_json_error_message(&value))
+        })
+        .unwrap_or_else(|| truncate_chars(trimmed_body, 180))
+}
+
+fn extract_json_error_message(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(message) => normalize_text(Some(message)),
+        serde_json::Value::Array(items) => items.iter().find_map(extract_json_error_message),
+        serde_json::Value::Object(object) => {
+            for key in ["message", "detail", "reason", "type", "error_description"] {
+                if let Some(message) = object.get(key).and_then(extract_json_error_message) {
+                    return Some(message);
+                }
+            }
+            object.values().find_map(extract_json_error_message)
+        }
+        _ => None,
     }
 }
 
@@ -730,9 +1224,17 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     result
 }
 
+fn estimate_tokens(value: &str) -> u64 {
+    let char_count = value.chars().count() as u64;
+    char_count.div_ceil(4).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn build_endpoint_accepts_base_or_full_endpoint() {
@@ -751,6 +1253,14 @@ mod tests {
                 "chat/completions"
             ),
             "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            build_endpoint(
+                Some("https://api.anthropic.com/v1/messages"),
+                DEFAULT_ANTHROPIC_BASE_URL,
+                "messages"
+            ),
+            "https://api.anthropic.com/v1/messages"
         );
     }
 
@@ -772,11 +1282,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_ai_document_ignores_trailing_brace_noise() {
+        let parsed = parse_ai_document(
+            r#"```json
+            {"summary_zh":"支持用 {owner}/{repo} 格式识别仓库。","keywords":["GitHub"],"suggested_tags":["工具"]}
+            ```
+            备注：不要再解析这里的 {额外说明}。"#
+        )
+        .expect("AI JSON 后的额外说明不应破坏解析");
+
+        assert_eq!(
+            parsed.summary_zh.as_deref(),
+            Some("支持用 {owner}/{repo} 格式识别仓库。")
+        );
+        assert_eq!(parsed.keywords.unwrap(), vec!["GitHub"]);
+    }
+
+    #[test]
     fn parse_ai_document_falls_back_to_plain_text_summary() {
         let parsed = parse_ai_document("这是一个普通文本摘要").expect("普通文本应作为摘要兜底");
 
         assert_eq!(parsed.summary_zh.as_deref(), Some("这是一个普通文本摘要"));
         assert!(parsed.keywords.unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_ai_document_rejects_malformed_json_like_summary() {
+        let error = match parse_ai_document(
+            r#"```json
+            {"summary_zh":"少了结尾引号,"keywords":["AI"]}
+            ```"#,
+        ) {
+            Ok(_) => panic!("疑似 JSON 的坏响应不能作为摘要保存"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("AI 返回内容不是可解析的结构化 JSON"));
     }
 
     #[test]
@@ -800,6 +1341,157 @@ mod tests {
     }
 
     #[test]
+    fn build_tag_network_prompt_uses_repository_briefs_and_schema() {
+        let repositories = (0..=MAX_TAG_NETWORK_REPOSITORIES)
+            .map(|index| AiTagRepositoryBrief {
+                full_name: format!("owner/repo-{index}"),
+                description: Some("Spring physics based React animation library".to_owned()),
+                language: Some("TypeScript".to_owned()),
+                topics: vec!["react".to_owned(), "animation".to_owned()],
+                ai_summary: Some("用于 React 交互动画和弹簧效果。".to_owned()),
+                suggested_tags: vec!["React 动画".to_owned()],
+                stars_count: 28000 + index as u64,
+            })
+            .collect::<Vec<_>>();
+
+        let prompt = build_tag_network_prompt(&repositories);
+
+        assert!(prompt.contains("生成 8 到 24 个中文短标签"));
+        assert!(prompt.contains("repository_full_names 必须来自输入的 full_name"));
+        assert!(prompt.contains("\"tag_name\""));
+        assert!(prompt.contains("\"repository_full_names\""));
+        assert!(prompt.contains("full_name: owner/repo-0"));
+        assert!(prompt.contains("language: TypeScript"));
+        assert!(prompt.contains("ai_suggested_tags: React 动画"));
+        assert!(prompt.contains("仓库数量较多"));
+        assert!(!prompt.contains(&format!(
+            "full_name: owner/repo-{MAX_TAG_NETWORK_REPOSITORIES}"
+        )));
+    }
+
+    #[test]
+    fn parse_tag_network_document_filters_invalid_suggestions() {
+        let repositories = vec![
+            AiTagRepositoryBrief {
+                full_name: "pmndrs/react-spring".to_owned(),
+                description: Some("Spring physics based React animation library".to_owned()),
+                language: Some("TypeScript".to_owned()),
+                topics: vec!["react".to_owned(), "animation".to_owned()],
+                ai_summary: Some("用于 React 交互动画和弹簧效果。".to_owned()),
+                suggested_tags: vec!["React 动画".to_owned()],
+                stars_count: 28000,
+            },
+            AiTagRepositoryBrief {
+                full_name: "vercel/next.js".to_owned(),
+                description: Some("The React Framework for the Web".to_owned()),
+                language: Some("TypeScript".to_owned()),
+                topics: vec!["react".to_owned(), "framework".to_owned()],
+                ai_summary: Some("适合构建生产级 React Web 应用。".to_owned()),
+                suggested_tags: vec!["React 框架".to_owned()],
+                stars_count: 135000,
+            },
+        ];
+        let suggestions = parse_tag_network_document(
+            r##"```json
+            {
+              "tags": [
+                {
+                  "tag_name": " React 动画 ",
+                  "color": "#EC4899",
+                  "repository_full_names": [
+                    "pmndrs/react-spring",
+                    "unknown/missing",
+                    "pmndrs/react-spring"
+                  ]
+                },
+                {
+                  "tag_name": "React 框架",
+                  "color": "pink",
+                  "repository_full_names": ["vercel/next.js"]
+                },
+                {
+                  "tag_name": " ",
+                  "repository_full_names": ["vercel/next.js"]
+                },
+                {
+                  "tag_name": "编造项目",
+                  "repository_full_names": ["fake/repo"]
+                }
+              ]
+            }
+            ```"##,
+            &repositories,
+        )
+        .expect("标签网络 JSON 应能解析");
+
+        assert_eq!(suggestions.len(), 2);
+        assert_eq!(suggestions[0].tag_name, "React 动画");
+        assert_eq!(suggestions[0].color.as_deref(), Some("#EC4899"));
+        assert_eq!(
+            suggestions[0].repository_full_names,
+            vec!["pmndrs/react-spring"]
+        );
+        assert_eq!(suggestions[1].tag_name, "React 框架");
+        assert_eq!(suggestions[1].color, None);
+        assert_eq!(suggestions[1].repository_full_names, vec!["vercel/next.js"]);
+    }
+
+    #[test]
+    fn parse_tag_network_document_matches_repository_full_names_robustly() {
+        let repositories = vec![AiTagRepositoryBrief {
+            full_name: "Owner/React-UI".to_owned(),
+            description: Some("React UI toolkit".to_owned()),
+            language: Some("TypeScript".to_owned()),
+            topics: vec!["react".to_owned(), "ui".to_owned()],
+            ai_summary: Some("用于构建 React 界面的组件库。".to_owned()),
+            suggested_tags: vec!["前端".to_owned()],
+            stars_count: 10,
+        }];
+
+        let suggestions = parse_tag_network_document(
+            r##"{
+              "tags": [
+                {
+                  "tag_name": "前端",
+                  "repository_full_names": [
+                    "HTTPS://github.com/owner/react-ui.git",
+                    "`owner/react-ui`",
+                    "missing/repo"
+                  ]
+                }
+              ]
+            }"##,
+            &repositories,
+        )
+        .expect("AI 返回的仓库名变体应能匹配本地 Stars");
+
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].repository_full_names, vec!["Owner/React-UI"]);
+    }
+
+    #[test]
+    fn parse_tag_network_document_rejects_empty_usable_result() {
+        let repositories = vec![AiTagRepositoryBrief {
+            full_name: "pmndrs/react-spring".to_owned(),
+            description: None,
+            language: None,
+            topics: Vec::new(),
+            ai_summary: None,
+            suggested_tags: Vec::new(),
+            stars_count: 1,
+        }];
+        let error = match parse_tag_network_document(
+            r#"{"tags":[{"tag_name":"编造项目","repository_full_names":["fake/repo"]}]}"#,
+            &repositories,
+        ) {
+            Ok(_) => panic!("没有可用仓库关联时必须失败"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("AI 未返回可用的标签网络建议"));
+    }
+
+    #[test]
     fn validate_request_config_maps_openai_compatible_protocol() {
         let provider = validate_request_config(&AiRequestConfig {
             provider: "openai-compatible".to_owned(),
@@ -808,6 +1500,19 @@ mod tests {
             model: "custom-chat-model".to_owned(),
         })
         .expect("OpenAI 兼容接口应按 OpenAI 协议执行");
+
+        assert_eq!(provider, "openai");
+    }
+
+    #[test]
+    fn validate_request_config_allows_openai_custom_https_endpoint() {
+        let provider = validate_request_config(&AiRequestConfig {
+            provider: "openai".to_owned(),
+            api_key: "test-key".to_owned(),
+            base_url: Some("https://openai-proxy.example.com/v1".to_owned()),
+            model: "custom-openai-model".to_owned(),
+        })
+        .expect("OpenAI 官方协议也应允许用户自定义 HTTPS 请求地址");
 
         assert_eq!(provider, "openai");
     }
@@ -826,11 +1531,528 @@ mod tests {
     }
 
     #[test]
-    fn curl_config_string_escapes_control_characters() {
-        assert_eq!(
-            curl_config_string("a\\b\"c\nd\re\tf"),
-            "a\\\\b\\\"c\\nd\\re\\tf"
+    fn validate_request_config_accepts_uppercase_url_scheme() {
+        let provider = validate_request_config(&AiRequestConfig {
+            provider: "openai-compatible".to_owned(),
+            api_key: "test-key".to_owned(),
+            base_url: Some("HTTPS://api.example.com/v1".to_owned()),
+            model: "custom-chat-model".to_owned(),
+        })
+        .expect("AI 请求地址协议大小写不应影响配置校验");
+
+        assert_eq!(provider, "openai");
+    }
+
+    #[test]
+    fn validate_request_config_allows_local_http_endpoint() {
+        let provider = validate_request_config(&AiRequestConfig {
+            provider: "openai-compatible".to_owned(),
+            api_key: "test-key".to_owned(),
+            base_url: Some("http://127.0.0.1:11434/v1".to_owned()),
+            model: "custom-chat-model".to_owned(),
+        })
+        .expect("本机 HTTP 地址应允许用于本地 AI 网关调试");
+
+        assert_eq!(provider, "openai");
+    }
+
+    #[test]
+    fn validate_request_config_allows_keyless_local_openai_compatible_endpoint() {
+        let provider = validate_request_config(&AiRequestConfig {
+            provider: "openai-compatible".to_owned(),
+            api_key: "".to_owned(),
+            base_url: Some("http://localhost:11434/v1".to_owned()),
+            model: "llama3.1".to_owned(),
+        })
+        .expect("本机 OpenAI 兼容服务不应强制要求 API Key");
+
+        assert_eq!(provider, "openai");
+    }
+
+    #[test]
+    fn validate_request_config_requires_key_for_official_remote_providers() {
+        let error = validate_request_config(&AiRequestConfig {
+            provider: "anthropic".to_owned(),
+            api_key: " ".to_owned(),
+            base_url: Some("https://api.anthropic.com/v1".to_owned()),
+            model: "claude-3-5-haiku-latest".to_owned(),
+        })
+        .expect_err("官方远程 AI 服务必须要求 API Key");
+
+        assert!(error.contains("请先填写 AI API Key"));
+    }
+
+    #[test]
+    fn validate_request_config_allows_local_ipv6_http_endpoint() {
+        let provider = validate_request_config(&AiRequestConfig {
+            provider: "openai-compatible".to_owned(),
+            api_key: "test-key".to_owned(),
+            base_url: Some("http://[::1]:11434/v1".to_owned()),
+            model: "custom-chat-model".to_owned(),
+        })
+        .expect("IPv6 本机 HTTP 地址应允许用于本地 AI 网关调试");
+
+        assert_eq!(provider, "openai");
+    }
+
+    #[test]
+    fn validate_request_config_rejects_public_http_endpoint() {
+        let error = validate_request_config(&AiRequestConfig {
+            provider: "openai-compatible".to_owned(),
+            api_key: "test-key".to_owned(),
+            base_url: Some("http://api.example.com/v1".to_owned()),
+            model: "custom-chat-model".to_owned(),
+        })
+        .expect_err("公网 AI 请求地址必须使用 HTTPS");
+
+        assert!(error.contains("AI 请求地址必须使用 https://"));
+    }
+
+    #[test]
+    fn validate_request_config_rejects_userinfo_spoofed_local_http_endpoint() {
+        let error = validate_request_config(&AiRequestConfig {
+            provider: "openai-compatible".to_owned(),
+            api_key: "test-key".to_owned(),
+            base_url: Some("http://localhost@api.example.com/v1".to_owned()),
+            model: "custom-chat-model".to_owned(),
+        })
+        .expect_err("带 userinfo 的 HTTP 地址不能伪装成本机调试地址");
+
+        assert!(error.contains("AI 请求地址必须使用 https://"));
+    }
+
+    #[test]
+    fn build_openai_chat_request_uses_custom_endpoint_model_and_key() {
+        let request = build_openai_chat_request(
+            &AiRequestConfig {
+                provider: "openai-compatible".to_owned(),
+                api_key: "  sk-test  ".to_owned(),
+                base_url: Some("https://llm.example.com/v1/".to_owned()),
+                model: "  custom-chat-model  ".to_owned(),
+            },
+            "请总结 README",
         );
+        let body: serde_json::Value =
+            serde_json::from_str(&request.body).expect("OpenAI 请求体必须是 JSON");
+
+        assert_eq!(
+            request.endpoint,
+            "https://llm.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            request.headers,
+            vec![
+                ("Authorization", "Bearer sk-test".to_owned()),
+                ("Content-Type", "application/json".to_owned()),
+            ]
+        );
+        assert_eq!(body["model"], "custom-chat-model");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"], "请总结 README");
+    }
+
+    #[test]
+    fn build_openai_chat_request_uses_openai_custom_endpoint_model_and_key() {
+        let request = build_openai_chat_request(
+            &AiRequestConfig {
+                provider: "openai".to_owned(),
+                api_key: "  sk-openai-test  ".to_owned(),
+                base_url: Some("https://openai-proxy.example.com/v1".to_owned()),
+                model: "  gpt-custom  ".to_owned(),
+            },
+            "请总结 README",
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(&request.body).expect("OpenAI 请求体必须是 JSON");
+
+        assert_eq!(
+            request.endpoint,
+            "https://openai-proxy.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            request.headers,
+            vec![
+                ("Authorization", "Bearer sk-openai-test".to_owned()),
+                ("Content-Type", "application/json".to_owned()),
+            ]
+        );
+        assert_eq!(body["model"], "gpt-custom");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"], "请总结 README");
+    }
+
+    #[test]
+    fn build_openai_chat_request_omits_authorization_for_keyless_local_service() {
+        let request = build_openai_chat_request(
+            &AiRequestConfig {
+                provider: "openai-compatible".to_owned(),
+                api_key: "  ".to_owned(),
+                base_url: Some("http://localhost:11434/v1".to_owned()),
+                model: "llama3.1".to_owned(),
+            },
+            "请总结 README",
+        );
+
+        assert_eq!(
+            request.endpoint,
+            "http://localhost:11434/v1/chat/completions"
+        );
+        assert_eq!(
+            request.headers,
+            vec![("Content-Type", "application/json".to_owned())]
+        );
+    }
+
+    #[test]
+    fn build_anthropic_message_request_uses_custom_endpoint_model_and_key() {
+        let request = build_anthropic_message_request(
+            &AiRequestConfig {
+                provider: "anthropic".to_owned(),
+                api_key: "  ant-test  ".to_owned(),
+                base_url: Some("https://anthropic.example.com/v1/messages".to_owned()),
+                model: "  claude-test  ".to_owned(),
+            },
+            "请总结 README",
+            ANTHROPIC_SUMMARY_MAX_TOKENS,
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(&request.body).expect("Anthropic 请求体必须是 JSON");
+
+        assert_eq!(
+            request.endpoint,
+            "https://anthropic.example.com/v1/messages"
+        );
+        assert_eq!(
+            request.headers,
+            vec![
+                ("x-api-key", "ant-test".to_owned()),
+                ("anthropic-version", "2023-06-01".to_owned()),
+                ("Content-Type", "application/json".to_owned()),
+            ]
+        );
+        assert_eq!(body["model"], "claude-test");
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "请总结 README");
+        assert_eq!(body["max_tokens"], ANTHROPIC_SUMMARY_MAX_TOKENS);
+    }
+
+    #[test]
+    fn request_openai_accepts_content_parts_array() {
+        let (url, request_handle) = spawn_http_server(
+            "200 OK",
+            r#"{"choices":[{"message":{"content":[{"type":"text","text":"{\"summary_zh\":\"第一段\"}"},{"type":"text","text":"\n{\"summary_zh\":\"第二段\"}"}]}}]}"#,
+        );
+        let content = request_openai(
+            &AiRequestConfig {
+                provider: "openai-compatible".to_owned(),
+                api_key: "sk-test".to_owned(),
+                base_url: Some(url),
+                model: "custom-model".to_owned(),
+            },
+            "请总结 README",
+        )
+        .expect("OpenAI 兼容网关返回 content parts 数组时也应能读取文本");
+        let _ = request_handle.join().expect("本地 HTTP 服务应完成请求");
+
+        assert!(content.contains("第一段"));
+        assert!(content.contains("第二段"));
+    }
+
+    #[test]
+    fn request_anthropic_concatenates_text_blocks() {
+        let (url, request_handle) = spawn_http_server(
+            "200 OK",
+            r#"{"content":[{"type":"text","text":"{\"summary_zh\":\"第一段\"}"},{"type":"text","text":"{\"summary_zh\":\"第二段\"}"}]}"#,
+        );
+        let content = request_anthropic(
+            &AiRequestConfig {
+                provider: "anthropic".to_owned(),
+                api_key: "ant-test".to_owned(),
+                base_url: Some(url),
+                model: "claude-test".to_owned(),
+            },
+            "请总结 README",
+            ANTHROPIC_SUMMARY_MAX_TOKENS,
+        )
+        .expect("Anthropic 多个 text block 应合并为完整文本");
+        let _ = request_handle.join().expect("本地 HTTP 服务应完成请求");
+
+        assert!(content.contains("第一段"));
+        assert!(content.contains("第二段"));
+    }
+
+    #[test]
+    fn summarize_readme_openai_compatible_posts_to_custom_chat_endpoint() {
+        let (url, request_handle) = spawn_http_server(
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"{\"summary_zh\":\"兼容接口摘要\",\"readme_zh\":\"README 中文梳理\",\"keywords\":[\"OpenAI\"],\"suggested_tags\":[\"AI\"]}"}}]}"#,
+        );
+        let document = summarize_readme(
+            &AiRequestConfig {
+                provider: "openai-compatible".to_owned(),
+                api_key: "compat-key".to_owned(),
+                base_url: Some(url),
+                model: "compat-chat-model".to_owned(),
+            },
+            "owner/repo",
+            Some("测试仓库"),
+            "# README\n\n用于测试 OpenAI 兼容协议。",
+        )
+        .expect("OpenAI 兼容接口应能通过公开摘要入口生成结构化文档");
+        let request = request_handle.join().expect("本地 HTTP 服务应完成请求");
+        let lower_request = request.to_ascii_lowercase();
+        let body = request_json_body(&request);
+
+        assert_eq!(document.summary_zh, "兼容接口摘要");
+        assert_eq!(document.readme_zh.as_deref(), Some("README 中文梳理"));
+        assert_eq!(document.keywords, vec!["OpenAI"]);
+        assert_eq!(document.suggested_tags, vec!["AI"]);
+        assert_eq!(document.model, "compat-chat-model");
+        assert_eq!(document.prompt_version, PROMPT_VERSION);
+        assert!(request.starts_with("POST /test/chat/completions HTTP/1.1"));
+        assert!(lower_request.contains("authorization: bearer compat-key"));
+        assert_eq!(body["model"], "compat-chat-model");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn summarize_readme_anthropic_posts_to_messages_endpoint() {
+        let (url, request_handle) = spawn_http_server(
+            "200 OK",
+            r#"{"content":[{"type":"text","text":"{\"summary_zh\":\"Claude 摘要\",\"readme_zh\":\"Claude README 梳理\",\"keywords\":[\"Claude\"],\"suggested_tags\":[\"Anthropic\"]}"}]}"#,
+        );
+        let document = summarize_readme(
+            &AiRequestConfig {
+                provider: "anthropic".to_owned(),
+                api_key: "ant-key".to_owned(),
+                base_url: Some(url),
+                model: "claude-custom".to_owned(),
+            },
+            "owner/repo",
+            None,
+            "# README\n\n用于测试 Anthropic Messages API。",
+        )
+        .expect("Anthropic Messages API 应能通过公开摘要入口生成结构化文档");
+        let request = request_handle.join().expect("本地 HTTP 服务应完成请求");
+        let lower_request = request.to_ascii_lowercase();
+        let body = request_json_body(&request);
+
+        assert_eq!(document.summary_zh, "Claude 摘要");
+        assert_eq!(document.readme_zh.as_deref(), Some("Claude README 梳理"));
+        assert_eq!(document.keywords, vec!["Claude"]);
+        assert_eq!(document.suggested_tags, vec!["Anthropic"]);
+        assert_eq!(document.model, "claude-custom");
+        assert_eq!(document.prompt_version, PROMPT_VERSION);
+        assert!(request.starts_with("POST /test/messages HTTP/1.1"));
+        assert!(lower_request.contains("x-api-key: ant-key"));
+        assert!(lower_request.contains("anthropic-version: 2023-06-01"));
+        assert_eq!(body["model"], "claude-custom");
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["max_tokens"], ANTHROPIC_SUMMARY_MAX_TOKENS);
+    }
+
+    #[test]
+    fn generate_tag_network_anthropic_uses_larger_output_budget() {
+        let (url, request_handle) = spawn_http_server(
+            "200 OK",
+            r##"{"content":[{"type":"text","text":"{\"tags\":[{\"tag_name\":\"React 动画\",\"color\":\"#EC4899\",\"repository_full_names\":[\"pmndrs/react-spring\"]}]}"}]}"##,
+        );
+        let suggestions = generate_tag_network(
+            &AiRequestConfig {
+                provider: "anthropic".to_owned(),
+                api_key: "ant-key".to_owned(),
+                base_url: Some(url),
+                model: "claude-custom".to_owned(),
+            },
+            &[AiTagRepositoryBrief {
+                full_name: "pmndrs/react-spring".to_owned(),
+                description: Some("Spring physics based React animation library".to_owned()),
+                language: Some("TypeScript".to_owned()),
+                topics: vec!["react".to_owned(), "animation".to_owned()],
+                ai_summary: Some("用于 React 交互动画和弹簧效果。".to_owned()),
+                suggested_tags: vec!["React 动画".to_owned()],
+                stars_count: 28000,
+            }],
+        )
+        .expect("Anthropic 标签网络应能返回结构化建议");
+        let request = request_handle.join().expect("本地 HTTP 服务应完成请求");
+        let body = request_json_body(&request);
+
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].tag_name, "React 动画");
+        assert_eq!(body["max_tokens"], ANTHROPIC_TAG_NETWORK_MAX_TOKENS);
+    }
+
+    #[test]
+    fn execute_json_post_sends_headers_body_and_reads_status() {
+        let (url, request_handle) = spawn_http_server("201 Created", r#"{"ok":true}"#);
+        let response = execute_json_post(
+            &url,
+            &[
+                ("Authorization", "Bearer sk-test".to_owned()),
+                ("Content-Type", "application/json".to_owned()),
+            ],
+            r#"{"model":"custom-model"}"#,
+        )
+        .expect("AI POST 请求应成功读取本地 HTTP 响应");
+        let request = request_handle.join().expect("本地 HTTP 服务应返回请求内容");
+        let lower_request = request.to_ascii_lowercase();
+
+        assert!(response.status_success);
+        assert_eq!(response.http_code, Some(201));
+        assert_eq!(response.body, r#"{"ok":true}"#);
+        assert!(request.starts_with("POST /test HTTP/1.1"));
+        assert!(lower_request.contains("authorization: bearer sk-test"));
+        assert!(lower_request.contains("content-type: application/json"));
+        assert!(request.contains(r#"{"model":"custom-model"}"#));
+    }
+
+    #[test]
+    fn execute_json_post_keeps_non_success_status_and_body() {
+        let (url, request_handle) =
+            spawn_http_server("400 Bad Request", r#"{"error":{"message":"bad request"}}"#);
+        let response = execute_json_post(
+            &url,
+            &[("Content-Type", "application/json".to_owned())],
+            "{}",
+        )
+        .expect("HTTP 错误状态也应返回响应体供上层格式化");
+        let _ = request_handle.join().expect("本地 HTTP 服务应完成请求");
+
+        assert!(!response.status_success);
+        assert_eq!(response.http_code, Some(400));
+        assert!(response.body.contains("bad request"));
+    }
+
+    #[test]
+    fn execute_json_post_retries_transient_server_errors() {
+        let (url, request_handle) = spawn_http_sequence_server(vec![
+            (
+                "500 Internal Server Error",
+                r#"{"error":{"message":"temporary"}}"#,
+            ),
+            ("200 OK", r#"{"ok":true}"#),
+        ]);
+        let response = execute_json_post(
+            &url,
+            &[("Content-Type", "application/json".to_owned())],
+            "{}",
+        )
+        .expect("AI POST 遇到 5xx 临时错误时应自动重试");
+        let requests = request_handle.join().expect("本地 HTTP 服务应完成请求");
+
+        assert!(response.status_success);
+        assert_eq!(response.http_code, Some(200));
+        assert_eq!(response.body, r#"{"ok":true}"#);
+        assert_eq!(requests.len(), 2);
+    }
+
+    #[test]
+    fn extract_ai_error_detail_reads_gateway_error_arrays() {
+        let detail = extract_ai_error_detail(
+            r#"{"errors":[{"code":"bad_request","message":"model does not exist"}]}"#,
+        );
+
+        assert_eq!(detail, "model does not exist");
+    }
+
+    #[test]
+    fn format_ai_http_error_reports_nested_token_limit() {
+        let message = format_ai_http_error(
+            "OpenAI",
+            Some(400),
+            r#"{"error":{"details":[{"message":"maximum context length exceeded"}]}}"#,
+        );
+
+        assert!(message.contains("README 内容超过模型上下文限制"));
+    }
+
+    #[test]
+    fn build_github_recommendation_prompt_uses_selected_repository_briefs() {
+        let prompt = build_github_recommendation_prompt(&[AiTagRepositoryBrief {
+            full_name: "pmndrs/react-spring".to_owned(),
+            description: Some("Spring physics based React animation library".to_owned()),
+            language: Some("TypeScript".to_owned()),
+            topics: vec!["react".to_owned(), "animation".to_owned()],
+            ai_summary: Some("用于 React 交互动画和弹簧效果。".to_owned()),
+            suggested_tags: vec!["React 动画".to_owned()],
+            stars_count: 28000,
+        }]);
+
+        assert!(prompt.contains("GitHub Search API"));
+        assert!(prompt.contains("pmndrs/react-spring"));
+        assert!(prompt.contains("language: TypeScript"));
+        assert!(prompt.contains("topic:"));
+        assert!(prompt.contains("不要包含已给出的仓库 full_name"));
+    }
+
+    #[test]
+    fn parse_github_recommendation_plan_normalizes_queries() {
+        let plan = parse_github_recommendation_plan(
+            r#"```json
+            {
+              "rationale_zh": "根据 React 动画能力寻找替代项目。",
+              "queries": [
+                " react animation library stars:>1000 language:TypeScript ",
+                "react animation library stars:>1000 language:TypeScript",
+                "",
+                "this query is intentionally made far longer than one hundred and eighty characters so it should be discarded before reaching the GitHub Search API because long generated queries are noisy and unreliable for this workflow"
+              ]
+            }
+            ```"#,
+        )
+        .expect("推荐策略 JSON 应能解析");
+
+        assert_eq!(plan.rationale_zh, "根据 React 动画能力寻找替代项目。");
+        assert_eq!(
+            plan.queries,
+            vec!["react animation library stars:>1000 language:TypeScript"]
+        );
+    }
+
+    #[test]
+    fn parse_github_recommendation_plan_rejects_empty_queries() {
+        let error = parse_github_recommendation_plan(r#"{"queries":[" ",""]}"#)
+            .expect_err("空 GitHub 搜索策略必须失败");
+
+        assert!(error.contains("AI 未返回可用的 GitHub 搜索查询"));
+    }
+
+    #[test]
+    fn build_search_query_prompt_uses_context_and_schema() {
+        let prompt = build_search_query_prompt(
+            "有没有轻量的动画库",
+            &["React 组件库".to_owned(), "弹簧效果".to_owned()],
+        );
+
+        assert!(prompt.contains("自然语言问题改写"));
+        assert!(prompt.contains("\"search_query\""));
+        assert!(prompt.contains("\"keywords\""));
+        assert!(prompt.contains("React 组件库"));
+        assert!(prompt.contains("弹簧效果"));
+        assert!(prompt.contains("有没有轻量的动画库"));
+    }
+
+    #[test]
+    fn parse_search_plan_normalizes_ai_query() {
+        let plan = parse_search_plan(
+            r#"```json
+            {
+              "search_query": " React animation spring ",
+              "keywords": ["React", "动画", "spring", "React"],
+              "rationale_zh": "结合上下文寻找 React 动画库。"
+            }
+            ```"#,
+            "动画库",
+        )
+        .expect("AI 搜索计划 JSON 应能解析");
+
+        assert_eq!(plan.search_query, "React animation spring");
+        assert_eq!(plan.keywords, vec!["React", "动画", "spring"]);
+        assert_eq!(plan.rationale_zh, "结合上下文寻找 React 动画库。");
     }
 
     #[test]
@@ -852,5 +2074,127 @@ mod tests {
 
         assert!(message.contains("README 内容超过模型上下文限制"));
         assert!(message.contains("HTTP 413"));
+    }
+
+    #[test]
+    fn format_ai_http_error_reads_common_gateway_error_shapes() {
+        let message_error =
+            format_ai_http_error("OpenAI", Some(401), r#"{"message":"invalid api key"}"#);
+        let string_error =
+            format_ai_http_error("OpenAI", Some(429), r#"{"error":"rate limit exceeded"}"#);
+
+        assert!(message_error.contains("API Key 无效或权限不足"));
+        assert!(message_error.contains("invalid api key"));
+        assert!(string_error.contains("请求过于频繁或额度不足"));
+        assert!(string_error.contains("rate limit exceeded"));
+    }
+
+    #[test]
+    fn format_ai_http_error_reports_address_or_model_hint() {
+        let message = format_ai_http_error(
+            "OpenAI",
+            Some(404),
+            r#"{"error":{"message":"model not found"}}"#,
+        );
+
+        assert!(message.contains("请求地址或模型 ID 不存在"));
+        assert!(message.contains("model not found"));
+    }
+
+    fn spawn_http_server(
+        status: &'static str,
+        response_body: &'static str,
+    ) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("应能启动本地测试 HTTP 服务");
+        let address = listener.local_addr().expect("应能读取本地监听地址");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("应能接收本地 HTTP 请求");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("应能设置读取超时");
+            let request = read_http_request(&mut stream);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("应能写入本地 HTTP 响应");
+            request
+        });
+
+        (format!("http://{address}/test"), handle)
+    }
+
+    fn spawn_http_sequence_server(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("应能启动本地测试 HTTP 服务");
+        let address = listener.local_addr().expect("应能读取本地监听地址");
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (status, response_body) in responses {
+                let (mut stream, _) = listener.accept().expect("应能接收本地 HTTP 请求");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .expect("应能设置读取超时");
+                requests.push(read_http_request(&mut stream));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("应能写入本地 HTTP 响应");
+            }
+            requests
+        });
+
+        (format!("http://{address}/test"), handle)
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut chunk = [0; 1024];
+        let mut expected_length = None;
+
+        loop {
+            let bytes_read = stream.read(&mut chunk).unwrap_or(0);
+            if bytes_read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..bytes_read]);
+            if expected_length.is_none() {
+                expected_length = request_length_from_headers(&buffer);
+            }
+            if expected_length.is_some_and(|length| buffer.len() >= length) {
+                break;
+            }
+        }
+
+        String::from_utf8_lossy(&buffer).to_string()
+    }
+
+    fn request_length_from_headers(buffer: &[u8]) -> Option<usize> {
+        let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n")?;
+        let headers = String::from_utf8_lossy(&buffer[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+
+        Some(header_end + 4 + content_length)
+    }
+
+    fn request_json_body(request: &str) -> serde_json::Value {
+        let body = request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("HTTP 请求应包含 body");
+        serde_json::from_str(body).expect("HTTP 请求 body 应为 JSON")
     }
 }
