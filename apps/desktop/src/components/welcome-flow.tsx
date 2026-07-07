@@ -134,11 +134,11 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
     setWarningMessage(null);
     try {
       await props.onSyncStars();
-      setSuccessMessage('Stars 已同步，正在缓存 README...');
+      setSuccessMessage('Stars 已同步，正在缓存 README，随后可生成中文定位和标签网络...');
       try {
         await props.onFetchReadmes();
       } catch (error) {
-        setWarningMessage(`Stars 已同步，后续处理暂未全部完成：${toErrorMessage(error)}。进入工作台后可在仓库页重新抓取 README 或重新生成 AI 摘要。`);
+        setWarningMessage(`Stars 已同步，后续处理暂未全部完成：${toErrorMessage(error)}。进入工作台后可在仓库页重新抓取 README、生成 AI 解析，或在标签网络页生成项目标签。`);
       }
       setCurrentStep('complete');
     } catch (error) {
@@ -208,7 +208,7 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
               <div className="mt-8 grid gap-3 md:grid-cols-3">
                 <FeatureItem icon={<Database className="size-5" />} title="本地优先" description="所有数据存储在本地数据库，完全掌控" />
                 <FeatureItem icon={<Search className="size-5" />} title="智能检索" description="支持关键词、上下文搜索和组合筛选" />
-                <FeatureItem icon={<Sparkles className="size-5" />} title="AI 增强" description="自动生成中文摘要与关键词提取" />
+                <FeatureItem icon={<Sparkles className="size-5" />} title="AI 增强" description="生成中文定位、关键词和标签网络" />
               </div>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
                 <Button
@@ -362,7 +362,7 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
                 <p className="text-sm text-muted-foreground">
                   {connectedUser ? `已连接 @${connectedUser.login}。` : ''}
                   连接已完成，即将同步你的 GitHub Stars 到本地数据库，并缓存仓库 README。
-                  同步完成后，你可以开始搜索、筛选、打标签和记笔记。
+                  README 是中文定位和标签网络的上下文；配置 AI 后可以继续生成中文解析和项目标签。
                 </p>
               </div>
               {errorMessage && (
@@ -419,8 +419,8 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
               </p>
               <div className="mt-8 grid gap-3 text-left">
                 <TipItem number="1" text="使用搜索框查找项目，支持名称、描述、Topics 和笔记" />
-                <TipItem number="2" text="在知识面板中为项目添加标签和笔记" />
-                <TipItem number="3" text="通过 Gist 在多设备间同步注解数据" />
+                <TipItem number="2" text="为项目生成 AI 解析后，列表会显示更准确的中文定位" />
+                <TipItem number="3" text="在标签网络页生成项目标签，再按用途聚类和筛选" />
               </div>
               {warningMessage && (
                 <p role="status" aria-live="polite" className="mt-6 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">

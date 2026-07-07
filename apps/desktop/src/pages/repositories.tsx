@@ -1923,23 +1923,114 @@ function buildKnowledgeTitle(repo: RepositoryListItem, keywords: string[]) {
   return `${baseName}：GitHub 项目知识卡`;
 }
 
-function buildLocalizedProjectName(repo: RepositoryListItem, keywords: string[], suggestedTags: string[]) {
-  const baseName = repo.name.replace(/[-_]/g, ' ').trim() || repo.name;
-  const descriptors = [...suggestedTags, ...keywords, repo.language ?? '']
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .filter((item, index, list) => list.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index)
-    .slice(0, 3);
+function buildLocalizedProjectPosition(
+  repo: RepositoryListItem,
+  keywords: string[],
+  suggestedTags: string[],
+  summaryZh?: string | null,
+) {
+  const summaryPosition = extractChinesePurpose(summaryZh ?? repo.aiSummary);
+  if (summaryPosition) {
+    return { text: summaryPosition, isPending: false };
+  }
 
+  const descriptors = buildChineseDescriptors(repo, keywords, suggestedTags);
   if (descriptors.length > 0) {
-    return `${baseName}：${descriptors.join('、')} 项目`;
+    return {
+      text: `${descriptors.join('、')}相关项目`,
+      isPending: false,
+    };
   }
 
-  if (repo.description) {
-    return `${baseName}：${truncateText(repo.description, 24)}`;
+  if (repo.hasReadme) {
+    return { text: 'README 已缓存，生成 AI 解析后显示中文用途与标签', isPending: true };
   }
 
-  return `${baseName}：GitHub 开源项目`;
+  return { text: '抓取 README 并 AI 解析后生成中文用途与标签', isPending: true };
+}
+
+function extractChinesePurpose(summary: string | null | undefined) {
+  const normalizedSummary = summary
+    ?.replace(/[#*_`>\-[\]]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalizedSummary) {
+    return null;
+  }
+
+  const firstSentence = normalizedSummary.split(/[。！？!?]/)[0]?.trim();
+  if (!firstSentence) {
+    return null;
+  }
+
+  return truncateText(firstSentence, 54);
+}
+
+function buildChineseDescriptors(repo: RepositoryListItem, keywords: string[], suggestedTags: string[]) {
+  const sourceValues = [
+    ...repo.tagNames,
+    ...suggestedTags,
+    ...keywords,
+    ...repo.topics,
+    repo.description ?? '',
+    repo.language ?? '',
+  ];
+  const descriptors: string[] = [];
+
+  for (const value of sourceValues) {
+    for (const nextDescriptor of toChineseDescriptors(value)) {
+      if (descriptors.some((descriptor) => descriptor.toLowerCase() === nextDescriptor.toLowerCase())) {
+        continue;
+      }
+      descriptors.push(nextDescriptor);
+      if (descriptors.length >= 3) {
+        return descriptors;
+      }
+    }
+  }
+
+  return descriptors;
+}
+
+function toChineseDescriptors(value: string) {
+  const normalizedValue = value.trim();
+  if (!normalizedValue) {
+    return [];
+  }
+
+  if (/[\u4e00-\u9fa5]/.test(normalizedValue)) {
+    return [truncateText(normalizedValue, 16)];
+  }
+
+  const lowerValue = normalizedValue.toLowerCase();
+  const descriptorRules: Array<[RegExp, string]> = [
+    [/(^|[^a-z])cli([^a-z]|$)|command[ -]?line|terminal/, '命令行工具'],
+    [/agent|copilot|assistant/, '智能体'],
+    [/documentation|docs?|readme|wiki/, '文档知识库'],
+    [/search|retrieval|rag|semantic/, '知识检索'],
+    [/workflow|automation|bot/, '自动化工作流'],
+    [/developer|devtool|sdk|api/, '开发者工具'],
+    [/database|storage|sqlite|postgres|mysql/, '数据存储'],
+    [/frontend|react|vue|ui|component/, '前端界面'],
+    [/backend|server|gateway|service/, '后端服务'],
+    [/typescript|javascript|node/, 'TypeScript 生态'],
+    [/python/, 'Python 生态'],
+    [/rust/, 'Rust 生态'],
+    [/go(lang)?/, 'Go 生态'],
+    [/java|kotlin/, 'Java 生态'],
+    [/ai|llm|gpt|model|prompt/, 'AI 应用'],
+    [/security|auth|permission/, '安全认证'],
+    [/monitor|observability|log/, '监控观测'],
+  ];
+
+  const descriptors: string[] = [];
+  for (const [pattern, descriptor] of descriptorRules) {
+    if (pattern.test(lowerValue)) {
+      descriptors.push(descriptor);
+    }
+  }
+
+  return descriptors;
 }
 
 function uniqueStrings(values: string[]) {
