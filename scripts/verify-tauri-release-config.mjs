@@ -8,6 +8,7 @@ const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const rootPackage = JSON.parse(read('package.json'));
 const desktopPackage = JSON.parse(read('apps/desktop/package.json'));
 const tauriConfig = JSON.parse(read('apps/desktop/src-tauri/tauri.conf.json'));
+const tauriMain = read('apps/desktop/src-tauri/src/main.rs');
 const readme = read('README.md');
 const gitignore = read('.gitignore');
 const workflowPath = 'release.yml';
@@ -17,6 +18,11 @@ assert.equal(tauriConfig.bundle?.active, true, 'Tauri bundle.active 必须开启
 assert.equal(tauriConfig.bundle?.targets, 'all', 'Tauri bundle.targets 应保持 all，让各平台 runner 生成本平台安装包');
 assert.equal(tauriConfig.productName, 'GitHub-Stars-AI-Tools', '安装包产品名必须使用正式名称');
 assert.equal(tauriConfig.app?.windows?.[0]?.title, 'GitHub-Stars-AI-Tools', '窗口标题必须使用正式名称');
+assert.match(
+  tauriMain,
+  /#!\[cfg_attr\(not\(debug_assertions\),\s*windows_subsystem\s*=\s*"windows"\)\]/,
+  'Windows 发布版必须使用 GUI 子系统，避免启动后留下黑色控制台窗口',
+);
 assert.ok(Array.isArray(tauriConfig.bundle.icon), 'Tauri bundle.icon 必须声明图标数组');
 for (const icon of ['icons/32x32.png', 'icons/128x128.png', 'icons/128x128@2x.png', 'icons/icon.icns', 'icons/icon.ico', 'icons/icon.png']) {
   assert.ok(tauriConfig.bundle.icon.includes(icon), `缺少安装包图标：${icon}`);
