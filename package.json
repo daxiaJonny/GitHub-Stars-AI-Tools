@@ -40,6 +40,7 @@
     "verify:virtual-list": "pnpm --filter @gsat/desktop verify:virtual-list",
     "verify:worker": "pnpm --filter @gsat/worker verify:pipeline",
     "package:desktop": "pnpm build:packages && pnpm --filter @gsat/desktop tauri build",
+    "package:desktop:dmg": "pnpm build:packages && pnpm --filter @gsat/desktop package:dmg:macos",
     "tauri": "pnpm --filter @gsat/desktop tauri"
   },
   "devDependencies": {
