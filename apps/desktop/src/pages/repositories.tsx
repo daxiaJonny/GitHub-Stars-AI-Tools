@@ -777,6 +777,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
               : null
           }
           isGeneratingAiDocument={workspace.isGeneratingAiDocument}
+          aiStream={workspace.repositoryAiStream}
           onGenerateAiDocument={() => runAiWorkspaceAction(() => workspace.handleGenerateAiDocument(settingsHook.settings.ai))}
           aiConfigMessage={aiConfigMessage}
           aiError={
@@ -1130,6 +1131,68 @@ function AiErrorPlaceholder({
   );
 }
 
+function AiStreamPreview({
+  stream,
+}: {
+  stream: {
+    stage: string;
+    status: string;
+    message: string | null;
+    text: string;
+  } | null;
+}) {
+  const stageLabel = stream ? getAiStreamStageLabel(stream.stage) : '准备解析';
+  const statusLabel = stream?.status === 'fallback'
+    ? '当前服务不支持流式，正在自动切换'
+    : stream?.status === 'failed'
+      ? '解析失败'
+      : stream?.status === 'finished'
+        ? '解析完成'
+        : '实时生成中';
+  const liveText = stream?.text.trim();
+
+  return (
+    <div className="rounded-lg border border-primary/20 bg-primary/10 px-3 py-3 text-[12px] leading-relaxed text-primary">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5 font-semibold">
+          <Icon name="progress_activity" size={14} className={stream?.status === 'finished' ? '' : 'animate-spin'} />
+          <span className="truncate">{stageLabel}</span>
+        </div>
+        <span className="shrink-0 rounded-md bg-surface/70 px-2 py-0.5 text-[10px] text-primary">
+          {statusLabel}
+        </span>
+      </div>
+      {stream?.message && (
+        <p className="mb-2 text-[11px] text-on-surface-variant">{stream.message}</p>
+      )}
+      <div className="max-h-40 overflow-y-auto rounded-md border border-primary/15 bg-surface-container-lowest/80 px-2 py-2 text-[11px] text-on-surface custom-scrollbar">
+        {liveText ? (
+          <pre className="whitespace-pre-wrap break-words font-sans">{liveText}</pre>
+        ) : (
+          <p className="text-on-surface-variant">正在等待 AI 返回内容...</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function getAiStreamStageLabel(stage: string) {
+  switch (stage) {
+    case 'prepare':
+      return '准备解析';
+    case 'fetch-readme':
+      return '补抓 README';
+    case 'summarize':
+      return '生成中文解析';
+    case 'done':
+      return '解析完成';
+    case 'error':
+      return '解析失败';
+    default:
+      return 'AI 解析';
+  }
+}
+
 function AiMetaItem(props: { label: string; value: string }) {
   return (
     <div className="min-w-0 rounded-lg border border-outline-variant/20 bg-surface-container-low px-2.5 py-2">
@@ -1334,6 +1397,13 @@ function RepoDetailPanel(props: {
   readmeError: string | null;
   onGenerateAiDocument: () => Promise<void>;
   isGeneratingAiDocument: boolean;
+  aiStream: {
+    repositoryId: string;
+    stage: string;
+    status: string;
+    message: string | null;
+    text: string;
+  } | null;
   aiConfigMessage: string | null;
   aiError: string | null;
 }) {
@@ -1365,6 +1435,7 @@ function RepoDetailPanel(props: {
     readmeError,
     onGenerateAiDocument,
     isGeneratingAiDocument,
+    aiStream,
     aiConfigMessage,
     aiError,
   } = props;
@@ -1402,6 +1473,7 @@ function RepoDetailPanel(props: {
     [detail?.readme?.rawMarkdown],
   );
   const canApplySuggestedTags = Boolean(aiDoc?.suggestedTags.length);
+  const visibleAiStream = aiStream?.repositoryId === repo.id ? aiStream : null;
 
   async function submitRenameTag(tag: TagItem) {
     await onRenameTag(tag, editingTagName);
@@ -1626,13 +1698,7 @@ function RepoDetailPanel(props: {
             )}
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 custom-scrollbar">
               {isGeneratingAiDocument && (
-                <div className="rounded-lg border border-primary/20 bg-primary/10 px-3 py-3 text-[12px] leading-relaxed text-primary">
-                  <div className="mb-1.5 flex items-center gap-1.5 font-semibold">
-                    <Icon name="progress_activity" size={14} className="animate-spin" />
-                    正在生成 AI 解析
-                  </div>
-                  <p>正在基于 README 生成中文摘要、关键词和建议标签。生成完成后会自动刷新这里的内容。</p>
-                </div>
+                <AiStreamPreview stream={visibleAiStream} />
               )}
               {/* AI 摘要 */}
               {aiDoc ? (
