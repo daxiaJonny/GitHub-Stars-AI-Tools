@@ -308,6 +308,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
           RUST_TARGET: ${{ matrix.rust_targets }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           pnpm --filter @gsat/desktop tauri build --target "$RUST_TARGET" --bundles app
           dmg_path="$(pnpm --filter @gsat/desktop package:dmg -- --target "$RUST_TARGET" | tail -n 1)"
