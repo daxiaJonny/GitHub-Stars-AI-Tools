@@ -2325,7 +2325,7 @@ ORDER BY month;
 
         // 最近收藏
         let recent = self.list_repository_page(
-            3,
+            8,
             0,
             RepositoryListFilters {
                 account_id: Some(account_id),
@@ -2432,6 +2432,7 @@ ON CONFLICT(repo_id) DO UPDATE SET
         context_queries: &[String],
         context_repository_ids: &[String],
         limit: usize,
+        offset: usize,
         account_id: Option<&str>,
         metadata: Option<AiSearchMetadata>,
     ) -> Result<AiSearchResponseData, String> {
@@ -2550,7 +2551,8 @@ ORDER BY r.starred_at DESC;
                 .then_with(|| b.repository.stars_count.cmp(&a.repository.stars_count))
         });
         let total_count = results.len();
-        results.truncate(limit.clamp(1, 100));
+        let page_limit = limit.clamp(1, 100);
+        results = results.into_iter().skip(offset).take(page_limit).collect();
         let context_applied = results.iter().any(search_result_uses_context);
 
         Ok(AiSearchResponseData {
@@ -4566,7 +4568,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             database_path: std::env::temp_dir().join("gsat-search-mode-unused.sqlite3"),
         };
         let response = storage
-            .search_repositories("  ", &[], &[], 20, Some("1001"), None)
+            .search_repositories("  ", &[], &[], 20, 0, Some("1001"), None)
             .expect("空查询应返回空结果");
 
         assert_eq!(response.mode, "local_knowledge");
@@ -4588,7 +4590,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             ai_error: None,
         };
         let response = storage
-            .search_repositories("  ", &[], &[], 20, Some("1001"), Some(metadata))
+            .search_repositories("  ", &[], &[], 20, 0, Some("1001"), Some(metadata))
             .expect("空查询也应保留 AI 搜索元数据");
 
         assert_eq!(response.query, "帮我找动画库");
@@ -4782,7 +4784,7 @@ VALUES
             .expect("写入上下文搜索测试数据");
 
         let without_context = storage
-            .search_repositories("弹簧效果", &[], &[], 20, Some("1001"), None)
+            .search_repositories("弹簧效果", &[], &[], 20, 0, Some("1001"), None)
             .expect("无上下文搜索应可执行");
         let with_context = storage
             .search_repositories(
@@ -4790,6 +4792,7 @@ VALUES
                 &["React 动画库".to_owned()],
                 &[],
                 20,
+                0,
                 Some("1001"),
                 None,
             )
@@ -4849,6 +4852,7 @@ VALUES
                 &["上一轮 TypeScript 工具".to_owned()],
                 &["1001:1".to_owned()],
                 20,
+                0,
                 Some("1001"),
                 None,
             )

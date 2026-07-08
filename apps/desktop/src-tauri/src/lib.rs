@@ -18,6 +18,7 @@ use storage::AppStorage;
 use tauri::{Emitter, Manager};
 
 const TASK_PROGRESS_EVENT: &str = "task-progress";
+const AI_STREAM_EVENT: &str = "ai-stream";
 const README_FETCH_CONCURRENCY: usize = 6;
 const GITHUB_RECOMMENDATION_REFERENCE_LIMIT: usize = 8;
 const AI_API_KEY_SERVICE: &str = "github-stars-ai-tools";
@@ -98,6 +99,20 @@ struct TaskProgressEvent {
     repository_name: Option<String>,
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AiStreamEvent {
+    request_id: String,
+    task_type: &'static str,
+    stage: String,
+    status: String,
+    delta: Option<String>,
+    text: Option<String>,
+    message: Option<String>,
+    repository_id: Option<String>,
+    created_at: String,
+}
+
 impl TaskProgressEvent {
     fn running(
         task_id: &'static str,
@@ -174,6 +189,66 @@ impl TaskProgressEvent {
 
 fn emit_task_progress(app_handle: &tauri::AppHandle, payload: TaskProgressEvent) {
     let _ = app_handle.emit(TASK_PROGRESS_EVENT, payload);
+}
+
+fn emit_ai_stream(app_handle: &tauri::AppHandle, payload: AiStreamEvent) {
+    let _ = app_handle.emit(AI_STREAM_EVENT, payload);
+}
+
+fn emit_ai_stream_status(
+    app_handle: &tauri::AppHandle,
+    request_id: &str,
+    task_type: &'static str,
+    stage: &str,
+    status: &str,
+    message: impl Into<String>,
+    repository_id: Option<&str>,
+) {
+    emit_ai_stream(
+        app_handle,
+        AiStreamEvent {
+            request_id: request_id.to_owned(),
+            task_type,
+            stage: stage.to_owned(),
+            status: status.to_owned(),
+            delta: None,
+            text: None,
+            message: Some(message.into()),
+            repository_id: repository_id.map(str::to_owned),
+            created_at: current_event_timestamp(),
+        },
+    );
+}
+
+fn emit_ai_stream_delta(
+    app_handle: &tauri::AppHandle,
+    request_id: &str,
+    task_type: &'static str,
+    stage: &str,
+    delta: &str,
+    text: &str,
+    repository_id: Option<&str>,
+) {
+    emit_ai_stream(
+        app_handle,
+        AiStreamEvent {
+            request_id: request_id.to_owned(),
+            task_type,
+            stage: stage.to_owned(),
+            status: "delta".to_owned(),
+            delta: Some(delta.to_owned()),
+            text: Some(text.to_owned()),
+            message: None,
+            repository_id: repository_id.map(str::to_owned),
+            created_at: current_event_timestamp(),
+        },
+    );
+}
+
+fn current_event_timestamp() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }
 
 struct BackgroundTaskGuard {
@@ -404,6 +479,7 @@ struct GenerateAiDocumentRequest {
     repository_id: String,
     account_id: Option<String>,
     ai_config: Option<ai::AiRequestConfig>,
+    request_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -487,10 +563,20 @@ struct BatchAiDocumentFailure {
 struct SearchRepositoriesRequest {
     query: String,
     limit: Option<usize>,
+    offset: Option<usize>,
     account_id: String,
     context_queries: Option<Vec<String>>,
     context_repository_ids: Option<Vec<String>>,
     ai_config: Option<ai::AiRequestConfig>,
+    request_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExplainAiSearchTopicRequest {
+    topic: String,
+    ai_config: ai::AiRequestConfig,
+    request_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2596,6 +2682,9 @@ fn generate_repository_ai_document_worker(
     request: GenerateAiDocumentRequest,
 ) -> Result<storage::RepositoryDetailView, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
+    let request_id = request
+        .request_id
+        .unwrap_or_else(|| format!("repository-ai-{}", request.repository_id));
     let account_id = match request.account_id {
         Some(account_id) => account_id,
         None => {
@@ -2607,6 +2696,15 @@ fn generate_repository_ai_document_worker(
     let mut source = storage.get_repository_ai_source(&request.repository_id, Some(&account_id))?;
     let needs_readme_fetch = source.readme.is_none();
     let progress_total = if needs_readme_fetch { 2 } else { 1 };
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "repository-ai-document",
+        "prepare",
+        "started",
+        format!("正在准备解析 {}", source.full_name),
+        Some(&source.id),
+    );
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::running(
@@ -2623,6 +2721,15 @@ fn generate_repository_ai_document_worker(
         Some(readme) => readme,
         None => {
             let token = auth::require_github_token()?;
+            emit_ai_stream_status(
+                &app_handle,
+                &request_id,
+                "repository-ai-document",
+                "fetch-readme",
+                "started",
+                format!("正在补抓 {} 的 README", source.full_name),
+                Some(&source.id),
+            );
             emit_task_progress(
                 &app_handle,
                 TaskProgressEvent::running(
@@ -2650,6 +2757,15 @@ fn generate_repository_ai_document_worker(
             }
         }
     };
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "repository-ai-document",
+        "summarize",
+        "started",
+        format!("正在生成 {} 的中文解析", source.full_name),
+        Some(&source.id),
+    );
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::running(
@@ -2663,11 +2779,44 @@ fn generate_repository_ai_document_worker(
         ),
     );
     let ai_config = hydrate_ai_request_config(&app_handle, request.ai_config)?;
-    let document = ai::summarize_readme(
+    let stream_app_handle = app_handle.clone();
+    let stream_request_id = request_id.clone();
+    let stream_repository_id = source.id.clone();
+    let mut latest_stream_text = String::new();
+    let document = ai::summarize_readme_streaming(
         &ai_config,
         &source.full_name,
         source.description.as_deref(),
         &readme.raw_markdown,
+        &mut |stage, status, delta, text, message| {
+            if let Some(next_text) = text {
+                latest_stream_text = next_text.to_owned();
+            }
+            match status {
+                "delta" => {
+                    let delta = delta.unwrap_or_default();
+                    let text = text.unwrap_or(latest_stream_text.as_str());
+                    emit_ai_stream_delta(
+                        &stream_app_handle,
+                        &stream_request_id,
+                        "repository-ai-document",
+                        stage,
+                        delta,
+                        text,
+                        Some(&stream_repository_id),
+                    );
+                }
+                _ => emit_ai_stream_status(
+                    &stream_app_handle,
+                    &stream_request_id,
+                    "repository-ai-document",
+                    stage,
+                    status,
+                    message.unwrap_or("AI 解析状态已更新"),
+                    Some(&stream_repository_id),
+                ),
+            }
+        },
     )?;
 
     storage.save_repository_ai_document(
@@ -2691,6 +2840,15 @@ fn generate_repository_ai_document_worker(
             progress_total,
             format!("{} 的 AI 摘要已生成", source.full_name),
         ),
+    );
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "repository-ai-document",
+        "done",
+        "finished",
+        format!("{} 的 AI 解析已生成", source.full_name),
+        Some(&source.id),
     );
     storage.get_repository_detail(&source.id, &source.account_id)
 }
@@ -2946,15 +3104,133 @@ async fn search_repositories(
     .await
 }
 
+#[tauri::command]
+async fn explain_ai_search_topic(
+    app_handle: tauri::AppHandle,
+    request: ExplainAiSearchTopicRequest,
+) -> Result<String, String> {
+    let progress_handle = app_handle.clone();
+    run_immediate_blocking_task_with_failure_progress(
+        "AI 搜索解释",
+        progress_handle,
+        "ai-search-explanation",
+        "ai",
+        move || explain_ai_search_topic_worker(app_handle, request),
+    )
+    .await
+}
+
+fn explain_ai_search_topic_worker(
+    app_handle: tauri::AppHandle,
+    request: ExplainAiSearchTopicRequest,
+) -> Result<String, String> {
+    let topic = request.topic.trim().to_owned();
+    if topic.is_empty() {
+        return Err("请选择要解释的问题".to_owned());
+    }
+    let request_id = request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| format!("ai-search-explain-{}", current_event_timestamp()));
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "explain",
+        "started",
+        "正在生成解释",
+        None,
+    );
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "ai-search-explanation",
+            "ai",
+            "explain",
+            0,
+            1,
+            format!("正在解释：{topic}"),
+            Some(topic.clone()),
+        ),
+    );
+    let ai_config = hydrate_ai_request_config(&app_handle, Some(request.ai_config))?;
+    let stream_app_handle = app_handle.clone();
+    let mut latest_stream_text = String::new();
+    let content = ai::explain_search_topic_streaming(
+        &ai_config,
+        &topic,
+        &mut |stage, status, delta, text, message| {
+            if let Some(next_text) = text {
+                latest_stream_text = next_text.to_owned();
+            }
+            match status {
+                "delta" => {
+                    let delta = delta.unwrap_or_default();
+                    let text = text.unwrap_or(latest_stream_text.as_str());
+                    emit_ai_stream_delta(
+                        &stream_app_handle,
+                        &request_id,
+                        "ai-search",
+                        stage,
+                        delta,
+                        text,
+                        None,
+                    );
+                }
+                _ => emit_ai_stream_status(
+                    &stream_app_handle,
+                    &request_id,
+                    "ai-search",
+                    stage,
+                    status,
+                    message.unwrap_or("AI 解释状态已更新"),
+                    None,
+                ),
+            }
+        },
+    )?;
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::succeeded("ai-search-explanation", "ai", 1, 1, "解释完成"),
+    );
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "done",
+        "finished",
+        "解释完成",
+        None,
+    );
+    Ok(content)
+}
+
 fn search_repositories_worker(
     app_handle: tauri::AppHandle,
     request: SearchRepositoriesRequest,
 ) -> Result<storage::AiSearchResponseData, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     let original_query = request.query.trim().to_owned();
+    let request_id = request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| format!("ai-search-{}", original_query));
     let context_queries = request.context_queries.unwrap_or_default();
     let context_repository_ids = request.context_repository_ids.unwrap_or_default();
     let progress_total = if request.ai_config.is_some() { 3 } else { 2 };
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "plan",
+        "started",
+        if request.ai_config.is_some() {
+            "正在理解你的搜索问题"
+        } else {
+            "正在准备本地知识搜索"
+        },
+        None,
+    );
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::running(
@@ -2973,6 +3249,7 @@ fn search_repositories_worker(
     );
     let (effective_query, metadata) = build_ai_search_query(
         &app_handle,
+        &request_id,
         original_query.clone(),
         &context_queries,
         request.ai_config,
@@ -2995,9 +3272,19 @@ fn search_repositories_worker(
         &context_queries,
         &context_repository_ids,
         request.limit.unwrap_or(20),
+        request.offset.unwrap_or(0),
         Some(&request.account_id),
         Some(metadata),
     )?;
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "analyze",
+        "finished",
+        format!("本地知识库已完成匹配，找到 {} 个仓库", response.total_count),
+        None,
+    );
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::succeeded(
@@ -3008,11 +3295,21 @@ fn search_repositories_worker(
             format!("搜索完成：找到 {} 个匹配仓库", response.total_count),
         ),
     );
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "done",
+        "finished",
+        format!("搜索完成：找到 {} 个匹配仓库", response.total_count),
+        None,
+    );
     Ok(response)
 }
 
 fn build_ai_search_query(
     app_handle: &tauri::AppHandle,
+    request_id: &str,
     original_query: String,
     context_queries: &[String],
     ai_config: Option<ai::AiRequestConfig>,
@@ -3031,9 +3328,44 @@ fn build_ai_search_query(
         return Ok((original_query, metadata));
     }
 
-    match hydrate_ai_request_config(app_handle, Some(ai_config))
-        .and_then(|config| ai::plan_search_query(&config, &original_query, context_queries))
-    {
+    let stream_app_handle = app_handle.clone();
+    let mut latest_stream_text = String::new();
+    match hydrate_ai_request_config(app_handle, Some(ai_config)).and_then(|config| {
+        ai::plan_search_query_streaming(
+            &config,
+            &original_query,
+            context_queries,
+            &mut |stage, status, delta, text, message| {
+                if let Some(next_text) = text {
+                    latest_stream_text = next_text.to_owned();
+                }
+                match status {
+                    "delta" => {
+                        let delta = delta.unwrap_or_default();
+                        let text = text.unwrap_or(latest_stream_text.as_str());
+                        emit_ai_stream_delta(
+                            &stream_app_handle,
+                            request_id,
+                            "ai-search",
+                            stage,
+                            delta,
+                            text,
+                            None,
+                        );
+                    }
+                    _ => emit_ai_stream_status(
+                        &stream_app_handle,
+                        request_id,
+                        "ai-search",
+                        stage,
+                        status,
+                        message.unwrap_or("AI 搜索状态已更新"),
+                        None,
+                    ),
+                }
+            },
+        )
+    }) {
         Ok(plan) => {
             let mut terms = vec![plan.search_query.clone()];
             terms.extend(plan.keywords.iter().cloned());
@@ -3046,10 +3378,28 @@ fn build_ai_search_query(
             metadata.ai_enhanced = true;
             metadata.ai_query = Some(effective_query.clone());
             metadata.ai_rationale_zh = Some(plan.rationale_zh);
+            emit_ai_stream_status(
+                app_handle,
+                request_id,
+                "ai-search",
+                "plan",
+                "finished",
+                "已经理解问题，开始匹配本地知识库",
+                None,
+            );
             Ok((effective_query, metadata))
         }
         Err(error) => {
             metadata.ai_error = Some(format!("AI 搜索增强失败，已改用本地知识搜索：{error}"));
+            emit_ai_stream_status(
+                app_handle,
+                request_id,
+                "ai-search",
+                "plan",
+                "failed",
+                format!("AI 理解失败，已改用本地知识搜索：{error}"),
+                None,
+            );
             Ok((original_query, metadata))
         }
     }
@@ -3618,6 +3968,7 @@ pub fn run() {
             get_profile_stats,
             generate_repository_ai_document,
             batch_generate_repository_ai_documents,
+            explain_ai_search_topic,
             search_repositories,
             recommend_github_repositories,
             list_github_recommendation_candidates,
