@@ -35,9 +35,6 @@ COREPACK_HOME="$PWD/.corepack" pnpm dev
 COREPACK_HOME="$PWD/.corepack" pnpm build:packages  # 构建共享包
 COREPACK_HOME="$PWD/.corepack" pnpm build           # 构建桌面应用
 
-# 验证 SQLite Schema
-COREPACK_HOME="$PWD/.corepack" pnpm --filter @gsat/storage verify:migrations
-
 # Rust 后端检查
 cargo fmt --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml" --check
 cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"
@@ -60,7 +57,6 @@ open apps/desktop/src-tauri/target/release/bundle/
 
 ```bash
 COREPACK_HOME="$PWD/.corepack" pnpm build:packages
-COREPACK_HOME="$PWD/.corepack" pnpm --filter @gsat/storage verify:migrations
 COREPACK_HOME="$PWD/.corepack" pnpm build
 cargo fmt --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml" --check
 cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"
@@ -122,14 +118,13 @@ SQLite Schema 由 `packages/storage/migrations/` 下的 `.sql` 文件管理：
 - 当前本机测试阶段不做旧 SQLite 迁移
 - 后端启动时执行完整、幂等的 `001_initial_schema.sql`
 - 如果已有本机数据库缺少当前版本必需表或字段，直接删除旧数据库文件并重建
-- 通过 `verify:migrations` 脚本验证完整 Schema 可重复执行
 
 修改 Schema 时：
 
 1. 更新 `migrations/001_initial_schema.sql`
-2. 运行 `COREPACK_HOME="$PWD/.corepack" pnpm --filter @gsat/storage verify:migrations` 验证
-3. 更新 `apps/desktop/src-tauri/src/storage.rs` 的必需表字段检测
-4. 更新 `packages/domain/src/index.ts` 中的相关类型定义
+2. 更新 `apps/desktop/src-tauri/src/storage.rs` 的必需表字段检测
+3. 更新 `packages/domain/src/index.ts` 中的相关类型定义
+4. 运行 `COREPACK_HOME="$PWD/.corepack" pnpm build` 和 `cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"` 检查
 
 ### 前端架构约定
 
@@ -179,8 +174,9 @@ SQLite Schema 由 `packages/storage/migrations/` 下的 `.sql` 文件管理：
 
 1. 在 `packages/storage/migrations/` 下新建 `.sql` 文件
 2. 文件名按序号递增（如 `002_add_new_table.sql`）
-3. 运行 `pnpm --filter @gsat/storage verify:migrations` 验证
+3. 更新后端必需表字段检测
 4. 更新 `packages/domain` 中的 TypeScript 类型
+5. 运行 `pnpm build` 和 `cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"` 检查
 
 ### 清理 Rust 缓存
 

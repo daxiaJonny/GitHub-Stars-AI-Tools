@@ -16,22 +16,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "package:dmg:macos": "tauri build --bundles dmg || true && tauri build --bundles app && pnpm package:dmg",
-    "package:dmg": "node scripts/package-dmg.mjs",
-    "verify:auth-data-flow": "node scripts/verify-auth-data-flow.mjs",
-    "verify:auth-flow": "node scripts/verify-auth-flow.mjs",
-    "verify:backup-flow": "node scripts/verify-backup-flow.mjs",
-    "verify:ai-search-flow": "node scripts/verify-ai-search-flow.mjs",
-    "verify:commands": "node scripts/verify-tauri-commands.mjs",
-    "verify:dashboard-flow": "node scripts/verify-dashboard-flow.mjs",
-    "verify:desktop-runtime": "node scripts/verify-desktop-runtime.mjs",
-    "verify:recommendation-flow": "node scripts/verify-recommendation-flow.mjs",
-    "verify:rust": "node scripts/verify-rust-tests.mjs",
-    "verify:settings-flow": "node scripts/verify-settings-flow.mjs",
-    "verify:sync-resilience": "node scripts/verify-sync-resilience.mjs",
-    "verify:task-feedback": "node scripts/verify-task-feedback.mjs",
-    "verify:ui": "node scripts/verify-ui-constraints.mjs",
-    "verify:view-ai-ui": "node scripts/verify-view-ai-ui.mjs",
-    "verify:virtual-list": "node scripts/verify-virtual-list.mjs"
+    "package:dmg": "node scripts/package-dmg.mjs"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.2.1",

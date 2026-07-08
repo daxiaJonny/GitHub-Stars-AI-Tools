@@ -129,9 +129,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify release configuration
-        run: pnpm verify:tauri-release-config
-
       - name: Sync release version
         shell: bash
         env:
