@@ -35,34 +35,34 @@
  * =========================================================================*/
 .font-headline-lg {
   font-family: var(--font-headline-lg);
-  font-size: 30px;
-  line-height: 38px;
+  font-size: var(--text-headline-lg);
+  line-height: var(--text-headline-lg--line-height);
   font-weight: 700;
   letter-spacing: 0;
 }
 .font-headline-md {
   font-family: var(--font-headline-md);
-  font-size: 24px;
-  line-height: 32px;
+  font-size: var(--text-headline-md);
+  line-height: var(--text-headline-md--line-height);
   font-weight: 600;
   letter-spacing: 0;
 }
 .font-body-lg {
   font-family: var(--font-body-lg);
-  font-size: 16px;
-  line-height: 24px;
+  font-size: var(--text-body-lg);
+  line-height: var(--text-body-lg--line-height);
   font-weight: 400;
 }
 .font-body-md {
   font-family: var(--font-body-md);
-  font-size: 14px;
-  line-height: 20px;
+  font-size: var(--text-body-md);
+  line-height: var(--text-body-md--line-height);
   font-weight: 400;
 }
 .font-label-sm {
   font-family: var(--font-label-sm);
-  font-size: 12px;
-  line-height: 16px;
+  font-size: var(--text-label-sm);
+  line-height: var(--text-label-sm--line-height);
   font-weight: 500;
   letter-spacing: 0.02em;
 }

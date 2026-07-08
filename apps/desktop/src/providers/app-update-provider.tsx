@@ -108,6 +108,7 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
         downloadProgress: null,
       }));
     } catch (error) {
+      const checkedAt = new Date().toISOString();
       if (silent) {
         setState((current) => ({ ...current, status: current.status === 'checking' ? 'idle' : current.status }));
         return;
@@ -117,7 +118,8 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
       setState((current) => ({
         ...current,
         status: 'error',
-        errorMessage: toErrorMessage(error),
+        lastCheckedAt: checkedAt,
+        errorMessage: toUpdaterErrorMessage(error),
       }));
     }
   }
@@ -172,7 +174,7 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
       setState((current) => ({
         ...current,
         status: 'error',
-        errorMessage: toErrorMessage(error),
+        errorMessage: toUpdaterErrorMessage(error),
       }));
     }
   }
@@ -212,6 +214,27 @@ function buildDownloadProgress(downloadedBytes: number, totalBytes: number | nul
   };
 }
 
-function toErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+function toUpdaterErrorMessage(error: unknown) {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const normalizedMessage = rawMessage.toLowerCase();
+
+  if (normalizedMessage.includes('valid release json') || normalizedMessage.includes('latest.json')) {
+    return '没有找到可用于应用内更新的发布文件。请确认 GitHub Release 已上传 latest.json 后再试。';
+  }
+
+  if (normalizedMessage.includes('signature') || normalizedMessage.includes('pubkey')) {
+    return '更新包签名校验失败，请确认发布时使用的签名私钥和应用内公钥一致。';
+  }
+
+  if (
+    normalizedMessage.includes('network') ||
+    normalizedMessage.includes('dns') ||
+    normalizedMessage.includes('timed out') ||
+    normalizedMessage.includes('timeout') ||
+    normalizedMessage.includes('failed to fetch')
+  ) {
+    return '连接更新服务器失败，请检查网络后重试。';
+  }
+
+  return rawMessage || '检查更新失败，请稍后重试。';
 }

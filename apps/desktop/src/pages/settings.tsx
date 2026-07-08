@@ -16,19 +16,141 @@ import type { DashboardStats, RuntimeReadinessCheckItem, RuntimeReadinessCheckRe
 import type { AISettings as AISettingsValue, RuntimeSelfCheckRecord, ThemeSettings as ThemeSettingsValue } from '@/types-settings';
 
 type SettingsTab = 'github' | 'ai' | 'general' | 'backup';
+type AIProviderPreset = AISettingsValue['providerPreset'];
 
-const AI_PROVIDER_DEFAULTS: Record<AISettingsValue['provider'], Pick<AISettingsValue, 'baseUrl' | 'model'>> = {
-  none: { baseUrl: '', model: 'gpt-5.5' },
-  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.5' },
-  'openai-compatible': { baseUrl: '', model: 'gpt-5.5' },
-  anthropic: { baseUrl: 'https://api.anthropic.com/v1', model: 'claude-sonnet-5' },
+type AIProviderPresetOption = {
+  id: AIProviderPreset;
+  label: string;
+  description: string;
+  provider: AISettingsValue['provider'];
+  baseUrl: string;
+  apiKeyLabel: string;
+  modelPlaceholder: string;
+  modelSuggestions: string[];
 };
-const AI_MODEL_SUGGESTIONS: Record<AISettingsValue['provider'], string[]> = {
-  none: [],
-  openai: ['gpt-5.5', 'gpt-5.5-mini', 'gpt-5.5-nano'],
-  'openai-compatible': ['gpt-5.5', 'claude-sonnet-5', 'claude-opus-4-8', 'qwen3-coder', 'deepseek-v3.1'],
-  anthropic: ['claude-sonnet-5', 'claude-opus-4-8', 'claude-haiku-4-5'],
-};
+
+const AI_PROVIDER_PRESETS: AIProviderPresetOption[] = [
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    description: '官方 Chat Completions 接口',
+    provider: 'openai',
+    baseUrl: 'https://api.openai.com/v1',
+    apiKeyLabel: 'API Key',
+    modelPlaceholder: '填写 OpenAI 模型 ID',
+    modelSuggestions: ['gpt-5.5', 'gpt-5.5-mini', 'gpt-5.5-nano'],
+  },
+  {
+    id: 'anthropic',
+    label: 'Anthropic',
+    description: 'Claude Messages API',
+    provider: 'anthropic',
+    baseUrl: 'https://api.anthropic.com/v1',
+    apiKeyLabel: 'API Key',
+    modelPlaceholder: '填写 Claude 模型 ID',
+    modelSuggestions: ['claude-sonnet-5', 'claude-opus-4-8', 'claude-haiku-4-5'],
+  },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    description: '多模型 OpenAI 兼容网关',
+    provider: 'openai-compatible',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    apiKeyLabel: 'API Key',
+    modelPlaceholder: '例如 openai/gpt-5.5',
+    modelSuggestions: ['openai/gpt-5.5', 'anthropic/claude-sonnet-5', 'deepseek/deepseek-chat'],
+  },
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    description: 'DeepSeek OpenAI 兼容接口',
+    provider: 'openai-compatible',
+    baseUrl: 'https://api.deepseek.com/v1',
+    apiKeyLabel: 'API Key',
+    modelPlaceholder: '例如 deepseek-chat',
+    modelSuggestions: ['deepseek-chat', 'deepseek-reasoner'],
+  },
+  {
+    id: 'moonshot',
+    label: 'Moonshot / Kimi',
+    description: 'Moonshot OpenAI 兼容接口',
+    provider: 'openai-compatible',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    apiKeyLabel: 'API Key',
+    modelPlaceholder: '例如 kimi-k2-0711-preview',
+    modelSuggestions: ['kimi-k2-0711-preview', 'moonshot-v1-8k', 'moonshot-v1-32k'],
+  },
+  {
+    id: 'qwen',
+    label: '阿里通义 Qwen',
+    description: 'DashScope OpenAI 兼容接口',
+    provider: 'openai-compatible',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    apiKeyLabel: 'API Key',
+    modelPlaceholder: '例如 qwen-plus',
+    modelSuggestions: ['qwen-plus', 'qwen-max', 'qwen-turbo'],
+  },
+  {
+    id: 'zhipu',
+    label: '智谱 GLM',
+    description: '智谱 OpenAI 兼容接口',
+    provider: 'openai-compatible',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    apiKeyLabel: 'API Key',
+    modelPlaceholder: '例如 glm-4.5',
+    modelSuggestions: ['glm-4.5', 'glm-4.5-air', 'glm-4-flash'],
+  },
+  {
+    id: 'siliconflow',
+    label: '硅基流动',
+    description: 'SiliconFlow OpenAI 兼容接口',
+    provider: 'openai-compatible',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    apiKeyLabel: 'API Key',
+    modelPlaceholder: '填写 SiliconFlow 模型 ID',
+    modelSuggestions: ['Qwen/Qwen3-Coder-480B-A35B-Instruct', 'deepseek-ai/DeepSeek-V3', 'THUDM/GLM-4.1V-9B-Thinking'],
+  },
+  {
+    id: 'ollama',
+    label: 'Ollama',
+    description: '本机 OpenAI 兼容服务，可不填 Key',
+    provider: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    apiKeyLabel: 'API Key（可留空）',
+    modelPlaceholder: '例如 llama3.1',
+    modelSuggestions: ['llama3.1', 'qwen2.5-coder', 'deepseek-r1'],
+  },
+  {
+    id: 'lmstudio',
+    label: 'LM Studio',
+    description: '本机 OpenAI 兼容服务，可不填 Key',
+    provider: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:1234/v1',
+    apiKeyLabel: 'API Key（可留空）',
+    modelPlaceholder: '填写本机加载的模型 ID',
+    modelSuggestions: ['local-model'],
+  },
+  {
+    id: 'custom-openai-compatible',
+    label: '自定义兼容接口',
+    description: '手动填写 OpenAI 兼容地址',
+    provider: 'openai-compatible',
+    baseUrl: '',
+    apiKeyLabel: 'API Key（本机服务可留空）',
+    modelPlaceholder: '填写服务商模型 ID',
+    modelSuggestions: [],
+  },
+  {
+    id: 'none',
+    label: '关闭 AI',
+    description: '只使用本地知识搜索和手动整理',
+    provider: 'none',
+    baseUrl: '',
+    apiKeyLabel: 'API Key',
+    modelPlaceholder: '选择服务后填写模型 ID',
+    modelSuggestions: [],
+  },
+];
 const PROJECT_REPOSITORY_URL = 'https://github.com/xingranya/GitHub-Stars-AI-Tools';
 const PROJECT_ISSUES_URL = 'https://github.com/xingranya/GitHub-Stars-AI-Tools/issues';
 const PROJECT_LICENSE_URL = 'https://github.com/xingranya/GitHub-Stars-AI-Tools/blob/main/LICENSE';
@@ -841,14 +963,15 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
   const [availableModels, setAvailableModels] = useState<AiModelOption[]>([]);
   const [testMessage, setTestMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [modelListMessage, setModelListMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const endpointPlaceholder = getAiEndpointPlaceholder(ai.provider);
-  const apiKeyPlaceholder = getAiApiKeyPlaceholder(ai.provider);
-  const modelPlaceholder = getAiModelPlaceholder(ai.provider);
+  const currentPreset = getAiProviderPreset(ai.providerPreset);
+  const endpointPlaceholder = currentPreset.baseUrl || getAiEndpointPlaceholder(ai.provider);
+  const apiKeyPlaceholder = currentPreset.apiKeyLabel;
+  const modelPlaceholder = currentPreset.modelPlaceholder;
   const effectiveApiKey = apiKeyDraft.trim() ? apiKeyDraft : ai.apiKey;
   const currentConfigMessage = getAiConfigMessage({ ...ai, apiKey: effectiveApiKey });
   const canTestAi = needsRemoteConfig && !currentConfigMessage;
   const aiKeySaveMessage = getAiKeySaveMessage(settingsHook.aiKeySaveStatus);
-  const modelOptions = mergeAiModelOptions(ai.provider, availableModels, ai.model);
+  const modelOptions = mergeAiModelOptions(currentPreset, availableModels, ai.model);
 
   useEffect(() => {
     setApiKeyDraft(isSavedAiApiKeyPlaceholder(ai.apiKey) ? '' : ai.apiKey);
@@ -857,22 +980,23 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
   useEffect(() => {
     setAvailableModels([]);
     setModelListMessage(null);
-  }, [ai.provider, ai.baseUrl]);
+  }, [ai.providerPreset, ai.provider, ai.baseUrl]);
 
-  async function handleProviderChange(provider: AISettingsValue['provider']) {
-    const defaults = AI_PROVIDER_DEFAULTS[provider];
+  async function handleProviderPresetChange(providerPreset: AIProviderPreset) {
+    const preset = getAiProviderPreset(providerPreset);
     setApiKeyDraft('');
     setTestMessage({
       type: 'success',
-      text: provider === 'none'
+      text: preset.provider === 'none'
         ? 'AI 功能已关闭，已保存的服务 Key 会保留在系统凭据管理器中。'
-        : '已切换 AI 服务，请确认请求地址、API Key 和模型 ID。',
+        : `已切换到 ${preset.label}，请填写 API Key 和模型 ID。`,
     });
     await settingsHook.updateAI({
-      provider,
-      baseUrl: defaults.baseUrl,
-      model: defaults.model,
-      enableAutoSummary: provider === 'none' ? false : ai.enableAutoSummary,
+      provider: preset.provider,
+      providerPreset: preset.id,
+      baseUrl: preset.baseUrl,
+      model: '',
+      enableAutoSummary: preset.provider === 'none' ? false : ai.enableAutoSummary,
     });
   }
 
@@ -933,7 +1057,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
         request: {
           aiConfig: toBackendAiRequestConfig({
             ...nextAi,
-            model: nextAi.model.trim() || AI_PROVIDER_DEFAULTS[nextAi.provider].model,
+            model: nextAi.model.trim() || currentPreset.modelSuggestions[0] || 'model-list',
           }),
         },
       });
@@ -964,16 +1088,33 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
       <div className="space-y-6">
         <div>
           <label className="font-body-md text-on-surface font-medium mb-2 block">AI 服务</label>
-          <select
-            value={ai.provider}
-            onChange={(e) => void handleProviderChange(e.target.value as AISettingsValue['provider'])}
-            className="w-full bg-surface-container-low border border-outline-variant rounded-lg px-4 py-2 font-body-md text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-          >
-            <option value="openai">OpenAI 官方接口</option>
-            <option value="openai-compatible">OpenAI 兼容接口</option>
-            <option value="anthropic">Anthropic Claude 接口</option>
-            <option value="none">关闭 AI 功能</option>
-          </select>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {AI_PROVIDER_PRESETS.map((preset) => {
+              const selected = currentPreset.id === preset.id;
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => void handleProviderPresetChange(preset.id)}
+                  aria-pressed={selected}
+                  className={`min-h-[82px] rounded-lg border px-3 py-2 text-left transition-all focus:outline-none focus:ring-2 focus:ring-primary/30 ${
+                    selected
+                      ? 'border-primary bg-primary/10 text-on-surface shadow-sm'
+                      : 'border-outline-variant/30 bg-surface-container-low text-on-surface hover:border-primary/40 hover:bg-surface-container-high'
+                  }`}
+                >
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="font-body-md text-sm font-semibold">{preset.label}</span>
+                    {selected && <Icon name="check_circle" size={16} className="text-primary" />}
+                  </span>
+                  <span className="mt-1 block text-xs leading-relaxed text-on-surface-variant">{preset.description}</span>
+                  <span className="mt-2 block truncate text-[11px] text-on-surface-variant">
+                    {preset.provider === 'none' ? '关闭远程 AI' : preset.baseUrl || '手动填写请求地址'}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
           <p className="font-body-md text-[13px] text-on-surface-variant mt-2">
             OpenAI 兼容接口会按 Chat Completions 协议请求；Anthropic 使用 Claude Messages API。
           </p>
@@ -1002,7 +1143,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
             </div>
             <div className="grid gap-2">
               <label className="font-body-md text-on-surface font-medium">
-                {ai.provider === 'openai-compatible' ? 'API Key（本机兼容服务可留空）' : 'API Key'}
+                {currentPreset.apiKeyLabel}
               </label>
               <input
                 type="password"
@@ -1106,7 +1247,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
               </button>
             </div>
             <div className="flex flex-wrap gap-2">
-              {AI_MODEL_SUGGESTIONS[ai.provider].map((model) => (
+              {currentPreset.modelSuggestions.map((model) => (
                 <button
                   key={model}
                   type="button"
@@ -1207,15 +1348,21 @@ function getAiEndpointPlaceholder(provider: AISettingsValue['provider']) {
   }
 }
 
+function getAiProviderPreset(providerPreset: AIProviderPreset): AIProviderPresetOption {
+  return AI_PROVIDER_PRESETS.find((preset) => preset.id === providerPreset)
+    ?? AI_PROVIDER_PRESETS.find((preset) => preset.id === 'custom-openai-compatible')
+    ?? AI_PROVIDER_PRESETS[0];
+}
+
 function mergeAiModelOptions(
-  provider: AISettingsValue['provider'],
+  preset: AIProviderPresetOption,
   availableModels: AiModelOption[],
   currentModel: string,
 ) {
   const seen = new Set<string>();
   const options: AiModelOption[] = [];
 
-  for (const id of AI_MODEL_SUGGESTIONS[provider]) {
+  for (const id of preset.modelSuggestions) {
     if (!seen.has(id)) {
       seen.add(id);
       options.push({ id });
@@ -1880,7 +2027,7 @@ function ToggleSwitch({
       } disabled:cursor-not-allowed disabled:opacity-50`}
     >
       <span
-        className={`inline-block h-4 w-4 transform rounded-full bg-on-primary transition-transform ${
+        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
           checked ? 'translate-x-6' : 'translate-x-1'
         }`}
       />
