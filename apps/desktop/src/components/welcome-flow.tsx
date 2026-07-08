@@ -8,6 +8,7 @@ import {
   Search,
   Sparkles,
 } from 'lucide-react';
+import { BrandIcon } from '@/components/ui/brand-icon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { GitHubUser, TaskProgressEvent } from '@/types';
@@ -157,11 +158,7 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
       <main className="mx-auto flex min-h-full w-full max-w-5xl flex-col">
         <header className="flex flex-col gap-4 border-b border-card-border pb-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
-            <img
-              src="/icon.png"
-              alt="GitHub-Stars-AI-Tools 应用图标"
-              className="size-12 shrink-0 rounded-xl border border-card-border bg-surface-container-lowest object-contain shadow-sm"
-            />
+            <BrandIcon title="GitHub-Stars-AI-Tools 应用图标" className="size-12 rounded-xl shadow-sm" />
             <div className="min-w-0">
               <p className="truncate font-headline-md text-lg font-bold text-on-surface">GitHub-Stars-AI-Tools</p>
               <p className="text-sm text-on-surface-variant">GSAT 本地 Stars 知识库</p>

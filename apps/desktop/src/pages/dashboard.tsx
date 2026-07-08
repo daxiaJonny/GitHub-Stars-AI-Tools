@@ -317,7 +317,7 @@ export function DashboardPage(props: DashboardPageProps) {
             </div>
             <Icon name="bolt" size={20} className="mt-1 shrink-0 text-primary" />
           </div>
-          <div className="grid flex-1 auto-rows-fr grid-cols-[repeat(auto-fit,minmax(132px,1fr))] gap-3">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(132px,1fr))] content-start gap-3">
             {displayStats.languageDistribution.length === 0 ? (
               <div className="col-span-full flex min-h-[120px] flex-col items-center justify-center gap-2 text-on-surface-variant">
                 <Icon name="inbox" size={42} className="opacity-30" />
@@ -332,7 +332,7 @@ export function DashboardPage(props: DashboardPageProps) {
                     key={item.language}
                     type="button"
                     onClick={() => props.onSelectLanguage(item.language)}
-                    className="interactive-btn group flex min-h-[92px] flex-col items-start justify-between rounded-lg border border-card-border bg-surface/60 p-3 text-left transition-colors hover:border-primary/25 hover:bg-surface-container-low"
+                    className="interactive-btn group flex h-[104px] flex-col items-start justify-between rounded-lg border border-card-border bg-surface/60 p-3 text-left transition-colors hover:border-primary/25 hover:bg-surface-container-low"
                   >
                     <span className="flex w-full items-start justify-between gap-2">
                       <Icon name={icons[idx] ?? 'code_blocks'} size={24} style={{ color: colors[idx] }} />

@@ -386,14 +386,43 @@ function normalizeAiSettings(ai: AppSettings['ai']): AppSettings['ai'] {
   const isRemoteProvider = provider !== 'none';
   const baseUrl = typeof ai.baseUrl === 'string' ? ai.baseUrl.trim() : '';
   const model = typeof ai.model === 'string' ? ai.model.trim() : '';
+  const providerPreset = normalizeAiProviderPreset(ai.providerPreset, provider);
 
   return {
     provider,
+    providerPreset,
     baseUrl: isRemoteProvider ? baseUrl : DEFAULT_SETTINGS.ai.baseUrl,
     apiKey: typeof ai.apiKey === 'string' ? ai.apiKey : '',
     model: isRemoteProvider ? model : DEFAULT_SETTINGS.ai.model,
     enableAutoSummary: isRemoteProvider ? Boolean(ai.enableAutoSummary) : false,
   };
+}
+
+function normalizeAiProviderPreset(
+  value: AppSettings['ai']['providerPreset'] | undefined,
+  provider: AppSettings['ai']['provider'],
+): AppSettings['ai']['providerPreset'] {
+  const knownPresets: AppSettings['ai']['providerPreset'][] = [
+    'openai',
+    'anthropic',
+    'openrouter',
+    'deepseek',
+    'moonshot',
+    'qwen',
+    'zhipu',
+    'siliconflow',
+    'ollama',
+    'lmstudio',
+    'custom-openai-compatible',
+    'none',
+  ];
+  if (value && knownPresets.includes(value)) {
+    return value;
+  }
+  if (provider === 'openai') return 'openai';
+  if (provider === 'anthropic') return 'anthropic';
+  if (provider === 'openai-compatible') return 'custom-openai-compatible';
+  return 'none';
 }
 
 function normalizeThemeSettings(theme: AppSettings['theme']): AppSettings['theme'] {

@@ -6,6 +6,7 @@ import { emptyRepositoryFilters, getRepositoryStats } from '@/lib/repository';
 import { optionalRequestText } from '@/lib/format';
 import type {
   AISettings,
+  AiStreamEvent,
   AiTagNetworkSummary,
   BatchAiDocumentSummary,
   BackendStatus,
@@ -47,9 +48,21 @@ class ReadmePostProcessWarning extends Error {
   }
 }
 
+type RepositoryAiStreamState = {
+  requestId: string;
+  repositoryId: string;
+  stage: string;
+  status: string;
+  message: string | null;
+  text: string;
+  startedAt: string;
+  updatedAt: string;
+};
+
 export function useStarsWorkspace() {
   const repositoryLoadSequence = useRef(0);
   const annotationLoadSequence = useRef(0);
+  const selectedRepositoryIdRef = useRef<string | null>(null);
   const [status, setStatus] = useState<BackendStatus | null>(null);
   const [authState, setAuthState] = useState<GitHubAuthState>(initialAuthState);
   const [token, setToken] = useState('');
@@ -95,6 +108,7 @@ export function useStarsWorkspace() {
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [annotationMessage, setAnnotationMessage] = useState<string | null>(null);
   const [taskProgress, setTaskProgress] = useState<TaskProgressEvent | null>(null);
+  const [repositoryAiStream, setRepositoryAiStream] = useState<RepositoryAiStreamState | null>(null);
   const [repositoryReadmeError, setRepositoryReadmeError] = useState<{ repositoryId: string; message: string } | null>(null);
   const [repositoryAiError, setRepositoryAiError] = useState<{ repositoryId: string; message: string } | null>(null);
   const [isRetryingAiSearch, setIsRetryingAiSearch] = useState(false);
@@ -107,11 +121,40 @@ export function useStarsWorkspace() {
   const repositoryStats = useMemo(() => getRepositoryStats(repositoryPage), [repositoryPage]);
 
   useEffect(() => {
-    let unlisten: (() => void) | null = null;
+    let unlistenProgress: (() => void) | null = null;
+    let unlistenAiStream: (() => void) | null = null;
     void listen<TaskProgressEvent>('task-progress', (event) => {
       setTaskProgress(event.payload);
     }).then((nextUnlisten) => {
-      unlisten = nextUnlisten;
+      unlistenProgress = nextUnlisten;
+    });
+    void listen<AiStreamEvent>('ai-stream', (event) => {
+      const payload = event.payload;
+      if (payload.taskType !== 'repository-ai-document' || !payload.repositoryId) {
+        return;
+      }
+      const repositoryId = payload.repositoryId;
+      setRepositoryAiStream((current) => {
+        if (current && current.requestId !== payload.requestId) {
+          return current;
+        }
+        if (!current && selectedRepositoryIdRef.current !== repositoryId) {
+          return current;
+        }
+        const startedAt = current?.startedAt ?? payload.createdAt;
+        return {
+          requestId: payload.requestId,
+          repositoryId,
+          stage: payload.stage,
+          status: payload.status,
+          message: payload.message ?? current?.message ?? null,
+          text: payload.text ?? current?.text ?? '',
+          startedAt,
+          updatedAt: payload.createdAt,
+        };
+      });
+    }).then((nextUnlisten) => {
+      unlistenAiStream = nextUnlisten;
     });
 
     invoke<BackendStatus>('get_backend_status')
@@ -127,9 +170,14 @@ export function useStarsWorkspace() {
     loadRepositoryLanguages();
 
     return () => {
-      unlisten?.();
+      unlistenProgress?.();
+      unlistenAiStream?.();
     };
   }, []);
+
+  useEffect(() => {
+    selectedRepositoryIdRef.current = selectedRepositoryId;
+  }, [selectedRepositoryId]);
 
   useEffect(() => {
     if (!repositoryPage || repositoryPage.items.length === 0) {
@@ -149,6 +197,7 @@ export function useStarsWorkspace() {
       annotationLoadSequence.current += 1;
       setAnnotation(null);
       setRepositoryDetail(null);
+      setRepositoryAiStream(null);
       setNoteDraft('');
       setReadingStatusDraft('unread');
       return;
@@ -1042,6 +1091,18 @@ export function useStarsWorkspace() {
     setError(null);
     setRepositoryAiError(null);
     setAnnotationMessage(null);
+    const requestId = `repository-ai-${selectedRepository.id}-${Date.now()}`;
+    const now = new Date().toISOString();
+    setRepositoryAiStream({
+      requestId,
+      repositoryId: selectedRepository.id,
+      stage: 'prepare',
+      status: 'started',
+      message: `正在准备解析 ${selectedRepository.fullName}`,
+      text: '',
+      startedAt: now,
+      updatedAt: now,
+    });
     setTaskProgress(buildRunningTaskProgress(
       'generate-ai-document',
       'ai',
@@ -1055,16 +1116,23 @@ export function useStarsWorkspace() {
           repositoryId: selectedRepository.id,
           accountId: selectedRepository.accountId,
           aiConfig: toBackendAiRequestConfig(aiConfig),
+          requestId,
         },
       });
       setRepositoryDetail(nextRepositoryDetail);
       await refreshRepositoryWorkspace();
       setRepositoryAiError(null);
+      setRepositoryAiStream((current) => current?.requestId === requestId
+        ? { ...current, status: 'finished', stage: 'done', message: 'AI 解析已生成。', updatedAt: new Date().toISOString() }
+        : current);
       setAnnotationMessage('AI 摘要已生成。');
     } catch (reason) {
       const message = toErrorMessage(reason);
       setError(message);
       setRepositoryAiError({ repositoryId: selectedRepository.id, message });
+      setRepositoryAiStream((current) => current?.requestId === requestId
+        ? { ...current, status: 'failed', stage: 'error', message, updatedAt: new Date().toISOString() }
+        : current);
       setTaskProgress(buildFailedTaskProgress('generate-ai-document', 'ai', message, selectedRepository.fullName));
       handleGitHubCredentialFailure(message);
       throw reason;
@@ -1368,6 +1436,7 @@ export function useStarsWorkspace() {
     repositoryDetail,
     repositoryFilters,
     repositoryAiError,
+    repositoryAiStream,
     repositoryReadmeError,
     repositoryLanguages,
     repositoryPage,
