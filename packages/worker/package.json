@@ -19,8 +19,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -b tsconfig.json",
-    "verify:pipeline": "pnpm build && node scripts/verify-pipeline.mjs"
+    "build": "tsc -b tsconfig.json"
   },
   "dependencies": {
     "@gsat/ai": "workspace:*",
