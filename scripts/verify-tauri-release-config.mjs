@@ -13,6 +13,7 @@ const tauriLib = read('apps/desktop/src-tauri/src/lib.rs');
 const desktopCapability = JSON.parse(read('apps/desktop/src-tauri/capabilities/default.json'));
 const tauriMain = read('apps/desktop/src-tauri/src/main.rs');
 const readme = read('README.md');
+const releaseGuide = read('docs/release.md');
 const gitignore = read('.gitignore');
 const workflowPath = 'release.yml';
 const workflow = read(`.github/workflows/${workflowPath}`);
@@ -56,17 +57,18 @@ assert.equal(rootPackage.scripts['verify:release'], 'pnpm verify:tauri-release-c
 const releaseScriptText = `${rootPackage.scripts['package:desktop']}\n${rootPackage.scripts['verify:release']}`;
 assert.doesNotMatch(releaseScriptText, /--no-bundle/, '发布脚本禁止使用 --no-bundle，不能只产出二进制文件');
 assert.doesNotMatch(
-  readme,
+  releaseGuide,
   /build --no-bundle|--no-bundle[^。\n]*(?:发布|验收|安装包)|(?:发布包|发版|verify:release)[^。\n]*不生成安装包/,
-  'README 不能把 --no-bundle 二进制描述成发布验收',
+  '发布维护文档不能把 --no-bundle 二进制描述成发布验收',
 );
-assert.match(readme, /pnpm package:desktop/, 'README 必须给出真实桌面安装包打包命令');
-assert.match(readme, /workflow_dispatch|Run workflow|版本号|更新日志/, 'README 必须说明网页端手动发版流程');
-assert.match(readme, /\.dmg/, 'README 必须说明 macOS dmg 产物');
-assert.match(readme, /Apple Silicon[\s\S]*Intel|Intel[\s\S]*Apple Silicon/, 'README 必须说明 macOS Apple Silicon 与 Intel 两套安装包');
-assert.match(readme, /\.msi|setup\.exe/, 'README 必须说明 Windows 安装包产物');
-assert.match(readme, /\.deb|\.rpm|\.AppImage/, 'README 必须说明 Linux 安装包产物');
-assert.match(readme, /应用内更新[\s\S]*?latest\.json[\s\S]*?TAURI_SIGNING_PRIVATE_KEY/, 'README 必须说明应用内更新依赖 latest.json 和 Tauri updater 签名私钥');
+assert.match(readme, /\[发布维护文档\]\(docs\/release\.md\)/, 'README 只需要链接到维护者发布文档，不应承载完整发布流程');
+assert.match(releaseGuide, /pnpm package:desktop/, '发布维护文档必须给出真实桌面安装包打包命令');
+assert.match(releaseGuide, /workflow_dispatch|Run workflow|版本号|更新日志/, '发布维护文档必须说明网页端手动发版流程');
+assert.match(releaseGuide, /\.dmg/, '发布维护文档必须说明 macOS dmg 产物');
+assert.match(releaseGuide, /Apple Silicon[\s\S]*Intel|Intel[\s\S]*Apple Silicon/, '发布维护文档必须说明 macOS Apple Silicon 与 Intel 两套安装包');
+assert.match(releaseGuide, /\.msi|setup\.exe/, '发布维护文档必须说明 Windows 安装包产物');
+assert.match(releaseGuide, /\.deb|\.rpm|\.AppImage/, '发布维护文档必须说明 Linux 安装包产物');
+assert.match(releaseGuide, /应用内更新[\s\S]*?latest\.json[\s\S]*?TAURI_SIGNING_PRIVATE_KEY/, '发布维护文档必须说明应用内更新依赖 latest.json 和 Tauri updater 签名私钥');
 
 for (const ignoredArtifact of ['*.app/', '*.dmg', '*.msi', '*.exe', '*.deb', '*.rpm', '*.AppImage']) {
   assert.match(gitignore, new RegExp(`^${escapeRegExp(ignoredArtifact)}$`, 'm'), `.gitignore 必须忽略本地 Tauri 打包产物：${ignoredArtifact}`);
