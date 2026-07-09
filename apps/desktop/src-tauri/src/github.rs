@@ -11,6 +11,7 @@ const README_ACCEPT: &str = "application/vnd.github+json";
 const GIST_API: &str = "https://api.github.com/gists";
 const SEARCH_REPOSITORIES_API: &str = "https://api.github.com/search/repositories";
 const ANNOTATION_GIST_FILE: &str = "github-stars-ai-tools-annotations.json";
+const REPOSITORY_LIBRARY_GIST_FILE: &str = "github-stars-ai-tools-repositories.json";
 const PAGE_SIZE: u16 = 100;
 
 pub fn starred_page_size() -> usize {
@@ -168,13 +169,39 @@ pub fn create_annotation_gist(
     token: &str,
     snapshot_json: &str,
 ) -> Result<GistExportResult, String> {
+    create_gist(
+        token,
+        ANNOTATION_GIST_FILE,
+        "GitHub-Stars-AI-Tools annotation snapshot",
+        snapshot_json,
+    )
+}
+
+pub fn create_repository_library_gist(
+    token: &str,
+    snapshot_json: &str,
+) -> Result<GistExportResult, String> {
+    create_gist(
+        token,
+        REPOSITORY_LIBRARY_GIST_FILE,
+        "GitHub-Stars-AI-Tools repository library snapshot",
+        snapshot_json,
+    )
+}
+
+fn create_gist(
+    token: &str,
+    file_name: &str,
+    description: &str,
+    snapshot_json: &str,
+) -> Result<GistExportResult, String> {
     let mut files = serde_json::Map::new();
     files.insert(
-        ANNOTATION_GIST_FILE.to_owned(),
+        file_name.to_owned(),
         serde_json::json!({ "content": snapshot_json }),
     );
     let body = serde_json::json!({
-        "description": "GitHub-Stars-AI-Tools annotation snapshot",
+        "description": description,
         "public": false,
         "files": files,
     })
@@ -190,14 +217,40 @@ pub fn create_annotation_gist(
 }
 
 pub fn fetch_annotation_gist(token: &str, gist_id: &str) -> Result<String, String> {
+    fetch_gist_file(
+        token,
+        gist_id,
+        ANNOTATION_GIST_FILE,
+        "Gist 中没有 GitHub-Stars-AI-Tools 注解快照文件",
+        "Gist 注解快照内容为空，且没有可读取的原始文件地址",
+    )
+}
+
+pub fn fetch_repository_library_gist(token: &str, gist_id: &str) -> Result<String, String> {
+    fetch_gist_file(
+        token,
+        gist_id,
+        REPOSITORY_LIBRARY_GIST_FILE,
+        "Gist 中没有 GitHub-Stars-AI-Tools 仓库快照文件",
+        "Gist 仓库快照内容为空，且没有可读取的原始文件地址",
+    )
+}
+
+fn fetch_gist_file(
+    token: &str,
+    gist_id: &str,
+    file_name: &str,
+    missing_message: &str,
+    empty_message: &str,
+) -> Result<String, String> {
     let url = format!("{GIST_API}/{gist_id}");
     let body = github_api_get(token, &url, README_ACCEPT)?;
     let response = serde_json::from_str::<GistResponse>(&body)
         .map_err(|error| format!("GitHub Gist 响应解析失败：{error}"))?;
     let file = response
         .files
-        .get(ANNOTATION_GIST_FILE)
-        .ok_or_else(|| "Gist 中没有 GitHub-Stars-AI-Tools 注解快照文件".to_owned())?;
+        .get(file_name)
+        .ok_or_else(|| missing_message.to_owned())?;
 
     if let Some(content) = file.content.clone() {
         return Ok(content);
@@ -206,7 +259,7 @@ pub fn fetch_annotation_gist(token: &str, gist_id: &str) -> Result<String, Strin
     let raw_url = file
         .raw_url
         .as_deref()
-        .ok_or_else(|| "Gist 注解快照内容为空，且没有可读取的原始文件地址".to_owned())?;
+        .ok_or_else(|| empty_message.to_owned())?;
     github_api_get(token, raw_url, README_ACCEPT)
 }
 

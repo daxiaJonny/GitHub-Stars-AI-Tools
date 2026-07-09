@@ -39,7 +39,7 @@ export function getAiConfigMessage(ai: AISettings): string | null {
   }
 
   if (baseUrl && !isAllowedAiBaseUrl(baseUrl)) {
-    return 'AI 请求地址必须使用 https://；只有本机调试地址可以使用 http://。';
+    return 'AI 请求地址必须使用 https://；OpenAI 兼容接口的本机或局域网服务可以使用 http://。';
   }
 
   if (!ai.model.trim()) {
@@ -76,7 +76,7 @@ function isAllowedAiBaseUrl(baseUrl: string) {
 
   try {
     const url = new URL(baseUrl);
-    return ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(url.hostname.toLowerCase());
+    return isLocalAiHost(url.hostname) || isPrivateNetworkHost(url.hostname);
   } catch {
     return false;
   }
@@ -85,8 +85,33 @@ function isAllowedAiBaseUrl(baseUrl: string) {
 function isLocalAiBaseUrl(baseUrl: string) {
   try {
     const url = new URL(baseUrl);
-    return ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(url.hostname.toLowerCase());
+    return isLocalAiHost(url.hostname);
   } catch {
     return false;
   }
+}
+
+function isLocalAiHost(hostname: string) {
+  const host = normalizeHostname(hostname);
+  return ['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host);
+}
+
+function isPrivateNetworkHost(hostname: string) {
+  const host = normalizeHostname(hostname);
+  if (host === 'host.docker.internal') {
+    return true;
+  }
+
+  const parts = host.split('.').map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+
+  return parts[0] === 10
+    || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+    || (parts[0] === 192 && parts[1] === 168);
+}
+
+function normalizeHostname(hostname: string) {
+  return hostname.trim().toLowerCase().replace(/^\[/u, '').replace(/\]$/u, '');
 }

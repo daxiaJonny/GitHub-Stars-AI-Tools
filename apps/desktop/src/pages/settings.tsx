@@ -1,5 +1,6 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useWorkspace } from '@/providers/workspace-provider';
 import { useAppSettings } from '@/providers/settings-provider';
 import { useAppUpdate, type AppUpdateContextValue } from '@/providers/app-update-provider';
@@ -12,7 +13,7 @@ import {
 } from '@/lib/ai-config';
 import { compactNumber } from '@/lib/format';
 import { COLOR_PRESETS } from '@/types-settings';
-import type { DashboardStats, RuntimeReadinessCheckItem, RuntimeReadinessCheckResult } from '@/types';
+import type { AiStreamEvent, DashboardStats, RuntimeReadinessCheckItem, RuntimeReadinessCheckResult } from '@/types';
 import type { AISettings as AISettingsValue, RuntimeSelfCheckRecord, ThemeSettings as ThemeSettingsValue } from '@/types-settings';
 
 type SettingsTab = 'github' | 'ai' | 'general' | 'backup';
@@ -161,12 +162,30 @@ type AiConnectionTestResult = {
   summaryZh: string;
   model: string;
   promptVersion: string;
+  inputTokens: number;
+  outputTokens: number;
 };
 
 type AiModelOption = {
   id: string;
   displayName?: string | null;
   ownedBy?: string | null;
+};
+
+type AiTestDialogState = {
+  isOpen: boolean;
+  status: 'preparing' | 'running' | 'success' | 'error';
+  stage: string;
+  providerLabel: string;
+  endpoint: string;
+  model: string;
+  startedAt: number;
+  firstTokenLatencyMs: number | null;
+  totalLatencyMs: number | null;
+  outputTokens: number | null;
+  tokensPerSecond: number | null;
+  summary: string | null;
+  error: string | null;
 };
 
 export function SettingsPage() {
@@ -964,6 +983,8 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
   const [availableModels, setAvailableModels] = useState<AiModelOption[]>([]);
   const [testMessage, setTestMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [modelListMessage, setModelListMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [testDialog, setTestDialog] = useState<AiTestDialogState | null>(null);
+  const activeTestRequestRef = useRef<{ requestId: string; startedAt: number; firstTokenSeen: boolean } | null>(null);
   const currentPreset = getAiProviderPreset(ai.providerPreset);
   const endpointPlaceholder = currentPreset.baseUrl || getAiEndpointPlaceholder(ai.provider);
   const apiKeyPlaceholder = currentPreset.apiKeyLabel;
@@ -982,6 +1003,51 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
     setAvailableModels([]);
     setModelListMessage(null);
   }, [ai.providerPreset, ai.provider, ai.baseUrl]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void listen<AiStreamEvent>('ai-stream', (event) => {
+      const payload = event.payload;
+      const active = activeTestRequestRef.current;
+      if (!active || payload.taskType !== 'ai-config-test' || payload.requestId !== active.requestId) {
+        return;
+      }
+
+      const now = performance.now();
+      if (payload.status === 'delta') {
+        const firstTokenLatencyMs = active.firstTokenSeen ? null : now - active.startedAt;
+        if (!active.firstTokenSeen) {
+          activeTestRequestRef.current = { ...active, firstTokenSeen: true };
+        }
+        setTestDialog((current) => current
+          ? {
+              ...current,
+              status: 'running',
+              stage: '正在接收模型输出',
+              firstTokenLatencyMs: current.firstTokenLatencyMs ?? firstTokenLatencyMs,
+              summary: payload.text ? payload.text.slice(0, 120) : current.summary,
+            }
+          : current);
+        return;
+      }
+
+      if (payload.status === 'started' || payload.status === 'fallback') {
+        setTestDialog((current) => current
+          ? {
+              ...current,
+              status: 'running',
+              stage: payload.message ?? current.stage,
+            }
+          : current);
+      }
+    }).then((nextUnlisten) => {
+      unlisten = nextUnlisten;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   async function handleProviderPresetChange(providerPreset: AIProviderPreset) {
     const preset = getAiProviderPreset(providerPreset);
@@ -1004,6 +1070,29 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
   async function handleTestAiConnection() {
     const nextAi = { ...ai, apiKey: effectiveApiKey };
     const configMessage = getAiConfigMessage(nextAi);
+    const startedAt = performance.now();
+    const requestId = `ai-config-test-${Date.now()}`;
+    const providerLabel = currentPreset.label;
+    const endpoint = nextAi.baseUrl.trim() || currentPreset.baseUrl || '默认服务地址';
+    const model = nextAi.model.trim() || '未填写模型';
+
+    setTestDialog({
+      isOpen: true,
+      status: configMessage ? 'error' : 'preparing',
+      stage: configMessage ? '配置未完成' : '正在准备配置',
+      providerLabel,
+      endpoint,
+      model,
+      startedAt,
+      firstTokenLatencyMs: null,
+      totalLatencyMs: null,
+      outputTokens: null,
+      tokensPerSecond: null,
+      summary: null,
+      error: configMessage,
+    });
+    activeTestRequestRef.current = configMessage ? null : { requestId, startedAt, firstTokenSeen: false };
+
     if (configMessage) {
       setTestMessage({ type: 'error', text: configMessage });
       return;
@@ -1015,19 +1104,57 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
       if (shouldFlushAiApiKey(nextAi)) {
         await settingsHook.flushAIKey(nextAi.apiKey);
       }
+      setTestDialog((current) => current
+        ? { ...current, status: 'running', stage: '正在请求 AI 服务' }
+        : current);
       const result = await invoke<AiConnectionTestResult>('test_ai_connection', {
         request: {
           aiConfig: toBackendAiRequestConfig(nextAi),
+          requestId,
         },
       });
+      const completedAt = performance.now();
+      const totalLatencyMs = completedAt - startedAt;
+      const outputTokens = Math.max(0, result.outputTokens || estimateTextTokens(result.summaryZh));
+      const tokensPerSecond = totalLatencyMs > 0 ? outputTokens / (totalLatencyMs / 1000) : null;
+      const summary = result.summaryZh.slice(0, 120);
       setTestMessage({
         type: 'success',
-        text: `AI 配置可用，${result.model} 已返回摘要：${result.summaryZh.slice(0, 80)}`,
+        text: `AI 配置可用，${result.model} 已返回摘要：${summary}`,
       });
+      setTestDialog((current) => current
+        ? {
+            ...current,
+            status: 'success',
+            stage: '测试完成',
+            firstTokenLatencyMs: current.firstTokenLatencyMs ?? totalLatencyMs,
+            totalLatencyMs,
+            outputTokens,
+            tokensPerSecond,
+            summary,
+            error: null,
+          }
+        : current);
     } catch (error) {
-      setTestMessage({ type: 'error', text: toErrorMessage(error) });
+      const message = toErrorMessage(error);
+      const completedAt = performance.now();
+      setTestMessage({ type: 'error', text: message });
+      setTestDialog((current) => current
+        ? {
+            ...current,
+            status: 'error',
+            stage: '测试失败',
+            firstTokenLatencyMs: null,
+            totalLatencyMs: completedAt - startedAt,
+            outputTokens: null,
+            tokensPerSecond: null,
+            summary: null,
+            error: message,
+          }
+        : current);
     } finally {
       setIsTestingAi(false);
+      activeTestRequestRef.current = null;
     }
   }
 
@@ -1084,23 +1211,24 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
   }
 
   return (
-    <section className="glass-panel rounded-xl p-6">
-      <div className="mb-4">
-        <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">AI 引擎配置</h3>
-        <p className="mt-1 font-body-md text-sm text-on-surface-variant">
-          推荐使用
-          <a
-            href={WEILOO_GPT_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="font-semibold text-primary underline-offset-4 hover:underline"
-          >
-            weiloo GPT
-          </a>
-          ，高级模型效果更好，费用更低！
-        </p>
-      </div>
-      <div className="space-y-6">
+    <>
+      <section className="glass-panel rounded-xl p-6">
+        <div className="mb-4">
+          <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">AI 引擎配置</h3>
+          <p className="mt-1 font-body-md text-sm text-on-surface-variant">
+            推荐使用
+            <a
+              href={WEILOO_GPT_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-primary underline-offset-4 hover:underline"
+            >
+              weiloo GPT
+            </a>
+            ，高级模型效果更好，费用更低！
+          </p>
+        </div>
+        <div className="space-y-6">
         <div>
           <label className="font-body-md text-on-surface font-medium mb-2 block">AI 服务</label>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
@@ -1346,8 +1474,16 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
             {isTestingAi ? '测试中...' : '测试连接'}
           </button>
         </div>
-      </div>
-    </section>
+        </div>
+      </section>
+      {testDialog?.isOpen && (
+        <AiTestDialog
+          state={testDialog}
+          isTesting={isTestingAi}
+          onClose={() => setTestDialog((current) => current ? { ...current, isOpen: false } : current)}
+        />
+      )}
+    </>
   );
 }
 
@@ -1361,6 +1497,114 @@ function getAiEndpointPlaceholder(provider: AISettingsValue['provider']) {
     default:
       return 'https://api.openai.com/v1';
   }
+}
+
+function AiTestDialog(props: {
+  state: AiTestDialogState;
+  isTesting: boolean;
+  onClose: () => void;
+}) {
+  const state = props.state;
+  const toneClass = state.status === 'success'
+    ? 'border-success/20 bg-success/10 text-success'
+    : state.status === 'error'
+      ? 'border-error/20 bg-error/10 text-error'
+      : 'border-primary/20 bg-primary/10 text-primary';
+  const statusLabel = state.status === 'success'
+    ? '测试通过'
+    : state.status === 'error'
+      ? '测试失败'
+      : '测试中';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
+      <div className="w-full max-w-[560px] rounded-xl border border-card-border bg-surface p-5 shadow-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">AI 配置测试</h3>
+            <p className="mt-1 font-body-md text-sm text-on-surface-variant">
+              正在用当前配置发起一次真实摘要请求，结果会显示响应耗时和估算输出速度。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={props.onClose}
+            className="rounded-lg border border-card-border bg-surface-container-high px-3 py-1.5 font-body-md text-sm text-on-surface transition-colors hover:bg-surface-container-highest"
+          >
+            {props.isTesting ? '后台等待' : '关闭'}
+          </button>
+        </div>
+
+        <div className={`mt-4 rounded-lg border px-3 py-2 font-body-md text-sm ${toneClass}`}>
+          <div className="flex items-center gap-2 font-medium">
+            {state.status === 'running' || state.status === 'preparing' ? (
+              <Icon name="progress_activity" size={16} className="animate-spin" />
+            ) : (
+              <Icon name={state.status === 'success' ? 'check_circle' : 'error'} size={16} />
+            )}
+            {statusLabel}：{state.stage}
+          </div>
+        </div>
+
+        <dl className="mt-4 grid gap-3 rounded-lg border border-outline-variant/30 bg-surface-container-low p-3 font-body-md text-sm sm:grid-cols-2">
+          <AiTestMetric label="服务" value={state.providerLabel} />
+          <AiTestMetric label="模型" value={state.model} />
+          <AiTestMetric label="请求地址" value={state.endpoint} wide />
+          <AiTestMetric label="首字响应" value={formatLatency(state.firstTokenLatencyMs)} />
+          <AiTestMetric label="总耗时" value={formatLatency(state.totalLatencyMs)} />
+          <AiTestMetric label="输出 token" value={state.outputTokens === null ? '等待结果' : String(state.outputTokens)} />
+          <AiTestMetric label="输出速度" value={formatTokensPerSecond(state.tokensPerSecond)} />
+          <AiTestMetric label="最长等待" value="约 120 秒" />
+        </dl>
+
+        {state.summary && (
+          <div className="mt-4 rounded-lg border border-success/20 bg-success/10 px-3 py-2">
+            <p className="font-body-md text-xs font-medium text-success">模型返回摘要</p>
+            <p className="mt-1 font-body-md text-sm leading-relaxed text-on-surface">{state.summary}</p>
+          </div>
+        )}
+
+        {state.error && (
+          <div className="mt-4 rounded-lg border border-error/20 bg-error/10 px-3 py-2">
+            <p className="font-body-md text-xs font-medium text-error">失败原因</p>
+            <p className="mt-1 font-body-md text-sm leading-relaxed text-error">{state.error}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AiTestMetric(props: { label: string; value: string; wide?: boolean }) {
+  return (
+    <div className={props.wide ? 'min-w-0 sm:col-span-2' : 'min-w-0'}>
+      <dt className="font-body-md text-xs text-on-surface-variant">{props.label}</dt>
+      <dd className="mt-1 truncate font-body-md text-sm font-medium text-on-surface" title={props.value}>
+        {props.value}
+      </dd>
+    </div>
+  );
+}
+
+function formatLatency(value: number | null) {
+  if (value === null) {
+    return '等待结果';
+  }
+  if (value < 1000) {
+    return `${Math.round(value)} ms`;
+  }
+  return `${(value / 1000).toFixed(2)} 秒`;
+}
+
+function formatTokensPerSecond(value: number | null) {
+  if (value === null || !Number.isFinite(value)) {
+    return '等待结果';
+  }
+  return `${value.toFixed(1)} token/s`;
+}
+
+function estimateTextTokens(value: string) {
+  return Math.max(1, Math.ceil(Array.from(value).length / 4));
 }
 
 function getAiProviderPreset(providerPreset: AIProviderPreset): AIProviderPresetOption {
@@ -1936,11 +2180,16 @@ function normalizeSyncIntervalInput(value: string) {
 /* === 数据备份设置 === */
 function BackupSettings({ workspace }: { workspace: ReturnType<typeof useWorkspace> }) {
   const isConnected = workspace.authState.hasToken && Boolean(workspace.authState.user);
+  const isAnyBackupActionRunning =
+    workspace.isExportingAnnotations ||
+    workspace.isImportingAnnotations ||
+    workspace.isExportingRepositoryLibrary ||
+    workspace.isImportingRepositoryLibrary;
   const importHint = !isConnected
     ? '请先连接 GitHub 账号后再导入 Gist 备份。'
     : workspace.gistIdDraft.trim()
-      ? '导入会覆盖匹配仓库的本地注解，请确认 Gist ID 来自你的 GSAT 备份。'
-      : '输入 Gist ID 后即可从备份恢复标签、笔记和阅读状态。';
+      ? '导入会覆盖匹配仓库的标签、笔记和阅读状态，请确认 Gist ID 来自你的 GSAT 备份。'
+      : '输入 Gist ID 后即可从备份恢复数据。';
 
   return (
     <section className="glass-panel rounded-xl p-6">
@@ -1964,14 +2213,14 @@ function BackupSettings({ workspace }: { workspace: ReturnType<typeof useWorkspa
         <div className="p-4 rounded-lg bg-surface-container-low border border-card-border">
           <h4 className="font-body-lg font-medium text-on-surface mb-2 flex items-center gap-2">
             <Icon name="cloud_upload" size={20} className="text-primary" />
-            导出到 GitHub Gist
+            导出注解
           </h4>
           <p className="font-body-md text-sm text-on-surface-variant mb-3">
-            将标签、笔记、阅读状态等注解数据导出为私密 Gist，用于跨设备同步。
+            只导出标签、笔记和阅读状态。适合在已同步相同 Stars 的设备之间恢复整理结果。
           </p>
           <button
             onClick={() => void workspace.handleExportAnnotations()}
-            disabled={workspace.isExportingAnnotations || !isConnected}
+            disabled={isAnyBackupActionRunning || !isConnected}
             title={isConnected ? '导出标签、笔记和阅读状态到私密 Gist' : '请先连接 GitHub 账号'}
             className="px-4 py-2 bg-primary text-white rounded-lg font-body-md flex items-center gap-2 hover:brightness-110 transition-all shadow-sm disabled:opacity-60"
           >
@@ -1981,31 +2230,60 @@ function BackupSettings({ workspace }: { workspace: ReturnType<typeof useWorkspa
         </div>
         <div className="p-4 rounded-lg bg-surface-container-low border border-card-border">
           <h4 className="font-body-lg font-medium text-on-surface mb-2 flex items-center gap-2">
+            <Icon name="inventory_2" size={20} className="text-primary" />
+            导出所有仓库
+          </h4>
+          <p className="font-body-md text-sm text-on-surface-variant mb-3">
+            导出仓库清单、标签、笔记和阅读状态，不包含 README、AI 摘要、Embedding、API Key 或本机设置。
+          </p>
+          <button
+            onClick={() => void workspace.handleExportRepositoryLibrary()}
+            disabled={isAnyBackupActionRunning || !isConnected}
+            title={isConnected ? '导出所有仓库和整理结果到私密 Gist' : '请先连接 GitHub 账号'}
+            className="px-4 py-2 bg-primary text-white rounded-lg font-body-md flex items-center gap-2 hover:brightness-110 transition-all shadow-sm disabled:opacity-60"
+          >
+            <Icon name="upload" size={18} />
+            {workspace.isExportingRepositoryLibrary ? '导出中...' : '导出所有仓库'}
+          </button>
+        </div>
+        <div className="p-4 rounded-lg bg-surface-container-low border border-card-border">
+          <h4 className="font-body-lg font-medium text-on-surface mb-2 flex items-center gap-2">
             <Icon name="cloud_download" size={20} className="text-primary" />
             从 Gist 导入
           </h4>
           <p className="font-body-md text-sm text-on-surface-variant mb-3">
-            输入 Gist ID，从备份恢复注解数据到本地。
+            输入 Gist ID 后选择导入范围。导入所有仓库会为当前账号创建缺失的本地仓库记录。
           </p>
           <form
             onSubmit={(event) => void workspace.handleImportAnnotations(event)}
-            className="flex flex-col gap-2 sm:flex-row sm:gap-3"
+            className="space-y-3"
           >
             <input
               type="text"
               value={workspace.gistIdDraft}
               onChange={(e) => workspace.setGistIdDraft(e.target.value)}
               placeholder="输入 Gist ID..."
-              className="flex-1 bg-surface border border-outline-variant rounded-lg px-4 py-2 font-body-md text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+              className="w-full bg-surface border border-outline-variant rounded-lg px-4 py-2 font-body-md text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
             />
-            <button
-              type="submit"
-              disabled={workspace.isImportingAnnotations || !workspace.gistIdDraft.trim() || !isConnected}
-              title={isConnected ? '从 Gist 恢复注解数据' : '请先连接 GitHub 账号'}
-              className="px-4 py-2 bg-surface-container-high hover:bg-surface-container-highest text-on-surface rounded-lg border border-card-border font-body-md transition-all disabled:opacity-60"
-            >
-              {workspace.isImportingAnnotations ? '导入中...' : '导入'}
-            </button>
+            <div className="flex flex-col gap-2 sm:flex-row sm:gap-3">
+              <button
+                type="submit"
+                disabled={isAnyBackupActionRunning || !workspace.gistIdDraft.trim() || !isConnected}
+                title={isConnected ? '从 Gist 恢复已有仓库的标签、笔记和阅读状态' : '请先连接 GitHub 账号'}
+                className="px-4 py-2 bg-surface-container-high hover:bg-surface-container-highest text-on-surface rounded-lg border border-card-border font-body-md transition-all disabled:opacity-60"
+              >
+                {workspace.isImportingAnnotations ? '导入中...' : '导入注解'}
+              </button>
+              <button
+                type="button"
+                onClick={(event) => void workspace.handleImportRepositoryLibrary(event)}
+                disabled={isAnyBackupActionRunning || !workspace.gistIdDraft.trim() || !isConnected}
+                title={isConnected ? '从 Gist 恢复仓库清单、标签、笔记和阅读状态' : '请先连接 GitHub 账号'}
+                className="px-4 py-2 bg-surface-container-high hover:bg-surface-container-highest text-on-surface rounded-lg border border-card-border font-body-md transition-all disabled:opacity-60"
+              >
+                {workspace.isImportingRepositoryLibrary ? '导入中...' : '导入所有仓库'}
+              </button>
+            </div>
           </form>
           <p className={`mt-2 font-body-md text-xs ${isConnected ? 'text-on-surface-variant' : 'text-error'}`}>
             {importHint}

@@ -213,6 +213,16 @@ pub struct AnnotationSnapshot {
     pub repositories: Vec<AnnotationSnapshotRepository>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryLibrarySnapshot {
+    pub schema_version: u8,
+    pub exported_at: String,
+    pub account_id: String,
+    pub tags: Vec<AnnotationSnapshotTag>,
+    pub repositories: Vec<RepositoryLibrarySnapshotRepository>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AnnotationSnapshotTag {
@@ -230,10 +240,36 @@ pub struct AnnotationSnapshotRepository {
     pub tag_names: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryLibrarySnapshotRepository {
+    pub full_name: String,
+    pub owner: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub language: Option<String>,
+    pub topics: Vec<String>,
+    pub html_url: String,
+    pub stars_count: u64,
+    pub forks_count: u64,
+    pub starred_at: String,
+    pub pushed_at: Option<String>,
+    pub note_markdown: String,
+    pub read_status: String,
+    pub tag_names: Vec<String>,
+}
+
 pub struct AnnotationImportSummary {
     pub tag_count: usize,
     pub repository_count: usize,
     pub skipped_repository_count: usize,
+}
+
+pub struct RepositoryLibraryImportSummary {
+    pub tag_count: usize,
+    pub repository_count: usize,
+    pub created_repository_count: usize,
+    pub updated_repository_count: usize,
 }
 
 #[derive(Deserialize)]
@@ -411,6 +447,24 @@ struct AnnotationRow {
 struct AnnotationSnapshotRepositoryRow {
     repository_id: String,
     full_name: String,
+    note_markdown: String,
+    read_status: String,
+    tag_names_json: String,
+}
+
+#[derive(Deserialize)]
+struct RepositoryLibrarySnapshotRepositoryRow {
+    full_name: String,
+    owner: String,
+    name: String,
+    description: Option<String>,
+    language: Option<String>,
+    topics_json: String,
+    html_url: String,
+    stars_count: u64,
+    forks_count: u64,
+    starred_at: String,
+    pushed_at: Option<String>,
     note_markdown: String,
     read_status: String,
     tag_names_json: String,
@@ -617,10 +671,26 @@ ON CONFLICT(id) DO UPDATE SET
   starred_at = excluded.starred_at,
   pushed_at = excluded.pushed_at,
   sync_status = 'active',
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+ON CONFLICT(account_id, full_name) DO UPDATE SET
+  owner = excluded.owner,
+  name = excluded.name,
+  description = excluded.description,
+  language = excluded.language,
+  topics_json = excluded.topics_json,
+  html_url = excluded.html_url,
+  stars_count = excluded.stars_count,
+  forks_count = excluded.forks_count,
+  starred_at = excluded.starred_at,
+  pushed_at = excluded.pushed_at,
+  sync_status = 'active',
   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
 
 INSERT OR IGNORE INTO annotations (repo_id, account_id)
-VALUES ({id}, {account_id});
+SELECT id, account_id
+FROM repositories
+WHERE account_id = {account_id}
+  AND full_name = {full_name};
 "#,
                 id = sql_text(&repository.id),
                 account_id = sql_text(&repository.account_id),
@@ -1696,6 +1766,249 @@ WHERE t.account_id = {account_id}
         })
     }
 
+    pub fn export_repository_library_snapshot(
+        &self,
+        account_id: &str,
+    ) -> Result<RepositoryLibrarySnapshot, String> {
+        let tags = self
+            .list_tags(account_id)?
+            .into_iter()
+            .map(|tag| AnnotationSnapshotTag {
+                name: tag.name,
+                color: tag.color,
+            })
+            .collect::<Vec<_>>();
+        let repository_sql = format!(
+            r#"
+.mode json
+SELECT
+  r.full_name,
+  r.owner,
+  r.name,
+  r.description,
+  r.language,
+  r.topics_json,
+  r.html_url,
+  r.stars_count,
+  r.forks_count,
+  r.starred_at,
+  r.pushed_at,
+  COALESCE(a.note_md, '') AS note_markdown,
+  COALESCE(a.read_status, 'unread') AS read_status,
+  COALESCE(json_group_array(t.name) FILTER (WHERE t.name IS NOT NULL), '[]') AS tag_names_json
+FROM repositories r
+LEFT JOIN annotations a ON a.repo_id = r.id AND a.account_id = r.account_id
+LEFT JOIN repo_tags rt ON rt.repo_id = r.id
+LEFT JOIN tags t ON t.id = rt.tag_id AND t.account_id = r.account_id
+WHERE r.account_id = {account_id}
+  AND r.sync_status = 'active'
+GROUP BY
+  r.id,
+  r.full_name,
+  r.owner,
+  r.name,
+  r.description,
+  r.language,
+  r.topics_json,
+  r.html_url,
+  r.stars_count,
+  r.forks_count,
+  r.starred_at,
+  r.pushed_at,
+  a.note_md,
+  a.read_status
+ORDER BY r.starred_at DESC, r.full_name COLLATE NOCASE ASC;
+"#,
+            account_id = sql_text(account_id),
+        );
+        let rows = parse_json_rows::<RepositoryLibrarySnapshotRepositoryRow>(
+            &self.query_sql(&repository_sql)?,
+            "SQLite 仓库快照解析失败",
+        )?;
+        let repositories = rows
+            .into_iter()
+            .map(|row| {
+                Ok(RepositoryLibrarySnapshotRepository {
+                    full_name: row.full_name,
+                    owner: row.owner,
+                    name: row.name,
+                    description: row.description,
+                    language: row.language,
+                    topics: parse_json_string_array(
+                        &row.topics_json,
+                        "SQLite 仓库 Topics 快照解析失败",
+                    )?,
+                    html_url: row.html_url,
+                    stars_count: row.stars_count,
+                    forks_count: row.forks_count,
+                    starred_at: row.starred_at,
+                    pushed_at: row.pushed_at,
+                    note_markdown: row.note_markdown,
+                    read_status: row.read_status,
+                    tag_names: parse_json_string_array(
+                        &row.tag_names_json,
+                        "SQLite 仓库标签快照解析失败",
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        Ok(RepositoryLibrarySnapshot {
+            schema_version: 1,
+            exported_at: self.current_database_timestamp()?,
+            account_id: account_id.to_owned(),
+            tags,
+            repositories,
+        })
+    }
+
+    pub fn import_repository_library_snapshot(
+        &self,
+        account_id: &str,
+        snapshot: &RepositoryLibrarySnapshot,
+    ) -> Result<RepositoryLibraryImportSummary, String> {
+        if snapshot.schema_version != 1 {
+            return Err("不支持的仓库快照版本".to_owned());
+        }
+
+        let repository_ids_by_full_name = self.list_repository_ids_by_full_name(account_id)?;
+        let mut seen_repository_keys = HashSet::new();
+        let mut sql = String::from("PRAGMA foreign_keys = ON;\nBEGIN;\n");
+        let mut created_repository_count = 0_usize;
+        let mut updated_repository_count = 0_usize;
+
+        for tag in &snapshot.tags {
+            let normalized_name = normalize_required_text(&tag.name, "标签名称不能为空")?;
+            let tag_id = next_local_id("tag")?;
+            sql.push_str(&format!(
+                r#"
+INSERT INTO tags (id, account_id, name, color, updated_at)
+VALUES ({tag_id}, {account_id}, {name}, {color}, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+ON CONFLICT(account_id, name) DO UPDATE SET
+  color = excluded.color,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+"#,
+                tag_id = sql_text(&tag_id),
+                account_id = sql_text(account_id),
+                name = sql_text(&normalized_name),
+                color = sql_optional_text(tag.color.as_deref()),
+            ));
+        }
+
+        for repository in &snapshot.repositories {
+            let (owner, name, full_name) = normalize_repository_library_identity(repository)?;
+            let repository_key = normalize_repository_full_name_lookup_key(&full_name);
+            if !seen_repository_keys.insert(repository_key.clone()) {
+                continue;
+            }
+
+            let existing_repository_id = repository_ids_by_full_name.get(&repository_key);
+            let repository_id = existing_repository_id
+                .cloned()
+                .unwrap_or_else(|| format!("imported:{account_id}:{repository_key}"));
+            let topics_json = serde_json::to_string(&repository.topics)
+                .map_err(|error| format!("仓库 Topics 序列化失败：{error}"))?;
+            let read_status = normalize_reading_status(&repository.read_status)?;
+            let starred_at = match normalize_optional_text(Some(&repository.starred_at)) {
+                Some(value) => value.to_owned(),
+                None => self.current_database_timestamp()?,
+            };
+
+            if existing_repository_id.is_some() {
+                updated_repository_count += 1;
+            } else {
+                created_repository_count += 1;
+            }
+
+            sql.push_str(&format!(
+                r#"
+INSERT INTO repositories (
+  id,
+  account_id,
+  owner,
+  name,
+  full_name,
+  description,
+  language,
+  topics_json,
+  html_url,
+  stars_count,
+  forks_count,
+  starred_at,
+  pushed_at,
+  sync_status,
+  updated_at
+)
+VALUES ({repository_id}, {account_id}, {owner}, {name}, {full_name}, {description}, {language}, {topics_json}, {html_url}, {stars_count}, {forks_count}, {starred_at}, {pushed_at}, 'active', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+ON CONFLICT(account_id, full_name) DO UPDATE SET
+  owner = excluded.owner,
+  name = excluded.name,
+  description = excluded.description,
+  language = excluded.language,
+  topics_json = excluded.topics_json,
+  html_url = excluded.html_url,
+  stars_count = excluded.stars_count,
+  forks_count = excluded.forks_count,
+  starred_at = excluded.starred_at,
+  pushed_at = excluded.pushed_at,
+  sync_status = 'active',
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+
+INSERT INTO annotations (repo_id, account_id, note_md, read_status, updated_at)
+VALUES ({repository_id}, {account_id}, {note_markdown}, {read_status}, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+ON CONFLICT(repo_id) DO UPDATE SET
+  note_md = excluded.note_md,
+  read_status = excluded.read_status,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+
+DELETE FROM repo_tags
+WHERE repo_id = {repository_id};
+"#,
+                repository_id = sql_text(&repository_id),
+                account_id = sql_text(account_id),
+                owner = sql_text(&owner),
+                name = sql_text(&name),
+                full_name = sql_text(&full_name),
+                description = sql_optional_text(repository.description.as_deref()),
+                language = sql_optional_text(repository.language.as_deref()),
+                topics_json = sql_text(&topics_json),
+                html_url = sql_text(&repository.html_url),
+                stars_count = repository.stars_count,
+                forks_count = repository.forks_count,
+                starred_at = sql_text(&starred_at),
+                pushed_at = sql_optional_text(repository.pushed_at.as_deref()),
+                note_markdown = sql_text(&repository.note_markdown),
+                read_status = sql_text(read_status),
+            ));
+
+            for tag_name in &repository.tag_names {
+                let normalized_tag_name = normalize_required_text(tag_name, "标签名称不能为空")?;
+                sql.push_str(&format!(
+                    r#"
+INSERT OR IGNORE INTO repo_tags (repo_id, tag_id)
+SELECT {repository_id}, t.id
+FROM tags t
+WHERE t.account_id = {account_id}
+  AND t.name = {tag_name};
+"#,
+                    repository_id = sql_text(&repository_id),
+                    account_id = sql_text(account_id),
+                    tag_name = sql_text(&normalized_tag_name),
+                ));
+            }
+        }
+
+        sql.push_str("COMMIT;\n");
+        self.execute_sql(&sql)?;
+
+        Ok(RepositoryLibraryImportSummary {
+            tag_count: snapshot.tags.len(),
+            repository_count: created_repository_count + updated_repository_count,
+            created_repository_count,
+            updated_repository_count,
+        })
+    }
+
     fn list_repository_ids(&self, account_id: &str) -> Result<HashSet<String>, String> {
         let states = self.list_repository_sync_states(account_id)?;
 
@@ -2731,6 +3044,28 @@ fn normalize_repository_full_name_lookup_key(value: &str) -> String {
     }
 }
 
+fn normalize_repository_library_identity(
+    repository: &RepositoryLibrarySnapshotRepository,
+) -> Result<(String, String, String), String> {
+    let snapshot_full_name = normalize_optional_text(Some(&repository.full_name))
+        .map(str::to_owned)
+        .or_else(|| {
+            let owner = normalize_optional_text(Some(&repository.owner))?;
+            let name = normalize_optional_text(Some(&repository.name))?;
+            Some(format!("{owner}/{name}"))
+        })
+        .ok_or_else(|| "仓库快照缺少 owner/repo 名称".to_owned())?;
+    let full_name_key = normalize_repository_full_name_lookup_key(&snapshot_full_name);
+    let Some((owner, name)) = full_name_key.split_once('/') else {
+        return Err("仓库快照中的 fullName 必须是 owner/repo 格式".to_owned());
+    };
+    if owner.is_empty() || name.is_empty() {
+        return Err("仓库快照中的 fullName 必须是 owner/repo 格式".to_owned());
+    }
+
+    Ok((owner.to_owned(), name.to_owned(), full_name_key))
+}
+
 // === 聚合统计返回类型 ===
 
 #[derive(Serialize)]
@@ -3495,6 +3830,21 @@ fn sql_optional_text(value: Option<&str>) -> String {
 mod tests {
     use super::*;
 
+    fn temp_storage(name: &str) -> (AppStorage, PathBuf) {
+        let database_path = std::env::temp_dir().join(format!(
+            "gsat-{name}-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应可用")
+                .as_nanos()
+        ));
+        let storage = AppStorage {
+            database_path: database_path.clone(),
+        };
+        storage.migrate().expect("初始化测试库");
+        (storage, database_path)
+    }
+
     #[test]
     fn sql_like_pattern_escapes_wildcards_and_quotes() {
         assert_eq!(sql_like_pattern("50%_owner's"), "'%50\\%\\_owner''s%'");
@@ -4255,6 +4605,238 @@ SELECT
             rows.trim(),
             "恢复 active 仓库,read,1,原有已移除仓库注解,unread,0"
         );
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn export_repository_library_snapshot_includes_active_repositories() {
+        let (storage, database_path) = temp_storage("repository-library-export");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, description, language, topics_json, html_url, stars_count, forks_count, starred_at, pushed_at, sync_status)
+VALUES
+  ('1001:1', '1001', 'owner', 'active', 'owner/active', 'active repo', 'Rust', '["cli","ai"]', 'https://github.com/owner/active', 10, 1, '2026-01-02T00:00:00Z', '2026-01-03T00:00:00Z', 'active'),
+  ('1001:2', '1001', 'owner', 'removed', 'owner/removed', 'removed repo', 'TypeScript', '[]', 'https://github.com/owner/removed', 20, 2, '2026-01-01T00:00:00Z', NULL, 'removed');
+INSERT INTO tags (id, account_id, name, color)
+VALUES ('tag-1', '1001', '工具', '#3b82f6');
+INSERT INTO annotations (repo_id, account_id, note_md, read_status)
+VALUES ('1001:1', '1001', 'active note', 'later');
+INSERT INTO repo_tags (repo_id, tag_id)
+VALUES ('1001:1', 'tag-1');
+"#,
+            )
+            .expect("写入仓库快照测试数据");
+
+        let snapshot = storage
+            .export_repository_library_snapshot("1001")
+            .expect("导出仓库快照");
+
+        assert_eq!(snapshot.repositories.len(), 1);
+        assert_eq!(snapshot.repositories[0].full_name, "owner/active");
+        assert_eq!(snapshot.repositories[0].topics, vec!["cli", "ai"]);
+        assert_eq!(snapshot.repositories[0].note_markdown, "active note");
+        assert_eq!(snapshot.repositories[0].read_status, "later");
+        assert_eq!(snapshot.repositories[0].tag_names, vec!["工具"]);
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn import_repository_library_snapshot_creates_missing_repositories() {
+        let (storage, database_path) = temp_storage("repository-library-import-create");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+"#,
+            )
+            .expect("写入测试账号");
+        let snapshot = RepositoryLibrarySnapshot {
+            schema_version: 1,
+            exported_at: "2026-01-01T00:00:00Z".to_owned(),
+            account_id: "legacy".to_owned(),
+            tags: vec![AnnotationSnapshotTag {
+                name: "工具".to_owned(),
+                color: Some("#3b82f6".to_owned()),
+            }],
+            repositories: vec![RepositoryLibrarySnapshotRepository {
+                full_name: "owner/repo".to_owned(),
+                owner: "owner".to_owned(),
+                name: "repo".to_owned(),
+                description: Some("demo".to_owned()),
+                language: Some("Rust".to_owned()),
+                topics: vec!["cli".to_owned()],
+                html_url: "https://github.com/owner/repo".to_owned(),
+                stars_count: 42,
+                forks_count: 3,
+                starred_at: "2026-01-02T00:00:00Z".to_owned(),
+                pushed_at: Some("2026-01-03T00:00:00Z".to_owned()),
+                note_markdown: "shared note".to_owned(),
+                read_status: "read".to_owned(),
+                tag_names: vec!["工具".to_owned()],
+            }],
+        };
+
+        let summary = storage
+            .import_repository_library_snapshot("1001", &snapshot)
+            .expect("导入仓库快照");
+        assert_eq!(summary.repository_count, 1);
+        assert_eq!(summary.created_repository_count, 1);
+        assert_eq!(summary.updated_repository_count, 0);
+
+        let rows = storage
+            .query_sql(
+                r#"
+.mode list
+SELECT
+  (SELECT id FROM repositories WHERE account_id = '1001' AND full_name = 'owner/repo') || ',' ||
+  (SELECT sync_status FROM repositories WHERE account_id = '1001' AND full_name = 'owner/repo') || ',' ||
+  (SELECT note_md FROM annotations WHERE repo_id = 'imported:1001:owner/repo') || ',' ||
+  (SELECT COUNT(*) FROM repo_tags WHERE repo_id = 'imported:1001:owner/repo');
+"#,
+            )
+            .expect("读取导入结果");
+
+        assert_eq!(rows.trim(), "imported:1001:owner/repo,active,shared note,1");
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn import_repository_library_snapshot_merges_existing_full_name() {
+        let (storage, database_path) = temp_storage("repository-library-import-merge");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, topics_json, html_url, stars_count, forks_count, starred_at, sync_status)
+VALUES ('1001:42', '1001', 'owner', 'repo', 'owner/repo', '[]', 'https://github.com/owner/repo', 1, 0, '2026-01-01T00:00:00Z', 'active');
+INSERT INTO annotations (repo_id, account_id, note_md, read_status)
+VALUES ('1001:42', '1001', 'old note', 'unread');
+"#,
+            )
+            .expect("写入现有仓库");
+        let snapshot = RepositoryLibrarySnapshot {
+            schema_version: 1,
+            exported_at: "2026-01-01T00:00:00Z".to_owned(),
+            account_id: "legacy".to_owned(),
+            tags: Vec::new(),
+            repositories: vec![RepositoryLibrarySnapshotRepository {
+                full_name: "OWNER/REPO".to_owned(),
+                owner: "OWNER".to_owned(),
+                name: "REPO".to_owned(),
+                description: Some("updated".to_owned()),
+                language: Some("TypeScript".to_owned()),
+                topics: Vec::new(),
+                html_url: "https://github.com/OWNER/REPO".to_owned(),
+                stars_count: 99,
+                forks_count: 5,
+                starred_at: "2026-02-02T00:00:00Z".to_owned(),
+                pushed_at: None,
+                note_markdown: "new note".to_owned(),
+                read_status: "later".to_owned(),
+                tag_names: Vec::new(),
+            }],
+        };
+
+        let summary = storage
+            .import_repository_library_snapshot("1001", &snapshot)
+            .expect("合并仓库快照");
+        assert_eq!(summary.created_repository_count, 0);
+        assert_eq!(summary.updated_repository_count, 1);
+
+        let rows = storage
+            .query_sql(
+                r#"
+.mode list
+SELECT
+  (SELECT COUNT(*) FROM repositories WHERE account_id = '1001' AND lower(full_name) = 'owner/repo') || ',' ||
+  (SELECT id FROM repositories WHERE account_id = '1001' AND id = '1001:42') || ',' ||
+  (SELECT note_md FROM annotations WHERE repo_id = '1001:42') || ',' ||
+  (SELECT read_status FROM annotations WHERE repo_id = '1001:42');
+"#,
+            )
+            .expect("读取合并结果");
+
+        assert_eq!(rows.trim(), "1,1001:42,new note,later");
+
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn imported_repository_library_row_merges_with_future_github_sync() {
+        let (storage, database_path) = temp_storage("repository-library-import-sync");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+"#,
+            )
+            .expect("写入测试账号");
+        let snapshot = RepositoryLibrarySnapshot {
+            schema_version: 1,
+            exported_at: "2026-01-01T00:00:00Z".to_owned(),
+            account_id: "legacy".to_owned(),
+            tags: Vec::new(),
+            repositories: vec![RepositoryLibrarySnapshotRepository {
+                full_name: "owner/repo".to_owned(),
+                owner: "owner".to_owned(),
+                name: "repo".to_owned(),
+                description: None,
+                language: None,
+                topics: Vec::new(),
+                html_url: "https://github.com/owner/repo".to_owned(),
+                stars_count: 1,
+                forks_count: 0,
+                starred_at: "2026-01-02T00:00:00Z".to_owned(),
+                pushed_at: None,
+                note_markdown: "imported note".to_owned(),
+                read_status: "read".to_owned(),
+                tag_names: Vec::new(),
+            }],
+        };
+        storage
+            .import_repository_library_snapshot("1001", &snapshot)
+            .expect("导入仓库快照");
+        storage
+            .upsert_repositories(&[StarredRepository {
+                id: "1001:42".to_owned(),
+                account_id: "1001".to_owned(),
+                owner: "owner".to_owned(),
+                name: "repo".to_owned(),
+                full_name: "owner/repo".to_owned(),
+                description: Some("real sync".to_owned()),
+                language: Some("Rust".to_owned()),
+                topics_json: r#"["synced"]"#.to_owned(),
+                html_url: "https://github.com/owner/repo".to_owned(),
+                stars_count: 100,
+                forks_count: 7,
+                starred_at: "2026-02-02T00:00:00Z".to_owned(),
+                pushed_at: Some("2026-02-03T00:00:00Z".to_owned()),
+            }])
+            .expect("真实 GitHub 同步应按 fullName 合并导入仓库");
+
+        let rows = storage
+            .query_sql(
+                r#"
+.mode list
+SELECT
+  (SELECT COUNT(*) FROM repositories WHERE account_id = '1001' AND full_name = 'owner/repo') || ',' ||
+  (SELECT id FROM repositories WHERE account_id = '1001' AND full_name = 'owner/repo') || ',' ||
+  (SELECT stars_count FROM repositories WHERE account_id = '1001' AND full_name = 'owner/repo') || ',' ||
+  (SELECT note_md FROM annotations WHERE repo_id = 'imported:1001:owner/repo');
+"#,
+            )
+            .expect("读取同步合并结果");
+
+        assert_eq!(rows.trim(), "1,imported:1001:owner/repo,100,imported note");
 
         let _ = std::fs::remove_file(database_path);
     }

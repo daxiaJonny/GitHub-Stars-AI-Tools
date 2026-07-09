@@ -44,4 +44,6 @@ commands.allow = [
   "star_github_recommendation_candidate",
   "export_annotation_gist",
   "import_annotation_gist",
+  "export_repository_library_gist",
+  "import_repository_library_gist",
 ]

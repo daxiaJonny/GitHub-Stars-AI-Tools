@@ -706,8 +706,7 @@ mod tests {
         let account = format!("default-store-check-{}", std::process::id());
 
         initialize_native_secure_store().expect("macOS 必须能注册系统 Keychain 凭据后端");
-        keyring::Entry::new(service, &account)
-            .expect("注册 Keychain 后应能创建系统凭据条目");
+        keyring::Entry::new(service, &account).expect("注册 Keychain 后应能创建系统凭据条目");
         let missing_password = read_secure_password(service, &account)
             .expect("系统 Keychain 读取路径不应再报默认后端缺失");
         assert!(missing_password.is_none());
@@ -898,7 +897,10 @@ fn secure_password_entry(service: &str, account: &str) -> Result<keyring::Entry,
 
 fn ensure_secure_store_initialized() -> Result<(), String> {
     SECURE_STORE_INIT
-        .get_or_init(|| initialize_native_secure_store().map_err(|error| format_secure_store_error("初始化", error)))
+        .get_or_init(|| {
+            initialize_native_secure_store()
+                .map_err(|error| format_secure_store_error("初始化", error))
+        })
         .clone()
 }
 

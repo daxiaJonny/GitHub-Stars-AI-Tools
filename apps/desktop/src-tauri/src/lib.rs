@@ -401,6 +401,24 @@ struct GistAnnotationImportSummary {
     skipped_repository_count: usize,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GistRepositoryLibraryExportSummary {
+    gist_id: String,
+    html_url: String,
+    tag_count: usize,
+    repository_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GistRepositoryLibraryImportSummary {
+    tag_count: usize,
+    repository_count: usize,
+    created_repository_count: usize,
+    updated_repository_count: usize,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RepositoryListRequest {
@@ -503,6 +521,7 @@ struct GenerateAiTagNetworkRequest {
 #[serde(rename_all = "camelCase")]
 struct TestAiConnectionRequest {
     ai_config: Option<ai::AiRequestConfig>,
+    request_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1151,13 +1170,30 @@ fn test_ai_connection_worker(
     request: TestAiConnectionRequest,
 ) -> Result<ai::AiSummaryDocument, String> {
     let ai_config = hydrate_ai_request_config(&app_handle, request.ai_config)?;
-    run_ai_connection_probe(&ai_config)
+    let request_id = request
+        .request_id
+        .unwrap_or_else(|| format!("ai-config-test-{}", current_event_timestamp()));
+    run_ai_connection_probe(&app_handle, &request_id, &ai_config)
 }
 
 fn run_ai_connection_probe(
+    app_handle: &tauri::AppHandle,
+    request_id: &str,
     ai_config: &ai::AiRequestConfig,
 ) -> Result<ai::AiSummaryDocument, String> {
-    ai::summarize_readme(
+    emit_ai_stream_status(
+        app_handle,
+        request_id,
+        "ai-config-test",
+        "prepare",
+        "started",
+        "正在准备 AI 测试请求",
+        None,
+    );
+    let stream_app_handle = app_handle.clone();
+    let stream_request_id = request_id.to_owned();
+    let mut latest_stream_text = String::new();
+    let result = ai::summarize_readme_streaming(
         ai_config,
         "xingranya/GitHub-Stars-AI-Tools",
         Some("用于验证 AI 服务配置是否可以正常请求的测试仓库。"),
@@ -1165,7 +1201,63 @@ fn run_ai_connection_probe(
 
 GitHub-Stars-AI-Tools 是一个本地优先的桌面客户端，用于同步 GitHub Stars、缓存 README、生成中文摘要、维护标签网络，并通过自然语言检索个人开源知识库。
 "#,
-    )
+        &mut |stage, status, delta, text, message| {
+            if let Some(next_text) = text {
+                latest_stream_text = next_text.to_owned();
+            }
+            match status {
+                "delta" => {
+                    let delta = delta.unwrap_or_default();
+                    let text = text.unwrap_or(latest_stream_text.as_str());
+                    emit_ai_stream_delta(
+                        &stream_app_handle,
+                        &stream_request_id,
+                        "ai-config-test",
+                        stage,
+                        delta,
+                        text,
+                        None,
+                    );
+                }
+                _ => emit_ai_stream_status(
+                    &stream_app_handle,
+                    &stream_request_id,
+                    "ai-config-test",
+                    stage,
+                    status,
+                    message.unwrap_or("AI 测试状态已更新"),
+                    None,
+                ),
+            }
+        },
+    );
+
+    match result {
+        Ok(document) => {
+            emit_ai_stream_status(
+                app_handle,
+                request_id,
+                "ai-config-test",
+                "done",
+                "finished",
+                "AI 配置测试完成",
+                None,
+            );
+            Ok(document)
+        }
+        Err(error) => {
+            emit_ai_stream_status(
+                app_handle,
+                request_id,
+                "ai-config-test",
+                "error",
+                "failed",
+                error.clone(),
+                None,
+            );
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -1297,7 +1389,11 @@ fn check_runtime_readiness_worker(
         )
     } else {
         match hydrate_ai_request_config(&app_handle, request.ai_config) {
-            Ok(config) => match run_ai_connection_probe(&config) {
+            Ok(config) => match run_ai_connection_probe(
+                &app_handle,
+                &format!("runtime-ai-check-{}", current_event_timestamp()),
+                &config,
+            ) {
                 Ok(document) => (
                     runtime_check_passed(
                         format!("AI 服务已响应，模型 {}", document.model),
@@ -3926,6 +4022,194 @@ fn import_annotation_gist_worker(
     })
 }
 
+#[tauri::command]
+async fn export_repository_library_gist(
+    app_handle: tauri::AppHandle,
+) -> Result<GistRepositoryLibraryExportSummary, String> {
+    let progress_handle = app_handle.clone();
+    run_background_task_with_failure_progress(
+        "Gist 仓库清单导出",
+        progress_handle,
+        "export-repository-library-gist",
+        "backup",
+        move || export_repository_library_gist_worker(app_handle),
+    )
+    .await
+}
+
+fn export_repository_library_gist_worker(
+    app_handle: tauri::AppHandle,
+) -> Result<GistRepositoryLibraryExportSummary, String> {
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "export-repository-library-gist",
+            "backup",
+            "auth",
+            0,
+            4,
+            "正在校验 GitHub Token",
+            Some("GitHub Gist".to_owned()),
+        ),
+    );
+    let token = auth::require_github_token()?;
+    let user = auth::verify_github_token(&token)?;
+    let account_id = user.id.to_string();
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    storage.upsert_github_account(&user)?;
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "export-repository-library-gist",
+            "backup",
+            "prepare",
+            1,
+            4,
+            "正在读取本地仓库清单",
+            Some("GitHub Gist".to_owned()),
+        ),
+    );
+    let snapshot = storage.export_repository_library_snapshot(&account_id)?;
+    let tag_count = snapshot.tags.len();
+    let repository_count = snapshot.repositories.len();
+    let snapshot_json = serde_json::to_string_pretty(&snapshot)
+        .map_err(|error| format!("仓库快照序列化失败：{error}"))?;
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "export-repository-library-gist",
+            "backup",
+            "save",
+            2,
+            4,
+            format!("正在创建 Gist 备份：{repository_count} 个仓库，{tag_count} 个标签"),
+            Some("GitHub Gist".to_owned()),
+        ),
+    );
+    let gist = github::create_repository_library_gist(&token, &snapshot_json)?;
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::succeeded(
+            "export-repository-library-gist",
+            "backup",
+            4,
+            4,
+            format!("仓库清单已导出到 Gist {}", gist.gist_id),
+        ),
+    );
+
+    Ok(GistRepositoryLibraryExportSummary {
+        gist_id: gist.gist_id,
+        html_url: gist.html_url,
+        tag_count,
+        repository_count,
+    })
+}
+
+#[tauri::command]
+async fn import_repository_library_gist(
+    app_handle: tauri::AppHandle,
+    request: ImportAnnotationGistRequest,
+) -> Result<GistRepositoryLibraryImportSummary, String> {
+    let progress_handle = app_handle.clone();
+    run_background_task_with_failure_progress(
+        "Gist 仓库清单导入",
+        progress_handle,
+        "import-repository-library-gist",
+        "backup",
+        move || import_repository_library_gist_worker(app_handle, request),
+    )
+    .await
+}
+
+fn import_repository_library_gist_worker(
+    app_handle: tauri::AppHandle,
+    request: ImportAnnotationGistRequest,
+) -> Result<GistRepositoryLibraryImportSummary, String> {
+    let gist_id = request.gist_id.trim().to_owned();
+    if gist_id.is_empty() {
+        return Err("请输入 Gist ID".to_owned());
+    }
+    let gist_label = format!("Gist {gist_id}");
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "import-repository-library-gist",
+            "backup",
+            "auth",
+            0,
+            4,
+            "正在校验 GitHub Token",
+            Some(gist_label.clone()),
+        ),
+    );
+    let token = auth::require_github_token()?;
+    let user = auth::verify_github_token(&token)?;
+    let account_id = user.id.to_string();
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "import-repository-library-gist",
+            "backup",
+            "fetch",
+            1,
+            4,
+            "正在读取 Gist 仓库清单",
+            Some(gist_label.clone()),
+        ),
+    );
+    let snapshot_json = github::fetch_repository_library_gist(&token, &gist_id)?;
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "import-repository-library-gist",
+            "backup",
+            "parse",
+            2,
+            4,
+            "正在解析 Gist 仓库快照",
+            Some(gist_label.clone()),
+        ),
+    );
+    let snapshot = serde_json::from_str::<storage::RepositoryLibrarySnapshot>(&snapshot_json)
+        .map_err(|error| format!("仓库快照解析失败：{error}"))?;
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    storage.upsert_github_account(&user)?;
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "import-repository-library-gist",
+            "backup",
+            "save",
+            3,
+            4,
+            "正在写入本地仓库清单",
+            Some(gist_label.clone()),
+        ),
+    );
+    let summary = storage.import_repository_library_snapshot(&account_id, &snapshot)?;
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::succeeded(
+            "import-repository-library-gist",
+            "backup",
+            4,
+            4,
+            format!(
+                "仓库清单已导入：新增 {} 个，更新 {} 个",
+                summary.created_repository_count, summary.updated_repository_count
+            ),
+        ),
+    );
+
+    Ok(GistRepositoryLibraryImportSummary {
+        tag_count: summary.tag_count,
+        repository_count: summary.repository_count,
+        created_repository_count: summary.created_repository_count,
+        updated_repository_count: summary.updated_repository_count,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -3962,6 +4246,8 @@ pub fn run() {
             set_repository_tags,
             export_annotation_gist,
             import_annotation_gist,
+            export_repository_library_gist,
+            import_repository_library_gist,
             get_dashboard_stats,
             get_tag_network_data,
             generate_ai_tag_network,

@@ -588,6 +588,18 @@ function getFailedTaskRetry(options: {
         isRetrying: options.workspace.isImportingAnnotations,
         onRetry: () => void options.workspace.runImportAnnotations(),
       };
+    case 'export-repository-library-gist':
+      return {
+        label: '重试导出仓库清单',
+        isRetrying: options.workspace.isExportingRepositoryLibrary,
+        onRetry: () => void options.workspace.handleExportRepositoryLibrary(),
+      };
+    case 'import-repository-library-gist':
+      return {
+        label: '重试导入仓库清单',
+        isRetrying: options.workspace.isImportingRepositoryLibrary,
+        onRetry: () => void options.workspace.handleImportRepositoryLibrary(),
+      };
     default:
       return null;
   }

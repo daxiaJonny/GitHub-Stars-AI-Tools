@@ -247,12 +247,22 @@ pub fn summarize_readme_streaming(
     emit("summarize", "started", None, None, Some("正在连接 AI 服务"));
     let content = match provider.as_str() {
         "openai" => request_openai_streaming(config, &prompt, "summarize", emit)?,
-        "anthropic" => {
-            request_anthropic_streaming(config, &prompt, ANTHROPIC_SUMMARY_MAX_TOKENS, "summarize", emit)?
-        }
+        "anthropic" => request_anthropic_streaming(
+            config,
+            &prompt,
+            ANTHROPIC_SUMMARY_MAX_TOKENS,
+            "summarize",
+            emit,
+        )?,
         _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
     };
-    emit("summarize", "finished", None, Some(&content), Some("AI 输出完成，正在保存知识卡"));
+    emit(
+        "summarize",
+        "finished",
+        None,
+        Some(&content),
+        Some("AI 输出完成，正在保存知识卡"),
+    );
     let document = parse_ai_document(&content)?;
 
     Ok(AiSummaryDocument {
@@ -334,15 +344,31 @@ pub fn plan_search_query_streaming(
     let normalized_query =
         normalize_text(Some(query)).ok_or_else(|| "请输入要搜索的自然语言问题".to_owned())?;
     let prompt = build_search_query_prompt(&normalized_query, context_queries);
-    emit("plan", "started", None, None, Some("正在理解问题并改写搜索方向"));
+    emit(
+        "plan",
+        "started",
+        None,
+        None,
+        Some("正在理解问题并改写搜索方向"),
+    );
     let content = match provider.as_str() {
         "openai" => request_openai_streaming(config, &prompt, "plan", emit)?,
-        "anthropic" => {
-            request_anthropic_streaming(config, &prompt, ANTHROPIC_SEARCH_PLAN_MAX_TOKENS, "plan", emit)?
-        }
+        "anthropic" => request_anthropic_streaming(
+            config,
+            &prompt,
+            ANTHROPIC_SEARCH_PLAN_MAX_TOKENS,
+            "plan",
+            emit,
+        )?,
         _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
     };
-    emit("plan", "finished", None, Some(&content), Some("AI 已完成问题理解"));
+    emit(
+        "plan",
+        "finished",
+        None,
+        Some(&content),
+        Some("AI 已完成问题理解"),
+    );
 
     parse_search_plan(&content, &normalized_query)
 }
@@ -368,9 +394,15 @@ pub fn explain_search_topic_streaming(
         )?,
         _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
     };
-    let normalized_content = normalize_text(Some(&content))
-        .ok_or_else(|| "AI 没有返回可用解释内容".to_owned())?;
-    emit("explain", "finished", None, Some(&normalized_content), Some("解释完成"));
+    let normalized_content =
+        normalize_text(Some(&content)).ok_or_else(|| "AI 没有返回可用解释内容".to_owned())?;
+    emit(
+        "explain",
+        "finished",
+        None,
+        Some(&normalized_content),
+        Some("解释完成"),
+    );
     Ok(normalized_content)
 }
 
@@ -394,7 +426,10 @@ fn validate_request_config(config: &AiRequestConfig) -> Result<String, String> {
         return Err("请填写 OpenAI 兼容接口的请求地址".to_owned());
     }
     if !base_url.is_empty() && !is_allowed_ai_base_url(base_url) {
-        return Err("AI 请求地址必须使用 https://；只有本机调试地址可以使用 http://。".to_owned());
+        return Err(
+            "AI 请求地址必须使用 https://；OpenAI 兼容接口的本机或局域网服务可以使用 http://。"
+                .to_owned(),
+        );
     }
 
     if config.model.trim().is_empty() {
@@ -425,7 +460,10 @@ fn validate_model_list_config(config: &AiRequestConfig) -> Result<String, String
         return Err("请填写 OpenAI 兼容接口的请求地址".to_owned());
     }
     if !base_url.is_empty() && !is_allowed_ai_base_url(base_url) {
-        return Err("AI 请求地址必须使用 https://；只有本机调试地址可以使用 http://。".to_owned());
+        return Err(
+            "AI 请求地址必须使用 https://；OpenAI 兼容接口的本机或局域网服务可以使用 http://。"
+                .to_owned(),
+        );
     }
 
     if config.api_key.trim().is_empty()
@@ -466,7 +504,7 @@ fn is_allowed_ai_base_url(base_url: &str) -> bool {
         host_with_port.split(':').next().unwrap_or("")
     };
 
-    matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+    is_local_ai_host(host) || is_private_network_ai_host(host)
 }
 
 fn is_local_ai_base_url(base_url: &str) -> bool {
@@ -488,7 +526,32 @@ fn is_local_ai_base_url(base_url: &str) -> bool {
         host_with_port.split(':').next().unwrap_or("")
     };
 
+    is_local_ai_host(host)
+}
+
+fn is_local_ai_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+}
+
+fn is_private_network_ai_host(host: &str) -> bool {
+    if host == "host.docker.internal" {
+        return true;
+    }
+
+    let parts = host
+        .split('.')
+        .map(str::parse::<u8>)
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(parts) = parts else {
+        return false;
+    };
+    if parts.len() != 4 {
+        return false;
+    }
+
+    parts[0] == 10
+        || (parts[0] == 172 && (16..=31).contains(&parts[1]))
+        || (parts[0] == 192 && parts[1] == 168)
 }
 
 fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, String> {
@@ -520,13 +583,18 @@ fn request_openai_streaming(
     emit: &mut AiStreamCallback<'_>,
 ) -> Result<String, String> {
     let request = build_openai_chat_request(config, prompt, true);
-    match execute_sse_post(&request.endpoint, &request.headers, &request.body, |data, full_text| {
-        if let Some(delta) = extract_openai_stream_delta(data)? {
-            full_text.push_str(&delta);
-            emit(stage, "delta", Some(&delta), Some(full_text), None);
-        }
-        Ok(())
-    }) {
+    match execute_sse_post(
+        &request.endpoint,
+        &request.headers,
+        &request.body,
+        |data, full_text| {
+            if let Some(delta) = extract_openai_stream_delta(data)? {
+                full_text.push_str(&delta);
+                emit(stage, "delta", Some(&delta), Some(full_text), None);
+            }
+            Ok(())
+        },
+    ) {
         Ok(content) if !content.trim().is_empty() => Ok(content),
         Ok(_) => Err("OpenAI 流式响应中没有摘要内容".to_owned()),
         Err(stream_error) => {
@@ -537,8 +605,9 @@ fn request_openai_streaming(
                 None,
                 Some("当前服务未返回可用的流式响应，正在改用普通请求。"),
             );
-            request_openai(config, prompt)
-                .map_err(|fallback_error| format!("{stream_error}；普通请求也失败：{fallback_error}"))
+            request_openai(config, prompt).map_err(|fallback_error| {
+                format!("{stream_error}；普通请求也失败：{fallback_error}")
+            })
         }
     }
 }
@@ -579,13 +648,18 @@ fn request_anthropic_streaming(
     emit: &mut AiStreamCallback<'_>,
 ) -> Result<String, String> {
     let request = build_anthropic_message_request(config, prompt, max_tokens, true);
-    match execute_sse_post(&request.endpoint, &request.headers, &request.body, |data, full_text| {
-        if let Some(delta) = extract_anthropic_stream_delta(data)? {
-            full_text.push_str(&delta);
-            emit(stage, "delta", Some(&delta), Some(full_text), None);
-        }
-        Ok(())
-    }) {
+    match execute_sse_post(
+        &request.endpoint,
+        &request.headers,
+        &request.body,
+        |data, full_text| {
+            if let Some(delta) = extract_anthropic_stream_delta(data)? {
+                full_text.push_str(&delta);
+                emit(stage, "delta", Some(&delta), Some(full_text), None);
+            }
+            Ok(())
+        },
+    ) {
         Ok(content) if !content.trim().is_empty() => Ok(content),
         Ok(_) => Err("Anthropic 流式响应中没有摘要内容".to_owned()),
         Err(stream_error) => {
@@ -596,8 +670,9 @@ fn request_anthropic_streaming(
                 None,
                 Some("当前服务未返回可用的流式响应，正在改用普通请求。"),
             );
-            request_anthropic(config, prompt, max_tokens)
-                .map_err(|fallback_error| format!("{stream_error}；普通请求也失败：{fallback_error}"))
+            request_anthropic(config, prompt, max_tokens).map_err(|fallback_error| {
+                format!("{stream_error}；普通请求也失败：{fallback_error}")
+            })
         }
     }
 }
@@ -674,7 +749,11 @@ fn list_anthropic_models(config: &AiRequestConfig) -> Result<Vec<AiModelOption>,
         .collect())
 }
 
-fn build_openai_chat_request(config: &AiRequestConfig, prompt: &str, stream: bool) -> JsonPostRequest {
+fn build_openai_chat_request(
+    config: &AiRequestConfig,
+    prompt: &str,
+    stream: bool,
+) -> JsonPostRequest {
     let mut headers = vec![("Content-Type", "application/json".to_owned())];
     let api_key = config.api_key.trim();
     if !api_key.is_empty() {
@@ -1383,7 +1462,11 @@ where
 {
     while let Some(index) = find_sse_separator(buffer) {
         let event = buffer[..index].to_owned();
-        let separator_len = if buffer[index..].starts_with("\r\n\r\n") { 4 } else { 2 };
+        let separator_len = if buffer[index..].starts_with("\r\n\r\n") {
+            4
+        } else {
+            2
+        };
         buffer.drain(..index + separator_len);
         handle_sse_event(&event, full_text, on_data)?;
     }
@@ -1403,11 +1486,7 @@ fn find_sse_separator(buffer: &str) -> Option<usize> {
     }
 }
 
-fn handle_sse_event<F>(
-    event: &str,
-    full_text: &mut String,
-    on_data: &mut F,
-) -> Result<(), String>
+fn handle_sse_event<F>(event: &str, full_text: &mut String, on_data: &mut F) -> Result<(), String>
 where
     F: FnMut(&str, &mut String) -> Result<(), String>,
 {
@@ -1441,7 +1520,11 @@ fn extract_openai_stream_delta(data: &str) -> Result<Option<String>, String> {
             choice
                 .delta
                 .and_then(|delta| delta.content.and_then(openai_content_to_text))
-                .or_else(|| choice.message.and_then(|message| message.content.and_then(openai_content_to_text)))
+                .or_else(|| {
+                    choice
+                        .message
+                        .and_then(|message| message.content.and_then(openai_content_to_text))
+                })
         })
         .collect::<Vec<_>>()
         .join("");
@@ -1454,7 +1537,11 @@ fn extract_anthropic_stream_delta(data: &str) -> Result<Option<String>, String> 
     let delta = parsed
         .pointer("/delta/text")
         .and_then(serde_json::Value::as_str)
-        .or_else(|| parsed.pointer("/content_block/text").and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            parsed
+                .pointer("/content_block/text")
+                .and_then(serde_json::Value::as_str)
+        })
         .unwrap_or("");
     Ok(normalize_stream_delta(delta.to_owned()))
 }
@@ -2029,6 +2116,40 @@ mod tests {
         .expect("IPv6 本机 HTTP 地址应允许用于本地 AI 网关调试");
 
         assert_eq!(provider, "openai");
+    }
+
+    #[test]
+    fn validate_request_config_allows_lan_http_endpoint() {
+        for base_url in [
+            "http://10.0.0.8:11434/v1",
+            "http://172.16.3.4:11434/v1",
+            "http://172.31.3.4:11434/v1",
+            "http://192.168.1.10:11434/v1",
+            "http://host.docker.internal:11434/v1",
+        ] {
+            let provider = validate_request_config(&AiRequestConfig {
+                provider: "openai-compatible".to_owned(),
+                api_key: "test-key".to_owned(),
+                base_url: Some(base_url.to_owned()),
+                model: "custom-chat-model".to_owned(),
+            })
+            .expect("局域网 HTTP 地址应允许用于 OpenAI 兼容服务");
+
+            assert_eq!(provider, "openai");
+        }
+    }
+
+    #[test]
+    fn validate_request_config_requires_key_for_lan_http_endpoint() {
+        let error = validate_request_config(&AiRequestConfig {
+            provider: "openai-compatible".to_owned(),
+            api_key: String::new(),
+            base_url: Some("http://192.168.1.10:11434/v1".to_owned()),
+            model: "custom-chat-model".to_owned(),
+        })
+        .expect_err("局域网 HTTP 服务仍应要求 API Key");
+
+        assert!(error.contains("请先填写 AI API Key"));
     }
 
     #[test]

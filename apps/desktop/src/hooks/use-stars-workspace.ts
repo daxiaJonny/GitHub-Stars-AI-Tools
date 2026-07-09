@@ -12,6 +12,8 @@ import type {
   BackendStatus,
   GistAnnotationExportSummary,
   GistAnnotationImportSummary,
+  GistRepositoryLibraryExportSummary,
+  GistRepositoryLibraryImportSummary,
   GitHubAuthState,
   GitHubUser,
   GithubRecommendationResponse,
@@ -74,6 +76,8 @@ export function useStarsWorkspace() {
   const [isFetchingReadmes, setIsFetchingReadmes] = useState(false);
   const [isExportingAnnotations, setIsExportingAnnotations] = useState(false);
   const [isImportingAnnotations, setIsImportingAnnotations] = useState(false);
+  const [isExportingRepositoryLibrary, setIsExportingRepositoryLibrary] = useState(false);
+  const [isImportingRepositoryLibrary, setIsImportingRepositoryLibrary] = useState(false);
   const [isLoadingRepositories, setIsLoadingRepositories] = useState(false);
   const [isLoadingAnnotation, setIsLoadingAnnotation] = useState(false);
   const [isLoadingRepositoryDetail, setIsLoadingRepositoryDetail] = useState(false);
@@ -748,6 +752,33 @@ export function useStarsWorkspace() {
     }
   }
 
+  async function handleExportRepositoryLibrary() {
+    setIsExportingRepositoryLibrary(true);
+    setError(null);
+    setAuthMessage(null);
+    setTaskProgress(buildRunningTaskProgress(
+      'export-repository-library-gist',
+      'backup',
+      '正在导出所有仓库到 GitHub Gist',
+      'GitHub Gist',
+      'save',
+    ));
+
+    try {
+      const summary = await invoke<GistRepositoryLibraryExportSummary>('export_repository_library_gist');
+      setGistIdDraft(summary.gistId);
+      setAuthMessage(`仓库清单已导出到 Gist ${summary.gistId}：${summary.repositoryCount} 个仓库，${summary.tagCount} 个标签。`);
+      setTaskProgress(buildSucceededTaskProgress('export-repository-library-gist', 'backup', '所有仓库已导出到 GitHub Gist。'));
+    } catch (reason) {
+      const message = toErrorMessage(reason);
+      setError(message);
+      setTaskProgress(buildFailedTaskProgress('export-repository-library-gist', 'backup', message, 'GitHub Gist'));
+      handleGitHubCredentialFailure(message);
+    } finally {
+      setIsExportingRepositoryLibrary(false);
+    }
+  }
+
   async function handleImportAnnotations(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await runImportAnnotations();
@@ -794,6 +825,51 @@ export function useStarsWorkspace() {
       handleGitHubCredentialFailure(message);
     } finally {
       setIsImportingAnnotations(false);
+    }
+  }
+
+  async function handleImportRepositoryLibrary(event?: { preventDefault: () => void }) {
+    event?.preventDefault();
+    const gistId = gistIdDraft.trim();
+
+    if (!gistId) {
+      const message = '请输入 Gist ID 后再导入。';
+      setError(message);
+      setAuthMessage(null);
+      setTaskProgress(buildFailedTaskProgress('import-repository-library-gist', 'backup', message, 'GitHub Gist'));
+      return;
+    }
+
+    setIsImportingRepositoryLibrary(true);
+    setError(null);
+    setAuthMessage(null);
+    setTaskProgress(buildRunningTaskProgress(
+      'import-repository-library-gist',
+      'backup',
+      '正在从 GitHub Gist 导入所有仓库',
+      `Gist ${gistId}`,
+      'fetch',
+    ));
+
+    try {
+      const summary = await invoke<GistRepositoryLibraryImportSummary>('import_repository_library_gist', {
+        request: { gistId },
+      });
+      await refreshRepositoryWorkspace();
+      if (selectedRepository) {
+        await loadAnnotationWorkspace(selectedRepository);
+      }
+      setAuthMessage(
+        `仓库清单已导入：新增 ${summary.createdRepositoryCount} 个仓库，更新 ${summary.updatedRepositoryCount} 个仓库，恢复 ${summary.tagCount} 个标签。`,
+      );
+      setTaskProgress(buildSucceededTaskProgress('import-repository-library-gist', 'backup', '所有仓库已从 GitHub Gist 导入。'));
+    } catch (reason) {
+      const message = toErrorMessage(reason);
+      setError(message);
+      setTaskProgress(buildFailedTaskProgress('import-repository-library-gist', 'backup', message, `Gist ${gistId}`));
+      handleGitHubCredentialFailure(message);
+    } finally {
+      setIsImportingRepositoryLibrary(false);
     }
   }
 
@@ -1389,6 +1465,7 @@ export function useStarsWorkspace() {
     handleCreateTag,
     handleDeleteTag,
     handleExportAnnotations,
+    handleExportRepositoryLibrary,
     handleFetchReadmes,
     handleFetchRepositoryReadme,
     handleBatchGenerateAiDocuments,
@@ -1397,6 +1474,7 @@ export function useStarsWorkspace() {
     handleGenerateAiDocument,
     handleApplySuggestedTag,
     handleImportAnnotations,
+    handleImportRepositoryLibrary,
     runImportAnnotations,
     handleRenameTag,
     handleSaveAnnotation,
@@ -1408,6 +1486,7 @@ export function useStarsWorkspace() {
     isClearingToken,
     isClearingLocalData,
     isExportingAnnotations,
+    isExportingRepositoryLibrary,
     isFetchingReadmes,
     isFetchingRepositoryReadme,
     isBatchGeneratingAiDocuments,
@@ -1415,6 +1494,7 @@ export function useStarsWorkspace() {
     isGeneratingAiDocument,
     isGeneratingTagNetwork,
     isImportingAnnotations,
+    isImportingRepositoryLibrary,
     isLoadingAuth,
     isLoadingAnnotation,
     isLoadingRepositories,

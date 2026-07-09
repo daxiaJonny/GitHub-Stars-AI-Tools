@@ -82,6 +82,20 @@ export type GistAnnotationImportSummary = {
   skippedRepositoryCount: number;
 };
 
+export type GistRepositoryLibraryExportSummary = {
+  gistId: string;
+  htmlUrl: string;
+  tagCount: number;
+  repositoryCount: number;
+};
+
+export type GistRepositoryLibraryImportSummary = {
+  tagCount: number;
+  repositoryCount: number;
+  createdRepositoryCount: number;
+  updatedRepositoryCount: number;
+};
+
 export type RepositoryListItem = {
   id: string;
   accountId: string;
