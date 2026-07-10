@@ -1842,6 +1842,9 @@ fn sync_github_stars_worker(
             .values()
             .any(|sync_status| sync_status == "active");
     let mut completed_full_scan = true;
+    // 是否已扫描到 GitHub Star 列表的末页。只有到达末页时，incoming_ids 才是当前
+    // Star 的完整集合，才能安全判定哪些本地 active 仓库已被取消 star。
+    let mut reached_last_page = false;
 
     loop {
         let page_items = github::fetch_starred_repositories_page(&token, &account_id, page)?;
@@ -1881,6 +1884,11 @@ fn sync_github_stars_worker(
 
         if page_contains_only_known_active {
             completed_full_scan = false;
+            // 增量提前停止：若该页同时是末页（不足一页），说明已遍历完整 Star 列表，
+            // 仍可安全计算移除；否则后续可能还有未扫描的页面，不能移除。
+            if is_last_starred_page(page_len, github::starred_page_size()) {
+                reached_last_page = true;
+            }
             emit_task_progress(
                 &app_handle,
                 TaskProgressEvent::running(
@@ -1896,7 +1904,8 @@ fn sync_github_stars_worker(
             break;
         }
 
-        if page_len < github::starred_page_size() {
+        if is_last_starred_page(page_len, github::starred_page_size()) {
+            reached_last_page = true;
             break;
         }
 
@@ -1913,8 +1922,8 @@ fn sync_github_stars_worker(
         .count();
     let updated_count = repositories.len().saturating_sub(created_count);
     let removed_ids =
-        compute_removed_repository_ids(completed_full_scan, &existing_states, &incoming_ids);
-    if completed_full_scan {
+        compute_removed_repository_ids(reached_last_page, &existing_states, &incoming_ids);
+    if reached_last_page {
         storage.mark_repositories_removed(&account_id, &removed_ids)?;
     }
     let removed_count = removed_ids.len();
@@ -1968,11 +1977,11 @@ fn should_stop_incremental_on_page(
 }
 
 fn compute_removed_repository_ids(
-    completed_full_scan: bool,
+    reached_last_page: bool,
     existing_states: &HashMap<String, String>,
     incoming_ids: &HashSet<&str>,
 ) -> Vec<String> {
-    if !completed_full_scan {
+    if !reached_last_page {
         return Vec::new();
     }
 
@@ -1983,6 +1992,13 @@ fn compute_removed_repository_ids(
                 .then(|| repository_id.to_owned())
         })
         .collect()
+}
+
+/// 判断当前页是否为 GitHub Star 列表的末页（返回条目数不足一页或为空）。
+/// 到达末页意味着本次已遍历完整的 Star 列表，incoming_ids 即为当前 Star 的完整集合，
+/// 可安全判定哪些本地 active 仓库已被取消 star；未到末页则不能移除（后续页面可能仍有未扫描仓库）。
+fn is_last_starred_page(page_len: usize, page_size: usize) -> bool {
+    page_len < page_size
 }
 
 #[tauri::command]
@@ -4641,18 +4657,29 @@ mod tests {
     }
 
     #[test]
-    fn removed_repositories_are_computed_only_after_full_scan() {
+    fn removed_repositories_are_computed_only_when_scan_reaches_last_page() {
         let existing_states = sync_states(&[
             ("account:1", "active"),
             ("account:2", "active"),
             ("account:3", "removed"),
         ]);
         let incoming_ids = HashSet::from(["account:1"]);
+        // 到达末页（reached_last_page = true）时，未出现在 incoming_ids 中的 active 仓库被判定为移除。
         let mut removed_ids = compute_removed_repository_ids(true, &existing_states, &incoming_ids);
         removed_ids.sort();
 
         assert_eq!(removed_ids, vec!["account:2".to_owned()]);
+        // 未到末页时不能移除（增量提前停止且未遍历完整列表）。
         assert!(compute_removed_repository_ids(false, &existing_states, &incoming_ids).is_empty());
+    }
+
+    #[test]
+    fn last_starred_page_detection_covers_incremental_stop_on_partial_page() {
+        // 用户取消 star 后剩余仓库不足一页：增量提前停止命中的页同时是末页，应判定为已到末页，可安全移除。
+        assert!(is_last_starred_page(3, 100));
+        assert!(is_last_starred_page(0, 100));
+        // 满页时无法确定是否还有后续页面，不能判定为末页（保留增量同步的安全行为）。
+        assert!(!is_last_starred_page(100, 100));
     }
 
     #[test]
