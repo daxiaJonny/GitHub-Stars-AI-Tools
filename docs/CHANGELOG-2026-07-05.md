@@ -102,7 +102,7 @@ apps/desktop/src/
 参考 Better GitHub Stars Manager，继续添加：
 
 1. **快捷操作面板**（类似截图中的操作列表）
-   - 增量同步 Stars
+   - 完整分页并权威对账 Stars
    - 全量重新拉取
    - 协调 Stars 状态
    - 从 Gist 拉取标签

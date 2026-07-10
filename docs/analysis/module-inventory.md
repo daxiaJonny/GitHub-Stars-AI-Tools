@@ -4,7 +4,7 @@
 
 | 模块 | 职责 | 输入 | 输出 | 边界约束 |
 | --- | --- | --- | --- | --- |
-| GitHub Sync | 授权、Star 同步、README 抓取、增量/全量对账 | GitHub Token、同步命令 | 仓库事实数据、README 原文 | 只写事实数据，不写 AI 派生结果 |
+| GitHub Sync | 授权、Star 完整同步、README 抓取、权威对账 | GitHub Token、同步命令 | 仓库事实数据、README 原文 | 只写事实数据，不写 AI 派生结果 |
 | Annotation Layer | 标签、笔记、收藏夹、批量整理 | 用户操作 | tags、notes、collections | 与 GitHub 事实数据分离 |
 | Knowledge Pipeline | 摘要、README 中文梳理、关键词、标签建议 | README 原文、仓库元数据 | 中文摘要、README 中文梳理、关键词、推荐标签 | 可断点续跑，按内容 hash 幂等；Embedding 仅作为后续可选增强 |
 | Search Engine | 关键词、过滤、本地知识检索、重排序 | 查询词、过滤条件 | 结果列表、匹配理由 | 不直接调用 GitHub，不直接调用 LLM 生成正文；当前不要求向量模型 |
