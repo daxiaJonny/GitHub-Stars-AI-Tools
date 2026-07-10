@@ -12,9 +12,10 @@
 
 | 项目介绍 | 项目介绍 |
 | --- | --- |
-| ![GitHub-Stars-AI-Tools 项目展示图 1](https://img1.tucang.cc/api/image/show/492588f407682d1de22a121a7c41a419) | ![GitHub-Stars-AI-Tools 项目展示图 2](https://img1.tucang.cc/api/image/show/6079917404cd1e577fe4faa62505756a) |
-| ![GitHub-Stars-AI-Tools 项目展示图 3](https://img1.tucang.cc/api/image/show/c763056916759b04855474b6a1d17310) | ![GitHub-Stars-AI-Tools 项目展示图 4](https://img1.tucang.cc/api/image/show/753b8b6d2c4406295dea0798cd7fd10e) |
-| ![GitHub-Stars-AI-Tools 项目展示图 5](https://img1.tucang.cc/api/image/show/37b88fc76c3b151491b18409dafe178c) | ![GitHub-Stars-AI-Tools 项目展示图 6](https://img1.tucang.cc/api/image/show/83cae064f0b6143d1879b8f6ce9440a2) |
+| ![GitHub-Stars-AI-Tools 首页](https://img1.tucang.cc/api/image/show/be56ddb20e18515e7f11c8586bf5eb86) | ![GitHub-Stars-AI-Tools 发现页](https://img1.tucang.cc/api/image/show/0c9f4a0d7d2f0ea942dcb92bd98cc07f) |
+| ![GitHub-Stars-AI-Tools 排行榜页](https://img1.tucang.cc/api/image/show/bacb1108cf5c9bf7d6a0b73c52888111) | ![GitHub-Stars-AI-Tools 个人主页](https://img1.tucang.cc/api/image/show/9287046286bfccd34e263bcaf10252a1) |
+| ![GitHub-Stars-AI-Tools 搜索聊天页](https://img1.tucang.cc/api/image/show/0380a0d41ecd1cc6cb045a7701f7d8c7) | ![GitHub-Stars-AI-Tools 知识库页](https://img1.tucang.cc/api/image/show/b32c3cb323e3b481d07639dce838269e) |
+| ![GitHub-Stars-AI-Tools 标签页](https://img1.tucang.cc/api/image/show/6c91135f727ce93635cf72e850a0c74c) | ![GitHub-Stars-AI-Tools 设置页](https://img1.tucang.cc/api/image/show/fc31ace9237345be6766ed212427daf8) |
 
 ## 适合谁
 
