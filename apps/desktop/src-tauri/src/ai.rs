@@ -18,6 +18,7 @@ const ANTHROPIC_TAG_NETWORK_MAX_TOKENS: u16 = 2400;
 const ANTHROPIC_RECOMMENDATION_MAX_TOKENS: u16 = 1000;
 const ANTHROPIC_SEARCH_PLAN_MAX_TOKENS: u16 = 800;
 const ANTHROPIC_EXPLANATION_MAX_TOKENS: u16 = 1000;
+const ANTHROPIC_TRANSLATION_MAX_TOKENS: u16 = 6000;
 const AI_SYSTEM_PROMPT: &str =
     "你是开源项目知识库助手。严格遵守用户消息中的输出格式要求；需要结构化 JSON 时只输出 JSON，需要自然语言时直接回答。";
 
@@ -41,6 +42,19 @@ pub struct AiSummaryDocument {
     pub prompt_version: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+/// README 中文翻译结果及其覆盖范围。
+pub struct AiReadmeTranslation {
+    pub markdown_zh: String,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub source_char_count: usize,
+    pub translated_char_count: usize,
+    pub is_truncated: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -274,6 +288,42 @@ pub fn summarize_readme_streaming(
         prompt_version: PROMPT_VERSION.to_owned(),
         input_tokens: estimate_tokens(&prompt),
         output_tokens: estimate_tokens(&content),
+    })
+}
+
+/// 将 README 的说明文字翻译为中文，同时保留 Markdown 与技术内容。
+pub fn translate_readme(
+    config: &AiRequestConfig,
+    repository_full_name: &str,
+    readme_markdown: &str,
+) -> Result<AiReadmeTranslation, String> {
+    let provider = validate_request_config(config)?;
+    let prompt = build_readme_translation_prompt(repository_full_name, readme_markdown);
+    let content = match provider.as_str() {
+        "openai" => request_openai(config, &prompt)?,
+        "anthropic" => request_anthropic(config, &prompt, ANTHROPIC_TRANSLATION_MAX_TOKENS)?,
+        _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
+    };
+    let markdown_zh = content
+        .trim()
+        .strip_prefix("```markdown")
+        .and_then(|value| value.strip_suffix("```"))
+        .unwrap_or(content.trim())
+        .trim()
+        .to_owned();
+    if markdown_zh.is_empty() {
+        return Err("AI 未返回可用的 README 中文翻译".to_owned());
+    }
+
+    let source_char_count = readme_markdown.chars().count();
+    Ok(AiReadmeTranslation {
+        markdown_zh,
+        model: config.model.trim().to_owned(),
+        input_tokens: estimate_tokens(&prompt),
+        output_tokens: estimate_tokens(&content),
+        source_char_count,
+        translated_char_count: source_char_count.min(MAX_README_CHARS),
+        is_truncated: source_char_count > MAX_README_CHARS,
     })
 }
 
@@ -851,6 +901,35 @@ README:
 {readme_excerpt}
 "#,
         description = description.unwrap_or("无"),
+    )
+}
+
+fn build_readme_translation_prompt(repository_full_name: &str, readme_markdown: &str) -> String {
+    let readme_excerpt = readme_markdown
+        .chars()
+        .take(MAX_README_CHARS)
+        .collect::<String>();
+    let content_notice = if readme_markdown.chars().count() > MAX_README_CHARS {
+        "README 内容较长，本次翻译仅覆盖开头部分。不要补写未提供的章节。"
+    } else {
+        "README 内容完整。"
+    };
+
+    format!(
+        r#"请将这个 GitHub 仓库 README 翻译为简体中文。
+
+仓库：{repository_full_name}
+内容状态：{content_notice}
+
+要求：
+- 保留原有 Markdown 结构，包括标题层级、列表、表格、引用、链接和图片。
+- 代码块、命令、URL、API 名称和标识符保持原文，不要翻译或改写。
+- 只翻译自然语言说明，不添加原文没有的功能、结论或示例。
+- 直接输出翻译后的 Markdown，不要使用代码围栏包裹全文，不要添加解释。
+
+README:
+{readme_excerpt}
+"#,
     )
 }
 
@@ -2548,6 +2627,28 @@ mod tests {
         assert!(prompt.contains("language: TypeScript"));
         assert!(prompt.contains("topic:"));
         assert!(prompt.contains("不要包含已给出的仓库 full_name"));
+    }
+
+    #[test]
+    fn build_readme_translation_prompt_preserves_technical_markdown() {
+        let prompt = build_readme_translation_prompt(
+            "owner/project",
+            "# Install\n\n```bash\npnpm install\n```",
+        );
+
+        assert!(prompt.contains("保留原有 Markdown 结构"));
+        assert!(prompt.contains("代码块、命令、URL、API 名称和标识符保持原文"));
+        assert!(prompt.contains("# Install"));
+        assert!(prompt.contains("pnpm install"));
+    }
+
+    #[test]
+    fn build_readme_translation_prompt_marks_truncated_input() {
+        let readme = "a".repeat(MAX_README_CHARS + 1);
+        let prompt = build_readme_translation_prompt("owner/project", &readme);
+
+        assert!(prompt.contains("README 内容较长，本次翻译仅覆盖开头部分"));
+        assert!(!prompt.contains(&readme));
     }
 
     #[test]

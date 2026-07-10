@@ -1,6 +1,7 @@
 mod ai;
 mod auth;
 mod github;
+mod ranking_query;
 mod storage;
 
 use serde::{Deserialize, Serialize};
@@ -51,7 +52,6 @@ struct StarSyncSummary {
     updated_count: usize,
     removed_count: usize,
     scanned_count: usize,
-    mode: &'static str,
 }
 
 #[derive(Serialize)]
@@ -78,12 +78,6 @@ struct ReadmeFetchFailure {
 struct FetchReadmesRequest {
     only_missing: Option<bool>,
     repository_ids: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SyncGithubStarsRequest {
-    force_full: Option<bool>,
 }
 
 #[derive(Serialize, Clone)]
@@ -612,7 +606,9 @@ struct RecommendGithubRepositoriesRequest {
 struct ListGithubRecommendationCandidatesRequest {
     account_id: String,
     status: Option<String>,
+    category: Option<String>,
     limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -630,6 +626,58 @@ struct StarGithubRecommendationCandidateRequest {
     full_name: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FetchGithubRecommendationReadmeRequest {
+    account_id: String,
+    full_name: String,
+    force_refresh: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslateGithubRecommendationReadmeRequest {
+    account_id: String,
+    full_name: String,
+    ai_config: Option<ai::AiRequestConfig>,
+    force_refresh: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListGithubRankingsRequest {
+    account_id: String,
+    kind: String,
+    language: Option<String>,
+    page: Option<usize>,
+    limit: Option<usize>,
+    force_refresh: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListPersonalRankingsRequest {
+    account_id: String,
+    kind: String,
+    language: Option<String>,
+    page: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FetchGithubRankingReadmeRequest {
+    account_id: String,
+    full_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StarGithubRankingRepositoryRequest {
+    account_id: String,
+    full_name: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GithubRecommendationResponse {
@@ -637,6 +685,65 @@ struct GithubRecommendationResponse {
     queries: Vec<String>,
     search_failures: Vec<GithubRecommendationSearchFailure>,
     results: Vec<github::GitHubRepositoryRecommendation>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubRecommendationPage {
+    rationale_zh: String,
+    queries: Vec<String>,
+    results: Vec<github::GitHubRepositoryRecommendation>,
+    total_count: usize,
+    limit: usize,
+    offset: usize,
+    categories: Vec<storage::GithubRecommendationCategoryCount>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubRecommendationReadme {
+    full_name: String,
+    raw_markdown: String,
+    source_path: String,
+    fetched_at: String,
+    from_cache: bool,
+    translation: Option<ai::AiReadmeTranslation>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RankingItem {
+    full_name: String,
+    description: Option<String>,
+    language: Option<String>,
+    topics: Vec<String>,
+    html_url: String,
+    stars_count: u64,
+    forks_count: u64,
+    pushed_at: Option<String>,
+    starred_at: Option<String>,
+    is_starred: bool,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RankingPage {
+    kind: String,
+    items: Vec<RankingItem>,
+    total_count: usize,
+    page: usize,
+    limit: usize,
+    has_more: bool,
+    generated_at: String,
+    is_stale: bool,
+    from_cache: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RankingStarResult {
+    full_name: String,
+    is_starred: bool,
 }
 
 #[derive(Serialize)]
@@ -1777,28 +1884,19 @@ fn runtime_check_skipped_with_action(
 }
 
 #[tauri::command]
-async fn sync_github_stars(
-    app_handle: tauri::AppHandle,
-    request: Option<SyncGithubStarsRequest>,
-) -> Result<StarSyncSummary, String> {
-    let force_full = request
-        .and_then(|request| request.force_full)
-        .unwrap_or(false);
+async fn sync_github_stars(app_handle: tauri::AppHandle) -> Result<StarSyncSummary, String> {
     let progress_handle = app_handle.clone();
     run_background_task_with_failure_progress(
         "Stars 同步",
         progress_handle,
         "sync-stars",
         "sync",
-        move || sync_github_stars_worker(app_handle, force_full),
+        move || sync_github_stars_worker(app_handle),
     )
     .await
 }
 
-fn sync_github_stars_worker(
-    app_handle: tauri::AppHandle,
-    force_full: bool,
-) -> Result<StarSyncSummary, String> {
+fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSummary, String> {
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::running(
@@ -1835,109 +1933,54 @@ fn sync_github_stars_worker(
             None,
         ),
     );
-    let mut repositories = Vec::new();
-    let mut page = 1_u32;
-    let has_existing_active_repositories = !force_full
-        && existing_states
-            .values()
-            .any(|sync_status| sync_status == "active");
-    let mut completed_full_scan = true;
-
-    loop {
+    let mut scanned_count = 0_usize;
+    let repositories = collect_authoritative_star_pages(github::starred_page_size(), |page| {
         let page_items = github::fetch_starred_repositories_page(&token, &account_id, page)?;
         let page_len = page_items.len();
-        let page_repository_ids = page_items
-            .iter()
-            .map(|repository| repository.id.clone())
-            .collect::<Vec<_>>();
-        let page_contains_only_known_active = should_stop_incremental_on_page(
-            has_existing_active_repositories,
-            &existing_states,
-            &page_repository_ids,
-        );
-        storage.upsert_repositories(&page_items)?;
-        repositories.extend(page_items);
-        let estimated_total =
-            if page_contains_only_known_active || page_len < github::starred_page_size() {
-                repositories.len()
-            } else {
-                repositories.len() + github::starred_page_size()
-            };
+        scanned_count += page_len;
+        let estimated_total = if page_len < github::starred_page_size() {
+            scanned_count
+        } else {
+            scanned_count + github::starred_page_size()
+        };
         emit_task_progress(
             &app_handle,
             TaskProgressEvent::running(
                 "sync-stars",
                 "sync",
-                "save",
-                repositories.len(),
+                "fetch",
+                scanned_count,
                 estimated_total,
-                format!(
-                    "正在同步第 {page} 页，已写入 {} 个 Stars",
-                    repositories.len()
-                ),
+                format!("正在读取第 {page} 页，已扫描 {scanned_count} 个 Stars"),
                 None,
             ),
         );
-
-        if page_contains_only_known_active {
-            completed_full_scan = false;
-            emit_task_progress(
-                &app_handle,
-                TaskProgressEvent::running(
-                    "sync-stars",
-                    "sync",
-                    "incremental-stop",
-                    repositories.len(),
-                    repositories.len(),
-                    "已遇到本地已同步的 Stars 页面，本次增量同步提前完成",
-                    None,
-                ),
-            );
-            break;
-        }
-
-        if page_len < github::starred_page_size() {
-            break;
-        }
-
-        page += 1;
-    }
+        Ok(page_items)
+    })?;
+    storage.upsert_repositories(&repositories)?;
 
     let incoming_ids = repositories
         .iter()
         .map(|repository| repository.id.as_str())
         .collect::<HashSet<_>>();
-    let created_count = repositories
+    let created_count = incoming_ids
         .iter()
-        .filter(|repository| !existing_states.contains_key(repository.id.as_str()))
+        .filter(|repository_id| !existing_states.contains_key(**repository_id))
         .count();
-    let updated_count = repositories.len().saturating_sub(created_count);
-    let removed_ids =
-        compute_removed_repository_ids(completed_full_scan, &existing_states, &incoming_ids);
-    if completed_full_scan {
-        storage.mark_repositories_removed(&account_id, &removed_ids)?;
-    }
+    let updated_count = incoming_ids.len().saturating_sub(created_count);
+    let removed_ids = compute_removed_repository_ids(&existing_states, &incoming_ids);
+    storage.mark_repositories_removed(&account_id, &removed_ids)?;
     let removed_count = removed_ids.len();
     let active_count = storage.count_active_repositories_for_account(&account_id)?;
-    let sync_mode = if completed_full_scan {
-        "full"
-    } else {
-        "incremental"
-    };
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::succeeded(
             "sync-stars",
             "sync",
-            repositories.len(),
-            repositories.len(),
+            incoming_ids.len(),
+            incoming_ids.len(),
             format!(
-                "同步完成：当前 {active_count} 个，新增 {created_count} 个，模式 {}",
-                if completed_full_scan {
-                    "全量"
-                } else {
-                    "增量"
-                }
+                "同步完成：当前 {active_count} 个，新增 {created_count} 个，移除 {removed_count} 个"
             ),
         ),
     );
@@ -1948,34 +1991,40 @@ fn sync_github_stars_worker(
         created_count,
         updated_count,
         removed_count,
-        scanned_count: repositories.len(),
-        mode: sync_mode,
+        scanned_count: incoming_ids.len(),
     })
 }
 
-fn should_stop_incremental_on_page(
-    has_existing_active_repositories: bool,
-    existing_states: &HashMap<String, String>,
-    page_repository_ids: &[String],
-) -> bool {
-    has_existing_active_repositories
-        && !page_repository_ids.is_empty()
-        && page_repository_ids.iter().all(|repository_id| {
-            existing_states
-                .get(repository_id.as_str())
-                .is_some_and(|sync_status| sync_status == "active")
-        })
+fn collect_authoritative_star_pages<T, FetchPage>(
+    page_size: usize,
+    mut fetch_page: FetchPage,
+) -> Result<Vec<T>, String>
+where
+    FetchPage: FnMut(u32) -> Result<Vec<T>, String>,
+{
+    if page_size == 0 {
+        return Err("GitHub Stars 分页大小必须大于 0".to_owned());
+    }
+
+    let mut repositories = Vec::new();
+    let mut page = 1_u32;
+    loop {
+        let page_items = fetch_page(page)?;
+        let page_len = page_items.len();
+        repositories.extend(page_items);
+        if page_len < page_size {
+            return Ok(repositories);
+        }
+        page = page
+            .checked_add(1)
+            .ok_or_else(|| "GitHub Stars 分页数量超出支持范围".to_owned())?;
+    }
 }
 
 fn compute_removed_repository_ids(
-    completed_full_scan: bool,
     existing_states: &HashMap<String, String>,
     incoming_ids: &HashSet<&str>,
 ) -> Vec<String> {
-    if !completed_full_scan {
-        return Vec::new();
-    }
-
     existing_states
         .iter()
         .filter_map(|(repository_id, sync_status)| {
@@ -3502,6 +3551,223 @@ fn build_ai_search_query(
 }
 
 #[tauri::command]
+async fn list_github_rankings(
+    app_handle: tauri::AppHandle,
+    request: ListGithubRankingsRequest,
+) -> Result<RankingPage, String> {
+    run_background_task("加载开源榜单", move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let page = request.page.unwrap_or(1).max(1);
+        let limit = request.limit.unwrap_or(20).clamp(1, 50);
+        let language = request
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let cache_key = format!(
+            "{}:{}:{}:{}:{}",
+            request.account_id,
+            request.kind.trim(),
+            language.unwrap_or("all"),
+            page,
+            limit,
+        );
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let cached = storage.get_github_ranking_cache(&cache_key)?;
+        let starred_full_names = storage.list_active_repository_full_names(&request.account_id)?;
+
+        if !request.force_refresh.unwrap_or(false) {
+            if let Some(cache) = cached.as_ref() {
+                if ranking_query::is_ranking_cache_fresh(cache.fetched_at, now) {
+                    return parse_cached_ranking_page(cache, false, &starred_full_names);
+                }
+            }
+        }
+
+        let thirty_days_ago = (time::OffsetDateTime::now_utc() - time::Duration::days(30))
+            .date()
+            .to_string();
+        let ninety_days_ago = (time::OffsetDateTime::now_utc() - time::Duration::days(90))
+            .date()
+            .to_string();
+        let one_year_ago = (time::OffsetDateTime::now_utc() - time::Duration::days(365))
+            .date()
+            .to_string();
+        let query = ranking_query::build_global_ranking_query(
+            request.kind.trim(),
+            language,
+            ranking_query::RankingDateThresholds {
+                thirty_days_ago: &thirty_days_ago,
+                ninety_days_ago: &ninety_days_ago,
+                one_year_ago: &one_year_ago,
+            },
+        )?;
+        let token = auth::require_github_token()?;
+        match github::search_repository_page(&token, &query, "stars", "desc", page, limit) {
+            Ok(result) => {
+                let accessible_total = result.total_count.min(1_000);
+                let response = RankingPage {
+                    kind: request.kind.trim().to_owned(),
+                    items: result
+                        .items
+                        .into_iter()
+                        .map(|repository| RankingItem {
+                            is_starred: starred_full_names.contains(&repository.full_name),
+                            full_name: repository.full_name,
+                            description: repository.description,
+                            language: repository.language,
+                            topics: repository.topics,
+                            html_url: repository.html_url,
+                            stars_count: repository.stars_count,
+                            forks_count: repository.forks_count,
+                            pushed_at: repository.pushed_at,
+                            starred_at: None,
+                        })
+                        .collect(),
+                    total_count: accessible_total,
+                    page,
+                    limit,
+                    has_more: page.saturating_mul(limit) < accessible_total,
+                    generated_at: current_ranking_timestamp()?,
+                    is_stale: false,
+                    from_cache: false,
+                };
+                let payload_json = serde_json::to_string(&response)
+                    .map_err(|error| format!("GitHub 排行榜缓存序列化失败：{error}"))?;
+                storage.save_github_ranking_cache(&cache_key, &payload_json, now)?;
+                Ok(response)
+            }
+            Err(error) => match cached.as_ref() {
+                Some(cache) => parse_cached_ranking_page(cache, true, &starred_full_names),
+                None => Err(error),
+            },
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+fn list_personal_rankings(
+    app_handle: tauri::AppHandle,
+    request: ListPersonalRankingsRequest,
+) -> Result<RankingPage, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let page = request.page.unwrap_or(1).max(1);
+    let limit = request.limit.unwrap_or(20).clamp(1, 50);
+    let repository_page = storage.list_personal_ranking_page(
+        limit,
+        (page - 1).saturating_mul(limit),
+        &request.account_id,
+        request.language.as_deref(),
+        request.kind.trim(),
+    )?;
+    let total_count = repository_page.total_count;
+
+    Ok(RankingPage {
+        kind: request.kind.trim().to_owned(),
+        items: repository_page
+            .items
+            .into_iter()
+            .map(|repository| RankingItem {
+                full_name: repository.full_name,
+                description: repository.description,
+                language: repository.language,
+                topics: repository.topics,
+                html_url: repository.html_url,
+                stars_count: repository.stars_count,
+                forks_count: repository.forks_count,
+                pushed_at: repository.pushed_at,
+                starred_at: Some(repository.starred_at),
+                is_starred: true,
+            })
+            .collect(),
+        total_count,
+        page,
+        limit,
+        has_more: page.saturating_mul(limit) < total_count,
+        generated_at: current_ranking_timestamp()?,
+        is_stale: false,
+        from_cache: false,
+    })
+}
+
+#[tauri::command]
+async fn fetch_github_ranking_readme(
+    app_handle: tauri::AppHandle,
+    request: FetchGithubRankingReadmeRequest,
+) -> Result<GithubRecommendationReadme, String> {
+    run_background_task("读取排行榜项目介绍", move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let full_name = request.full_name.trim().to_owned();
+        if let Some(readme) =
+            storage.get_github_recommendation_readme(&request.account_id, &full_name)?
+        {
+            return github_recommendation_readme_response(
+                &storage,
+                &request.account_id,
+                &full_name,
+                readme,
+                true,
+            );
+        }
+
+        let token = auth::require_github_token()?;
+        let readme = github::fetch_readme(&token, &full_name, &full_name)?
+            .ok_or_else(|| format!("{full_name} 暂未提供 README"))?;
+        storage.save_github_recommendation_readme(&request.account_id, &full_name, &readme)?;
+        github_recommendation_readme_response(
+            &storage,
+            &request.account_id,
+            &full_name,
+            readme,
+            false,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn star_github_ranking_repository(
+    request: StarGithubRankingRepositoryRequest,
+) -> Result<RankingStarResult, String> {
+    run_background_task("加入 GitHub Stars", move || {
+        let token = auth::require_github_token()?;
+        let user = auth::verify_github_token(&token)?;
+        if request.account_id != user.id.to_string() {
+            return Err("当前 GitHub 账号与排行榜所属账号不一致，请重新连接后再操作。".to_owned());
+        }
+        let full_name = request.full_name.trim().to_owned();
+        github::star_repository(&token, &full_name)?;
+        Ok(RankingStarResult {
+            full_name,
+            is_starred: true,
+        })
+    })
+    .await
+}
+
+fn parse_cached_ranking_page(
+    cache: &storage::GithubRankingCacheEntry,
+    is_stale: bool,
+    starred_full_names: &HashSet<String>,
+) -> Result<RankingPage, String> {
+    let mut response = serde_json::from_str::<RankingPage>(&cache.payload_json)
+        .map_err(|error| format!("GitHub 排行榜缓存内容解析失败：{error}"))?;
+    response.from_cache = true;
+    response.is_stale = is_stale;
+    for repository in &mut response.items {
+        repository.is_starred = starred_full_names.contains(&repository.full_name);
+    }
+    Ok(response)
+}
+
+fn current_ranking_timestamp() -> Result<String, String> {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|error| format!("排行榜生成时间格式化失败：{error}"))
+}
+
+#[tauri::command]
 async fn recommend_github_repositories(
     app_handle: tauri::AppHandle,
     request: RecommendGithubRepositoriesRequest,
@@ -3521,19 +3787,24 @@ async fn recommend_github_repositories(
 fn list_github_recommendation_candidates(
     app_handle: tauri::AppHandle,
     request: ListGithubRecommendationCandidatesRequest,
-) -> Result<GithubRecommendationResponse, String> {
+) -> Result<GithubRecommendationPage, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     let candidates = storage.list_github_recommendation_candidates(
         &request.account_id,
         request.status.as_deref(),
+        request.category.as_deref(),
         request.limit.unwrap_or(12),
+        request.offset.unwrap_or(0),
     )?;
 
-    Ok(GithubRecommendationResponse {
+    Ok(GithubRecommendationPage {
         rationale_zh: candidates.rationale_zh,
         queries: candidates.queries,
-        search_failures: Vec::new(),
         results: candidates.repositories,
+        total_count: candidates.total_count,
+        limit: candidates.limit,
+        offset: candidates.offset,
+        categories: candidates.categories,
     })
 }
 
@@ -3548,6 +3819,135 @@ fn update_github_recommendation_candidate_status(
         &request.full_name,
         &request.status,
     )
+}
+
+#[tauri::command]
+async fn fetch_github_recommendation_readme(
+    app_handle: tauri::AppHandle,
+    request: FetchGithubRecommendationReadmeRequest,
+) -> Result<GithubRecommendationReadme, String> {
+    run_background_task("读取推荐项目介绍", move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let full_name = request.full_name.trim().to_owned();
+        ensure_github_recommendation_candidate(&storage, &request.account_id, &full_name)?;
+
+        if !request.force_refresh.unwrap_or(false) {
+            if let Some(readme) =
+                storage.get_github_recommendation_readme(&request.account_id, &full_name)?
+            {
+                return github_recommendation_readme_response(
+                    &storage,
+                    &request.account_id,
+                    &full_name,
+                    readme,
+                    true,
+                );
+            }
+        }
+
+        let token = auth::require_github_token()?;
+        let readme = github::fetch_readme(&token, &full_name, &full_name)?
+            .ok_or_else(|| format!("{full_name} 暂未提供 README"))?;
+        storage.save_github_recommendation_readme(&request.account_id, &full_name, &readme)?;
+        github_recommendation_readme_response(
+            &storage,
+            &request.account_id,
+            &full_name,
+            readme,
+            false,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn translate_github_recommendation_readme(
+    app_handle: tauri::AppHandle,
+    request: TranslateGithubRecommendationReadmeRequest,
+) -> Result<ai::AiReadmeTranslation, String> {
+    run_background_task("翻译推荐项目介绍", move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let full_name = request.full_name.trim().to_owned();
+        ensure_github_recommendation_candidate(&storage, &request.account_id, &full_name)?;
+        let readme = storage
+            .get_github_recommendation_readme(&request.account_id, &full_name)?
+            .ok_or_else(|| "请先加载项目 README，再生成中文翻译。".to_owned())?;
+        if !request.force_refresh.unwrap_or(false) {
+            if let Some(translation) = storage.get_github_recommendation_translation(
+                &request.account_id,
+                &full_name,
+                &readme.content_hash,
+            )? {
+                return Ok(cached_github_translation_response(translation));
+            }
+        }
+
+        let ai_config = hydrate_ai_request_config(&app_handle, request.ai_config)?;
+        let translation = ai::translate_readme(&ai_config, &full_name, &readme.raw_markdown)?;
+        storage.save_github_recommendation_translation(
+            &request.account_id,
+            &full_name,
+            &readme.content_hash,
+            &translation.markdown_zh,
+            &translation.model,
+            translation.input_tokens,
+            translation.output_tokens,
+            translation.source_char_count,
+            translation.translated_char_count,
+            translation.is_truncated,
+        )?;
+        Ok(translation)
+    })
+    .await
+}
+
+fn ensure_github_recommendation_candidate(
+    storage: &AppStorage,
+    account_id: &str,
+    full_name: &str,
+) -> Result<(), String> {
+    let candidate_exists = storage
+        .list_github_recommendation_candidate_states(account_id, &[full_name.to_owned()])?
+        .contains_key(full_name);
+    if candidate_exists {
+        Ok(())
+    } else {
+        Err("推荐候选项目不存在，请刷新发现列表后重试。".to_owned())
+    }
+}
+
+fn github_recommendation_readme_response(
+    storage: &AppStorage,
+    account_id: &str,
+    full_name: &str,
+    readme: github::ReadmeDocument,
+    from_cache: bool,
+) -> Result<GithubRecommendationReadme, String> {
+    let translation = storage
+        .get_github_recommendation_translation(account_id, full_name, &readme.content_hash)?
+        .map(cached_github_translation_response);
+    Ok(GithubRecommendationReadme {
+        full_name: full_name.to_owned(),
+        raw_markdown: readme.raw_markdown,
+        source_path: readme.source_path,
+        fetched_at: readme.fetched_at,
+        from_cache,
+        translation,
+    })
+}
+
+fn cached_github_translation_response(
+    translation: storage::GithubRecommendationCachedTranslation,
+) -> ai::AiReadmeTranslation {
+    ai::AiReadmeTranslation {
+        markdown_zh: translation.markdown_zh,
+        model: translation.model,
+        input_tokens: translation.input_tokens,
+        output_tokens: translation.output_tokens,
+        source_char_count: translation.source_char_count,
+        translated_char_count: translation.translated_char_count,
+        is_truncated: translation.is_truncated,
+    }
 }
 
 #[tauri::command]
@@ -3736,7 +4136,7 @@ fn recommend_github_repositories_worker(
         return Err(format_recommendation_search_failure(&search_failures));
     }
 
-    let candidate_states = storage.upsert_github_recommendation_candidates(
+    let candidate_states = storage.replace_github_recommendation_candidates(
         &request.account_id,
         &plan.rationale_zh,
         &plan.queries,
@@ -3790,28 +4190,27 @@ fn format_recommendation_search_failure(
 
 fn build_github_recommendation_completion_progress(
     result_count: usize,
-    limit: usize,
+    _limit: usize,
     search_failure_count: usize,
     message: impl Into<String>,
 ) -> TaskProgressEvent {
-    let total = limit.max(1);
-    let current = result_count.min(total);
+    let completed_count = result_count.max(1);
     let message = message.into();
 
     if search_failure_count > 0 {
         TaskProgressEvent::partial(
             "recommend-github-repositories",
             "ai",
-            current,
-            total,
+            completed_count,
+            completed_count,
             message,
         )
     } else {
         TaskProgressEvent::succeeded(
             "recommend-github-repositories",
             "ai",
-            current,
-            total,
+            completed_count,
+            completed_count,
             message,
         )
     }
@@ -4256,9 +4655,15 @@ pub fn run() {
             batch_generate_repository_ai_documents,
             explain_ai_search_topic,
             search_repositories,
+            list_github_rankings,
+            list_personal_rankings,
+            fetch_github_ranking_readme,
+            star_github_ranking_repository,
             recommend_github_repositories,
             list_github_recommendation_candidates,
             update_github_recommendation_candidate_status,
+            fetch_github_recommendation_readme,
+            translate_github_recommendation_readme,
             star_github_recommendation_candidate,
         ])
         .run(tauri::generate_context!())
@@ -4270,6 +4675,24 @@ mod tests {
     use super::*;
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
+
+    #[test]
+    fn recommendation_readme_commands_are_allowed_by_main_capability() {
+        let permissions = include_str!("../permissions/gsat-commands.toml");
+
+        assert!(permissions.contains("\"fetch_github_recommendation_readme\""));
+        assert!(permissions.contains("\"translate_github_recommendation_readme\""));
+    }
+
+    #[test]
+    fn ranking_commands_are_allowed_by_main_capability() {
+        let permissions = include_str!("../permissions/gsat-commands.toml");
+
+        assert!(permissions.contains("\"list_github_rankings\""));
+        assert!(permissions.contains("\"list_personal_rankings\""));
+        assert!(permissions.contains("\"fetch_github_ranking_readme\""));
+        assert!(permissions.contains("\"star_github_ranking_repository\""));
+    }
 
     fn sync_states(values: &[(&str, &str)]) -> HashMap<String, String> {
         values
@@ -4479,7 +4902,7 @@ mod tests {
         assert_eq!(progress.status, "partial");
         assert_eq!(progress.stage, "partial-failure");
         assert_eq!(progress.current, 3);
-        assert_eq!(progress.total, 12);
+        assert_eq!(progress.total, 3);
         assert!(progress.message.contains("搜索式暂未完成"));
     }
 
@@ -4495,7 +4918,7 @@ mod tests {
         assert_eq!(progress.status, "succeeded");
         assert_eq!(progress.stage, "done");
         assert_eq!(progress.current, 8);
-        assert_eq!(progress.total, 12);
+        assert_eq!(progress.total, 8);
     }
 
     #[test]
@@ -4603,56 +5026,74 @@ mod tests {
     }
 
     #[test]
-    fn incremental_sync_stops_on_page_with_only_known_active_repositories() {
-        let existing_states = sync_states(&[("account:1", "active"), ("account:2", "active")]);
+    fn authoritative_star_scan_reads_until_short_page() {
+        let pages = [vec!["account:1", "account:2"], vec!["account:3"]];
+        let mut requested_pages = Vec::new();
 
-        assert!(should_stop_incremental_on_page(
-            true,
-            &existing_states,
-            &ids(&["account:1", "account:2"]),
-        ));
+        let repositories = collect_authoritative_star_pages(2, |page| {
+            requested_pages.push(page);
+            Ok(pages[(page - 1) as usize].clone())
+        })
+        .expect("完整扫描应读取到末页");
+
+        assert_eq!(requested_pages, vec![1, 2]);
+        assert_eq!(repositories, vec!["account:1", "account:2", "account:3"]);
     }
 
     #[test]
-    fn incremental_sync_continues_when_page_contains_new_or_removed_repository() {
-        let existing_states = sync_states(&[("account:1", "active"), ("account:2", "removed")]);
+    fn authoritative_star_scan_requests_empty_page_after_exact_page_size() {
+        let pages = [vec!["account:1", "account:2"], Vec::new()];
+        let mut requested_pages = Vec::new();
 
-        assert!(!should_stop_incremental_on_page(
-            true,
-            &existing_states,
-            &ids(&["account:1", "account:3"]),
-        ));
-        assert!(!should_stop_incremental_on_page(
-            true,
-            &existing_states,
-            &ids(&["account:1", "account:2"]),
-        ));
+        let repositories = collect_authoritative_star_pages(2, |page| {
+            requested_pages.push(page);
+            Ok(pages[(page - 1) as usize].clone())
+        })
+        .expect("满页后应继续确认末页");
+
+        assert_eq!(requested_pages, vec![1, 2]);
+        assert_eq!(repositories, vec!["account:1", "account:2"]);
     }
 
     #[test]
-    fn first_sync_does_not_stop_incrementally_without_existing_active_repositories() {
-        let existing_states = sync_states(&[]);
+    fn authoritative_star_scan_accepts_empty_remote_list() {
+        let mut requested_pages = Vec::new();
 
-        assert!(!should_stop_incremental_on_page(
-            false,
-            &existing_states,
-            &ids(&["account:1", "account:2"]),
-        ));
+        let repositories = collect_authoritative_star_pages::<String, _>(2, |page| {
+            requested_pages.push(page);
+            Ok(Vec::new())
+        })
+        .expect("空 Stars 列表应是有效完整结果");
+
+        assert_eq!(requested_pages, vec![1]);
+        assert!(repositories.is_empty());
     }
 
     #[test]
-    fn removed_repositories_are_computed_only_after_full_scan() {
+    fn authoritative_star_scan_discards_partial_result_after_page_failure() {
+        let result = collect_authoritative_star_pages(2, |page| match page {
+            1 => Ok(vec!["account:1", "account:2"]),
+            _ => Err("第二页请求失败".to_owned()),
+        });
+
+        assert_eq!(
+            result.expect_err("分页失败不得返回可用于删除对账的集合"),
+            "第二页请求失败"
+        );
+    }
+
+    #[test]
+    fn authoritative_sync_computes_only_missing_active_repositories() {
         let existing_states = sync_states(&[
             ("account:1", "active"),
             ("account:2", "active"),
             ("account:3", "removed"),
         ]);
         let incoming_ids = HashSet::from(["account:1"]);
-        let mut removed_ids = compute_removed_repository_ids(true, &existing_states, &incoming_ids);
+        let mut removed_ids = compute_removed_repository_ids(&existing_states, &incoming_ids);
         removed_ids.sort();
 
         assert_eq!(removed_ids, vec!["account:2".to_owned()]);
-        assert!(compute_removed_repository_ids(false, &existing_states, &incoming_ids).is_empty());
     }
 
     #[test]
