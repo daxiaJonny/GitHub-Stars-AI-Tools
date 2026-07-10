@@ -1,23 +1,26 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useWorkspace } from '@/providers/workspace-provider';
 import { useAppSettings } from '@/providers/settings-provider';
 import { ReadmeRenderer } from '@/components/readme-renderer';
 import { Icon } from '@/components/ui/icon';
+import { CopyLinkButton } from '@/components/copy-link-button';
+import {
+  useObservedElementWidth,
+  usePersistentPanelWidth,
+  VerticalResizeHandle,
+} from '@/components/vertical-resize-handle';
+import { DiscoverySelectionBar } from '@/features/repositories/discovery-selection-bar';
 import { getAiConfigMessage, shouldFlushAiApiKey } from '@/lib/ai-config';
 import { compactNumber } from '@/lib/format';
 import { computeVirtualWindow } from '@/lib/virtual-list';
 import type {
-  GithubRecommendationResponse,
   ReadingStatus,
   RepositoryAnnotationView,
   RepositoryDetailView,
   RepositoryListItem,
   TagItem,
 } from '@/types';
-
-type RecommendationCandidateStatus = 'new' | 'marked' | 'ignored' | 'starred';
-type RecommendationCandidateAction = 'star' | 'mark' | 'ignore';
 
 const README_SUMMARY_PROMPT_CHAR_LIMIT = 18_000;
 
@@ -45,15 +48,8 @@ function getLanguageColor(language: string | null): string {
   return LANGUAGE_COLORS[language] ?? '#c3c6d7';
 }
 
-function removeRecommendationCandidateRecord<T>(record: Record<string, T>, fullName: string): Record<string, T> {
-  const next = { ...record };
-  delete next[fullName];
-  return next;
-}
-
-function toPageErrorMessage(reason: unknown) {
-  if (reason instanceof Error) return reason.message;
-  return String(reason);
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), Math.max(min, max));
 }
 
 function getBatchAiLimitValue(limit: BatchAiLimit) {
@@ -64,8 +60,22 @@ function getBatchAiLimitValue(limit: BatchAiLimit) {
   return Number(limit);
 }
 
+const OTHER_LANGUAGE_FILTER = '其他';
+
+function repositoryLanguageMatchesFilter(language: string | null, filter: string) {
+  if (!filter) {
+    return true;
+  }
+
+  if (filter === OTHER_LANGUAGE_FILTER) {
+    return !language || language.trim() === '';
+  }
+
+  return language === filter;
+}
+
 function repositoryMatchesLocalFilters(repo: RepositoryListItem, filters: { keyword: string; language: string; tagId: string }) {
-  if (filters.language && repo.language !== filters.language) {
+  if (!repositoryLanguageMatchesFilter(repo.language, filters.language)) {
     return false;
   }
 
@@ -106,6 +116,15 @@ const REPOSITORY_TABLE_ROW_HEIGHT = 54;
 const REPOSITORY_TABLE_HEADER_HEIGHT = 30;
 const LIST_OVERSCAN = 8;
 const MAX_RECOMMENDATION_SELECTION = 8;
+const REPOSITORY_LIST_DEFAULT_WIDTH = 340;
+const REPOSITORY_LIST_MIN_WIDTH = 260;
+const REPOSITORY_LIST_MAX_WIDTH = 520;
+const REPOSITORY_DETAIL_MIN_WIDTH = 560;
+const AI_PANEL_DEFAULT_WIDTH = 360;
+const AI_PANEL_MIN_WIDTH = 300;
+const AI_PANEL_MAX_WIDTH = 540;
+const README_PANEL_MIN_WIDTH = 420;
+const RESIZE_HANDLE_WIDTH = 12;
 
 type RepositoriesPageProps = {
   navigationKey?: number;
@@ -113,6 +132,7 @@ type RepositoriesPageProps = {
   globalLanguageFilter?: string;
   globalTagFilter?: string;
   globalSelectedRepositoryId?: string | null;
+  onOpenDiscover: () => void;
 };
 
 export function RepositoriesPage(props: RepositoriesPageProps) {
@@ -126,12 +146,26 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
   const [batchAiLimit, setBatchAiLimit] = useState<BatchAiLimit>('all');
   const [isBatchPanelOpen, setIsBatchPanelOpen] = useState(false);
   const [isRepositoryListCollapsed, setIsRepositoryListCollapsed] = useState(false);
+  const [isRecommendationSelectionMode, setIsRecommendationSelectionMode] = useState(false);
   const [listScrollTop, setListScrollTop] = useState(0);
   const [listViewportHeight, setListViewportHeight] = useState(720);
   const [recommendationSelection, setRecommendationSelection] = useState<Set<string>>(() => new Set());
-  const [recommendationCandidatePending, setRecommendationCandidatePending] = useState<Record<string, RecommendationCandidateAction>>({});
-  const [recommendationCandidateErrors, setRecommendationCandidateErrors] = useState<Record<string, string>>({});
+  const [repositoryListWidth, setRepositoryListWidth] = usePersistentPanelWidth('gsat.repository-list-width', REPOSITORY_LIST_DEFAULT_WIDTH);
+  const [workspaceLayoutRef, workspaceLayoutWidth] = useObservedElementWidth<HTMLDivElement>();
   const listViewportRef = useRef<HTMLDivElement | null>(null);
+  const repositoryListMaxWidth = Math.max(
+    REPOSITORY_LIST_MIN_WIDTH,
+    workspaceLayoutWidth > 0
+      ? Math.min(
+          REPOSITORY_LIST_MAX_WIDTH,
+          workspaceLayoutWidth - REPOSITORY_DETAIL_MIN_WIDTH - RESIZE_HANDLE_WIDTH - 24,
+        )
+      : REPOSITORY_LIST_MAX_WIDTH,
+  );
+
+  useEffect(() => {
+    setRepositoryListWidth((current) => clampNumber(current, REPOSITORY_LIST_MIN_WIDTH, repositoryListMaxWidth));
+  }, [repositoryListMaxWidth, setRepositoryListWidth]);
 
   const resetListScroll = useCallback(() => {
     setListScrollTop(0);
@@ -245,16 +279,6 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
   const selectedRecommendationIds = Array.from(recommendationSelection);
   const hasReachedRecommendationSelectionLimit = selectedRecommendationIds.length >= MAX_RECOMMENDATION_SELECTION;
   const hasConnectedUser = Boolean(workspace.authState.user);
-  const recommendationActionNotice = !hasConnectedUser
-    ? '请先连接 GitHub 账号，随后可同步 Stars、缓存 README 并使用 AI 功能。'
-    : selectedRecommendationIds.length === 0
-      ? `勾选 1 到 ${MAX_RECOMMENDATION_SELECTION} 个仓库后，可以让 AI 在 GitHub 上寻找相似或更优项目。`
-      : aiConfigMessage
-        ? aiConfigMessage
-        : hasReachedRecommendationSelectionLimit
-          ? `已选择 ${MAX_RECOMMENDATION_SELECTION} 个参考仓库，取消一个后可以继续更换参考对象。`
-          : null;
-  const recommendationActionNoticeTone = !hasConnectedUser || Boolean(aiConfigMessage) ? 'error' : 'muted';
   const readmeActionTitle = !hasConnectedUser
     ? '请先连接 GitHub 账号'
     : !hasBatchTargets
@@ -300,7 +324,15 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
   }
 
   async function handleFindSimilarOnGithub() {
-    await runAiWorkspaceAction(() => workspace.handleFindSimilarRepositories(settingsHook.settings.ai, selectedRecommendationIds));
+    try {
+      if (shouldFlushAiApiKey(settingsHook.settings.ai)) {
+        await settingsHook.flushAIKey(settingsHook.settings.ai.apiKey);
+      }
+      await workspace.handleFindSimilarRepositories(settingsHook.settings.ai, selectedRecommendationIds);
+      props.onOpenDiscover();
+    } catch {
+      // workspace 和 settings hook 已负责展示可见错误
+    }
   }
 
   async function runAiWorkspaceAction(action: () => Promise<unknown>) {
@@ -314,40 +346,14 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
     }
   }
 
-  async function handleUpdateRecommendationCandidate(fullName: string, status: Exclude<RecommendationCandidateStatus, 'starred'>) {
-    const action: RecommendationCandidateAction = status === 'ignored' ? 'ignore' : 'mark';
-    await runRecommendationCandidateAction(fullName, action, () => workspace.handleUpdateRecommendationCandidate(fullName, status));
-  }
-
-  async function handleStarRecommendationCandidate(fullName: string) {
-    await runRecommendationCandidateAction(fullName, 'star', () => workspace.handleStarRecommendationCandidate(fullName));
-  }
-
-  async function runRecommendationCandidateAction(
-    fullName: string,
-    action: RecommendationCandidateAction,
-    execute: () => Promise<void>,
-  ) {
-    setRecommendationCandidatePending((current) => ({ ...current, [fullName]: action }));
-    setRecommendationCandidateErrors((current) => removeRecommendationCandidateRecord(current, fullName));
-    try {
-      await execute();
-    } catch (reason) {
-      setRecommendationCandidateErrors((current) => ({
-        ...current,
-        [fullName]: toPageErrorMessage(reason),
-      }));
-    } finally {
-      setRecommendationCandidatePending((current) => removeRecommendationCandidateRecord(current, fullName));
-    }
-  }
-
   return (
     <div
-      className={`repositories-page-compact grid h-full min-w-0 flex-1 content-start grid-cols-1 gap-2 overflow-y-auto p-2 text-[13px] md:min-h-0 md:content-stretch md:overflow-hidden xl:gap-3 ${
+      ref={workspaceLayoutRef}
+      style={!isRepositoryListCollapsed ? { '--repository-list-width': `${repositoryListWidth}px` } as CSSProperties : undefined}
+      className={`relative grid h-full min-w-0 flex-1 content-start grid-cols-1 overflow-y-auto p-3 text-[13px] md:min-h-0 md:content-stretch md:overflow-hidden ${
         isRepositoryListCollapsed
-          ? 'md:grid-cols-[48px_minmax(0,1fr)]'
-          : 'md:grid-cols-[clamp(230px,20vw,282px)_minmax(0,1fr)] xl:grid-cols-[clamp(244px,18vw,300px)_minmax(0,1fr)] 2xl:grid-cols-[304px_minmax(0,1fr)]'
+          ? 'gap-3 md:grid-cols-[56px_minmax(0,1fr)]'
+          : 'gap-3 md:grid-cols-[var(--repository-list-width)_12px_minmax(0,1fr)] md:gap-0'
       }`}
     >
       {/* 左侧仓库列表 */}
@@ -415,6 +421,28 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
               </button>
             </div>
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              setIsRecommendationSelectionMode((current) => {
+                if (current) {
+                  setRecommendationSelection(new Set());
+                } else {
+                  setIsRepositoryListCollapsed(false);
+                }
+                return !current;
+              });
+            }}
+            className={`mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+              isRecommendationSelectionMode
+                ? 'border-primary/35 bg-primary/10 text-primary'
+                : 'border-outline-variant/30 bg-surface text-on-surface-variant hover:border-primary/35 hover:text-primary'
+            }`}
+            aria-pressed={isRecommendationSelectionMode}
+          >
+            <Icon name={isRecommendationSelectionMode ? 'close' : 'travel_explore'} size={15} />
+            {isRecommendationSelectionMode ? '退出发现选择' : '选择用于发现'}
+          </button>
           <button
             type="button"
             onClick={() => setIsRepositoryListCollapsed(true)}
@@ -519,36 +547,6 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
                 <option value="300">最多 300 个</option>
               </select>
             </div>
-            <div className="mx-2 mb-3 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => void handleFindSimilarOnGithub()}
-                disabled={
-                  workspace.isFindingSimilarRepositories ||
-                  !hasConnectedUser ||
-                  selectedRecommendationIds.length === 0 ||
-                  Boolean(aiConfigMessage)
-                }
-                title={recommendationActionTitle}
-                className="flex min-w-[180px] flex-1 items-center justify-center gap-1.5 rounded-lg border border-primary/20 bg-primary/10 px-3 py-1.5 text-xs text-primary transition-colors hover:bg-primary/15 disabled:opacity-60"
-              >
-                <Icon
-                  name={workspace.isFindingSimilarRepositories ? 'progress_activity' : 'travel_explore'}
-                  size={15}
-                  className={workspace.isFindingSimilarRepositories ? 'animate-spin' : ''}
-                />
-                {workspace.isFindingSimilarRepositories ? '发现中' : `GitHub 相似发现${selectedRecommendationIds.length ? ` (${selectedRecommendationIds.length})` : ''}`}
-              </button>
-              {selectedRecommendationIds.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setRecommendationSelection(new Set())}
-                className="rounded-lg border border-outline-variant/30 px-3 py-1.5 text-xs text-on-surface-variant transition-colors hover:text-on-surface"
-              >
-                清空
-              </button>
-              )}
-            </div>
           {workspace.batchAiSummary && (
             <BatchAiSummaryPanel summary={workspace.batchAiSummary} />
           )}
@@ -562,28 +560,6 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
             >
               <span className="mr-1 font-medium">批量 AI：</span>
               {batchAiActionNotice}
-            </div>
-          )}
-          {(workspace.githubRecommendationError || workspace.githubRecommendationResponse) && (
-            <GithubRecommendationPanel
-              errorMessage={workspace.githubRecommendationError}
-              response={workspace.githubRecommendationResponse}
-              pendingActions={recommendationCandidatePending}
-              candidateErrors={recommendationCandidateErrors}
-              onUpdateCandidate={handleUpdateRecommendationCandidate}
-              onStarCandidate={handleStarRecommendationCandidate}
-            />
-          )}
-          {recommendationActionNotice && (
-            <div
-              className={`mb-3 rounded-lg border px-3 py-2 text-[11px] leading-relaxed ${
-                recommendationActionNoticeTone === 'error'
-                  ? 'border-error/20 bg-error/10 text-error'
-                  : 'border-outline-variant/30 bg-surface-container text-on-surface-variant'
-              }`}
-            >
-              <span className="mr-1 font-medium">相似发现：</span>
-              {recommendationActionNotice}
             </div>
           )}
             </div>
@@ -711,6 +687,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
                           isSelected={selectedRepo?.id === repo.id}
                           isMarkedForRecommendation={isMarkedForRecommendation}
                           isRecommendationSelectionDisabled={!isMarkedForRecommendation && hasReachedRecommendationSelectionLimit}
+                          showRecommendationSelection={isRecommendationSelectionMode}
                           onClick={() => workspace.setSelectedRepositoryId(repo.id)}
                           onToggleRecommendation={() => toggleRecommendationSelection(repo.id)}
                         />
@@ -730,6 +707,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
                             isSelected={selectedRepo?.id === repo.id}
                             isMarkedForRecommendation={isMarkedForRecommendation}
                             isRecommendationSelectionDisabled={!isMarkedForRecommendation && hasReachedRecommendationSelectionLimit}
+                            showRecommendationSelection={isRecommendationSelectionMode}
                             onClick={() => workspace.setSelectedRepositoryId(repo.id)}
                             onToggleRecommendation={() => toggleRecommendationSelection(repo.id)}
                           />
@@ -745,6 +723,18 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
           </>
         )}
       </div>
+
+      {!isRepositoryListCollapsed ? (
+        <VerticalResizeHandle
+          value={repositoryListWidth}
+          min={REPOSITORY_LIST_MIN_WIDTH}
+          max={repositoryListMaxWidth}
+          defaultValue={Math.min(REPOSITORY_LIST_DEFAULT_WIDTH, repositoryListMaxWidth)}
+          label="调整 Star 列表宽度"
+          className="hidden md:flex"
+          onChange={(value) => setRepositoryListWidth(clampNumber(value, REPOSITORY_LIST_MIN_WIDTH, repositoryListMaxWidth))}
+        />
+      ) : null}
 
       {/* 详情面板 */}
       {selectedRepo ? (
@@ -789,12 +779,23 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
           }
         />
       ) : viewMode === 'detail' ? (
-        <div className="flex-1 glass-card rounded-xl flex items-center justify-center">
+        <div className="flex flex-1 items-center justify-center rounded-lg border border-outline-variant/25 bg-surface">
           <div className="text-center">
             <Icon name="star" size={64} className="text-on-surface-variant/30 mx-auto mb-4" />
             <p className="text-on-surface-variant font-body-md">选择一个仓库查看详情</p>
           </div>
         </div>
+      ) : null}
+      {isRecommendationSelectionMode ? (
+        <DiscoverySelectionBar
+          selectedCount={selectedRecommendationIds.length}
+          maxSelection={MAX_RECOMMENDATION_SELECTION}
+          isLoading={workspace.isFindingSimilarRepositories}
+          isDisabled={!hasConnectedUser || selectedRecommendationIds.length === 0 || Boolean(aiConfigMessage)}
+          actionTitle={recommendationActionTitle}
+          onClear={() => setRecommendationSelection(new Set())}
+          onFind={() => void handleFindSimilarOnGithub()}
+        />
       ) : null}
     </div>
   );
@@ -806,6 +807,7 @@ function RepoListItem(props: {
   isSelected: boolean;
   isMarkedForRecommendation: boolean;
   isRecommendationSelectionDisabled: boolean;
+  showRecommendationSelection: boolean;
   onClick: () => void;
   onToggleRecommendation: () => void;
 }) {
@@ -814,6 +816,7 @@ function RepoListItem(props: {
     isSelected,
     isMarkedForRecommendation,
     isRecommendationSelectionDisabled,
+    showRecommendationSelection,
     onClick,
     onToggleRecommendation,
   } = props;
@@ -831,7 +834,7 @@ function RepoListItem(props: {
       {isSelected && <div className="absolute bottom-0 left-0 top-0 w-0.5 rounded-l-md bg-primary" />}
       <div className={`mb-1 flex items-start justify-between gap-2 ${isSelected ? 'pl-1.5' : ''}`}>
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <button
+          {showRecommendationSelection ? <button
             type="button"
             onClick={(event) => {
               event.stopPropagation();
@@ -857,7 +860,7 @@ function RepoListItem(props: {
             }
           >
             <Icon name="check" size={12} />
-          </button>
+          </button> : null}
           <Icon name="book" size={14} className={isSelected ? 'text-primary' : 'text-on-surface-variant'} />
           <h3 className="truncate text-[13px] font-semibold leading-5 text-on-surface">
             {repo.fullName}
@@ -970,6 +973,7 @@ function RepositoryTableRow(props: {
   isSelected: boolean;
   isMarkedForRecommendation: boolean;
   isRecommendationSelectionDisabled: boolean;
+  showRecommendationSelection: boolean;
   onClick: () => void;
   onToggleRecommendation: () => void;
 }) {
@@ -978,6 +982,7 @@ function RepositoryTableRow(props: {
     isSelected,
     isMarkedForRecommendation,
     isRecommendationSelectionDisabled,
+    showRecommendationSelection,
     onClick,
     onToggleRecommendation,
   } = props;
@@ -993,7 +998,7 @@ function RepositoryTableRow(props: {
       style={{ height: REPOSITORY_TABLE_ROW_HEIGHT }}
     >
       <span className="flex min-w-0 items-center gap-2">
-        <span
+        {showRecommendationSelection ? <span
           role="checkbox"
           aria-checked={isMarkedForRecommendation}
           tabIndex={0}
@@ -1030,7 +1035,7 @@ function RepositoryTableRow(props: {
           }
         >
           <Icon name="check" size={14} />
-        </span>
+        </span> : null}
         <Icon name="book" size={16} className={isSelected ? 'text-primary' : 'text-on-surface-variant'} />
         <span className="min-w-0">
           <span className="block truncate text-sm font-medium">{repo.fullName}</span>
@@ -1204,173 +1209,6 @@ function AiMetaItem(props: { label: string; value: string }) {
   );
 }
 
-function GithubRecommendationPanel(props: {
-  response: GithubRecommendationResponse | null;
-  errorMessage: string | null;
-  pendingActions: Record<string, RecommendationCandidateAction>;
-  candidateErrors: Record<string, string>;
-  onUpdateCandidate: (fullName: string, status: Exclude<RecommendationCandidateStatus, 'starred'>) => Promise<void>;
-  onStarCandidate: (fullName: string) => Promise<void>;
-}) {
-  if (props.errorMessage && !props.response) {
-    return (
-      <div className="mb-3 rounded-lg border border-error/20 bg-error/10 px-3 py-2 text-[11px] leading-relaxed text-error">
-        {props.errorMessage}
-      </div>
-    );
-  }
-
-  if (!props.response) {
-    return null;
-  }
-
-  return (
-    <div className="mb-3 rounded-lg border border-primary/20 bg-primary/5 p-3">
-      <div className="mb-2 flex items-start gap-2">
-        <Icon name="travel_explore" size={16} className="mt-0.5 text-primary" />
-        <div className="min-w-0">
-          <p className="text-xs font-semibold text-on-surface">GitHub 相似项目发现</p>
-          <p className="mt-0.5 text-[11px] leading-relaxed text-on-surface-variant">
-            {props.response.rationaleZh}
-          </p>
-          {props.response.results.length > 0 && (
-            <p className="mt-1 text-[10px] text-on-surface-variant">
-              本次返回 {props.response.results.length} 个候选项目，全部可标记、忽略或加入 Stars。
-            </p>
-          )}
-        </div>
-      </div>
-      {props.errorMessage && (
-        <div className="mb-2 rounded-md border border-error/20 bg-error/10 px-2 py-1.5 text-[11px] leading-relaxed text-error">
-          {props.errorMessage}
-        </div>
-      )}
-      {props.response.searchFailures.length > 0 && (
-        <div className="mb-2 rounded-md border border-warning/25 bg-warning/10 px-2 py-1.5 text-[11px] leading-relaxed text-warning">
-          已保留成功找到的候选项目，{props.response.searchFailures.length} 个 GitHub 搜索式暂未完成，可稍后重试补全。
-        </div>
-      )}
-      {props.response.results.length === 0 ? (
-        <p className="rounded-md bg-surface-container-low px-2 py-1.5 text-[11px] text-on-surface-variant">
-          暂未找到未收藏过的相似项目，可以换几个参考仓库再试。
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {props.response.results.map((repository) => {
-            const candidateStatus = repository.candidateStatus ?? 'new';
-            const isStarred = candidateStatus === 'starred';
-            const pendingAction = props.pendingActions[repository.fullName] ?? null;
-            const candidateError = props.candidateErrors[repository.fullName] ?? null;
-            const isPending = Boolean(pendingAction);
-            const statusLabel = candidateStatus === 'marked'
-              ? '已标记'
-              : candidateStatus === 'ignored'
-                ? '已忽略'
-                : isStarred
-                  ? '已加入 Stars'
-                  : '候选';
-            return (
-            <div
-              key={repository.fullName}
-              className="rounded-md border border-outline-variant/20 bg-surface-container-low px-3 py-2 transition-colors hover:border-primary/30 hover:bg-surface-container"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <a
-                  href={repository.htmlUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="min-w-0 truncate text-xs font-semibold text-primary hover:underline"
-                >
-                  {repository.fullName}
-                </a>
-                <span className="shrink-0 rounded-full bg-surface-container-high px-2 py-0.5 text-[10px] text-on-surface-variant">
-                  {statusLabel}
-                </span>
-              </div>
-              <span className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-on-surface-variant">
-                {repository.description ?? '暂无描述'}
-              </span>
-              <span className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-on-surface-variant">
-                <span>★ {compactNumber(repository.starsCount)}</span>
-                <span>{repository.language ?? '其他语言'}</span>
-                {repository.topics.slice(0, 3).map((topic) => (
-                  <span key={topic} className="rounded bg-surface-container-high px-1.5 py-0.5">
-                    {topic}
-                  </span>
-                ))}
-              </span>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => void props.onStarCandidate(repository.fullName)}
-                  disabled={isStarred || isPending}
-                  className="inline-flex items-center gap-1 rounded-md border border-primary/25 px-2 py-1 text-[10px] font-medium text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:border-outline-variant/25 disabled:text-on-surface-variant disabled:hover:bg-transparent"
-                >
-                  <Icon
-                    name={pendingAction === 'star' ? 'progress_activity' : isStarred ? 'done' : 'star'}
-                    size={12}
-                    className={pendingAction === 'star' ? 'animate-spin' : ''}
-                  />
-                  {pendingAction === 'star' ? '加入中' : isStarred ? '已加入 Stars' : '加入 Stars'}
-                </button>
-                <button
-                  type="button"
-                  disabled={isStarred || isPending}
-                  onClick={() => void props.onUpdateCandidate(repository.fullName, candidateStatus === 'marked' ? 'new' : 'marked')}
-                  className="inline-flex items-center gap-1 rounded-md border border-primary/25 px-2 py-1 text-[10px] font-medium text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:border-outline-variant/25 disabled:text-on-surface-variant disabled:hover:bg-transparent"
-                >
-                  {pendingAction === 'mark' && <Icon name="progress_activity" size={12} className="animate-spin" />}
-                  {pendingAction === 'mark' ? '处理中' : candidateStatus === 'marked' ? '取消标记' : '标记'}
-                </button>
-                <button
-                  type="button"
-                  disabled={isStarred || isPending}
-                  onClick={() => void props.onUpdateCandidate(repository.fullName, candidateStatus === 'ignored' ? 'new' : 'ignored')}
-                  className="inline-flex items-center gap-1 rounded-md border border-outline-variant/30 px-2 py-1 text-[10px] font-medium text-on-surface-variant transition-colors hover:bg-surface-container-high disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
-                >
-                  {pendingAction === 'ignore' && <Icon name="progress_activity" size={12} className="animate-spin" />}
-                  {pendingAction === 'ignore' ? '处理中' : candidateStatus === 'ignored' ? '恢复候选' : '忽略'}
-                </button>
-              </div>
-              {candidateError && (
-                <p className="mt-2 rounded-md border border-error/20 bg-error/10 px-2 py-1 text-[10px] leading-relaxed text-error">
-                  {candidateError}
-                </p>
-              )}
-            </div>
-          );
-          })}
-        </div>
-      )}
-      {props.response.queries.length > 0 && (
-        <details className="mt-2 text-[11px] text-on-surface-variant">
-          <summary className="cursor-pointer">查看 GitHub 搜索式</summary>
-          <div className="mt-1 space-y-1">
-            {props.response.queries.map((query) => (
-              <code key={query} className="block rounded bg-surface-container-low px-2 py-1">
-                {query}
-              </code>
-            ))}
-          </div>
-        </details>
-      )}
-      {props.response.searchFailures.length > 0 && (
-        <details className="mt-2 text-[11px] text-warning">
-          <summary className="cursor-pointer">查看未完成的搜索式</summary>
-          <div className="mt-1 space-y-1">
-            {props.response.searchFailures.map((failure) => (
-              <div key={failure.query} className="rounded bg-warning/10 px-2 py-1">
-                <code className="block text-warning">{failure.query}</code>
-                <p className="mt-1 text-[10px] leading-relaxed text-warning/90">{failure.error}</p>
-              </div>
-            ))}
-          </div>
-        </details>
-      )}
-    </div>
-  );
-}
-
 function RepoDetailPanel(props: {
   repo: RepositoryListItem;
   detail: RepositoryDetailView | null;
@@ -1446,6 +1284,22 @@ function RepoDetailPanel(props: {
   const [editingTagId, setEditingTagId] = useState<string | null>(null);
   const [editingTagName, setEditingTagName] = useState('');
   const [deleteTagId, setDeleteTagId] = useState<string | null>(null);
+  const [aiPanelWidth, setAiPanelWidth] = usePersistentPanelWidth('gsat.ai-knowledge-panel-width', AI_PANEL_DEFAULT_WIDTH);
+  const [detailLayoutRef, detailLayoutWidth] = useObservedElementWidth<HTMLDivElement>();
+  const tableOfContentsWidth = typeof window !== 'undefined' && window.innerWidth >= 1536 ? 120 : 0;
+  const aiPanelMaxWidth = Math.max(
+    AI_PANEL_MIN_WIDTH,
+    detailLayoutWidth > 0
+      ? Math.min(
+          AI_PANEL_MAX_WIDTH,
+          detailLayoutWidth - README_PANEL_MIN_WIDTH - RESIZE_HANDLE_WIDTH - tableOfContentsWidth,
+        )
+      : AI_PANEL_MAX_WIDTH,
+  );
+
+  useEffect(() => {
+    setAiPanelWidth((current) => clampNumber(current, AI_PANEL_MIN_WIDTH, aiPanelMaxWidth));
+  }, [aiPanelMaxWidth, setAiPanelWidth]);
   const canGenerateAiDocument = !isGeneratingAiDocument && !isFetchingReadme && !isLoadingDetail && !aiConfigMessage;
   const aiActionTitle = aiConfigMessage
     ?? (isFetchingReadme
@@ -1514,7 +1368,7 @@ function RepoDetailPanel(props: {
   }
 
   return (
-    <div className="flex min-w-0 flex-col overflow-visible rounded-lg border border-card-border glass-panel shadow-sm md:min-h-0 md:flex-1 md:overflow-hidden">
+    <div className="flex min-w-0 flex-col overflow-visible rounded-lg border border-outline-variant/30 bg-surface md:min-h-0 md:flex-1 md:overflow-hidden">
       {/* 详情标题区 */}
       <div className="flex shrink-0 flex-col gap-2 border-b border-card-border bg-surface/45 px-2.5 py-2 backdrop-blur-md md:flex-row md:items-center md:justify-between">
         <div className="min-w-0 flex-1">
@@ -1546,19 +1400,27 @@ function RepoDetailPanel(props: {
             </span>
           </div>
         </div>
-        <a
-          href={repo.htmlUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border border-outline-variant/35 bg-surface-container-low px-2.5 py-1.5 text-xs font-medium text-on-surface transition-colors hover:border-primary/40 hover:text-primary"
-        >
-          <Icon name="open_in_new" size={15} /> 在浏览器打开
-        </a>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <CopyLinkButton url={repo.htmlUrl} />
+          <a
+            href={repo.htmlUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-outline-variant/35 bg-surface-container-low px-2.5 text-xs font-medium leading-none text-on-surface transition-colors hover:border-primary/40 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+          >
+            <Icon name="open_in_new" size={15} className="leading-none" />
+            <span>在浏览器打开</span>
+          </a>
+        </div>
       </div>
 
       {/* 可滚动详情内容 */}
       <div className="bg-surface-container-lowest/30 p-2 md:min-h-0 md:flex-1 md:overflow-hidden xl:p-2.5">
-        <div className="grid min-w-0 grid-cols-1 gap-2 md:h-full md:min-h-0 md:grid-cols-[minmax(0,1fr)_clamp(252px,28vw,330px)] md:overflow-hidden xl:grid-cols-[minmax(0,1fr)_clamp(270px,27vw,360px)] 2xl:grid-cols-[112px_minmax(0,1fr)_360px]">
+        <div
+          ref={detailLayoutRef}
+          style={{ '--ai-panel-width': `${aiPanelWidth}px` } as CSSProperties}
+          className="grid min-w-0 grid-cols-1 gap-2 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(0,1fr)_12px_var(--ai-panel-width)] xl:gap-0 xl:overflow-hidden 2xl:grid-cols-[112px_minmax(0,1fr)_12px_var(--ai-panel-width)]"
+        >
         {/* README 目录 */}
         <nav className="hidden min-h-0 min-w-0 overflow-y-auto border-r border-outline-variant/20 pr-2 custom-scrollbar 2xl:block">
           <p className="mb-2 text-xs font-semibold text-on-surface">目录</p>
@@ -1638,8 +1500,19 @@ function RepoDetailPanel(props: {
           </div>
         </div>
 
+        <VerticalResizeHandle
+          value={aiPanelWidth}
+          min={AI_PANEL_MIN_WIDTH}
+          max={aiPanelMaxWidth}
+          defaultValue={Math.min(AI_PANEL_DEFAULT_WIDTH, aiPanelMaxWidth)}
+          label="调整 AI 项目知识卡宽度"
+          direction="reverse"
+          className="hidden xl:flex"
+          onChange={(value) => setAiPanelWidth(clampNumber(value, AI_PANEL_MIN_WIDTH, aiPanelMaxWidth))}
+        />
+
         {/* 右侧 AI 洞察栏 */}
-        <div className="min-h-[460px] min-w-0 md:min-h-0">
+        <div className="min-h-[460px] min-w-0 xl:min-h-0">
           <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-primary/20 bg-surface/80 p-2.5 shadow-sm backdrop-blur-sm">
             <div className="mb-2 flex shrink-0 items-start justify-between gap-2">
               <div className="min-w-0">

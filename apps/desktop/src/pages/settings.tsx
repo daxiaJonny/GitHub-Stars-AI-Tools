@@ -586,15 +586,6 @@ function GitHubSettings({
             {workspace.isSyncingStars ? '同步中...' : '同步 Stars'}
           </button>
           <button
-            onClick={() => void workspace.handleSyncStars({ forceFull: true })}
-            disabled={workspace.isSyncingStars || !isConnected}
-            title="重新扫描完整 Stars 列表，并清理已取消 Star 的本地仓库"
-            className="px-4 py-2 bg-surface-container-high hover:bg-surface-container-highest text-on-surface rounded-lg border border-card-border font-body-md flex items-center gap-2 transition-all disabled:opacity-60"
-          >
-            <Icon name="published_with_changes" size={18} className={workspace.isSyncingStars ? 'animate-spin' : ''} />
-            强制全量同步
-          </button>
-          <button
             onClick={() => {
               void (async () => {
                 if (settingsHook.settings.ai.enableAutoSummary && shouldFlushAiApiKey(settingsHook.settings.ai)) {
@@ -660,8 +651,7 @@ function GitHubSettings({
             <p className="font-body-md text-sm text-success">
               同步完成：活跃 {workspace.syncSummary.activeCount} 个，新增{' '}
               {workspace.syncSummary.createdCount} 个，更新 {workspace.syncSummary.updatedCount} 个，移除{' '}
-              {workspace.syncSummary.removedCount} 个，扫描 {workspace.syncSummary.scannedCount} 个，
-              {workspace.syncSummary.mode === 'incremental' ? '增量同步' : '全量同步'}。
+              {workspace.syncSummary.removedCount} 个，扫描 {workspace.syncSummary.scannedCount} 个。
             </p>
           </div>
         )}
@@ -727,7 +717,7 @@ function RuntimeReadinessPanel(props: {
       title: 'Stars 同步',
       done: totalRepos > 0,
       detail: totalRepos > 0 ? `本地已有 ${totalRepos} 个仓库` : '连接后执行同步 Stars',
-      actionLabel: props.isSyncingStars ? '同步中...' : totalRepos > 0 ? '增量同步' : '同步 Stars',
+      actionLabel: props.isSyncingStars ? '同步中...' : '同步 Stars',
       onAction: props.isConnected ? props.onSyncStars : null,
       actionDisabled: props.isSyncingStars,
     },
@@ -1821,9 +1811,9 @@ function GeneralSettings({
         </div>
         <div className="flex items-start justify-between gap-4 border-t border-card-border py-4">
           <div className="min-w-0 flex-1">
-            <h4 className="font-body-lg font-medium text-on-surface">自动增量同步</h4>
+            <h4 className="font-body-lg font-medium text-on-surface">自动同步</h4>
             <p className="font-body-md text-on-surface-variant mt-1">
-              应用启动后立即同步一次，并按设定间隔继续同步新增的 GitHub Stars。
+              应用启动后立即同步一次，并按设定间隔完整核对 GitHub Stars。
             </p>
           </div>
           <ToggleSwitch
