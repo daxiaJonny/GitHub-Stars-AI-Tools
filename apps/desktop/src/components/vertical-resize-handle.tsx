@@ -15,6 +15,8 @@ export function VerticalResizeHandle(props: {
   label: string;
   direction?: 'forward' | 'reverse';
   className?: string;
+  /** 所在容器的 CSS zoom 缩放（如 0.9）。指针位移是物理像素，需除以 scale 才能让面板边缘跟随光标。 */
+  scale?: number;
   onChange: (value: number) => void;
 }) {
   const [isDragging, setIsDragging] = useState(false);
@@ -40,8 +42,9 @@ export function VerticalResizeHandle(props: {
     const resizeState = resizeStateRef.current;
     if (!resizeState || resizeState.pointerId !== event.pointerId) return;
     const directionFactor = props.direction === 'reverse' ? -1 : 1;
+    const scale = props.scale ?? 1;
     props.onChange(clamp(
-      resizeState.startValue + (event.clientX - resizeState.startX) * directionFactor,
+      resizeState.startValue + ((event.clientX - resizeState.startX) * directionFactor) / scale,
       props.min,
       props.max,
     ));
@@ -58,7 +61,7 @@ export function VerticalResizeHandle(props: {
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    const step = event.shiftKey ? 32 : 12;
+    const step = (event.shiftKey ? 32 : 12) / (props.scale ?? 1);
     const directionFactor = props.direction === 'reverse' ? -1 : 1;
     let nextValue: number | null = null;
     if (event.key === 'ArrowLeft') nextValue = props.value - step * directionFactor;

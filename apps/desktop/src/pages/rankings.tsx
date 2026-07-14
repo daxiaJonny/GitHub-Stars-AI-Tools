@@ -20,51 +20,45 @@ export function RankingsPage(props: RankingsPageProps) {
   const [section, setSection] = useState<RankingSection>('global');
   const accountId = workspace.authState.user ? String(workspace.authState.user.id) : null;
 
-  return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background md:flex-row" aria-label="排行榜">
-      <aside className="shrink-0 border-b border-outline-variant/25 bg-surface md:w-[176px] md:border-b-0 md:border-r" aria-label="排行榜分类">
-        <div className="hidden border-b border-outline-variant/20 px-4 py-4 md:block">
-          <div className="flex items-center gap-2 text-on-surface">
-            <Icon name="leaderboard" size={19} className="text-primary" />
-            <h1 className="text-sm font-semibold">排行榜</h1>
-          </div>
-          <p className="mt-1 text-[11px] leading-5 text-on-surface-variant">公开项目与个人收藏分开查看</p>
-        </div>
-        <nav className="flex gap-1 overflow-x-auto p-2 md:flex-col md:p-3">
-          {RANKING_SECTIONS.map((item) => (
-            <button
-              key={item.value}
-              type="button"
-              onClick={() => setSection(item.value)}
-              className={`flex min-w-[150px] items-center gap-2 rounded-md px-3 py-2.5 text-left transition-colors md:min-w-0 ${section === item.value ? 'bg-primary/10 text-primary' : 'text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface'}`}
-              aria-current={section === item.value ? 'page' : undefined}
-            >
-              <Icon name={item.icon} size={18} fill={section === item.value} />
-              <span className="min-w-0">
-                <span className="block text-xs font-semibold">{item.label}</span>
-                <span className="mt-0.5 hidden truncate text-[10px] font-normal opacity-80 md:block">{item.description}</span>
-              </span>
-            </button>
-          ))}
-        </nav>
-      </aside>
+  const pageHeader = (
+    <div className="min-w-0">
+      <h1 className="text-2xl font-bold tracking-tight text-on-surface">排行榜</h1>
+      <p className="mt-1 text-sm text-on-surface-variant">发现活跃开源项目，也可以查看个人 GitHub Stars 排名</p>
+      <div className="mt-4 inline-flex items-center gap-1 rounded-lg border border-outline-variant/30 bg-surface-container-low p-1">
+        {RANKING_SECTIONS.map((item) => (
+          <button
+            key={item.value}
+            type="button"
+            onClick={() => setSection(item.value)}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-sm font-semibold transition-colors ${
+              section === item.value ? 'bg-primary text-white shadow-sm' : 'text-on-surface-variant hover:text-on-surface'
+            }`}
+            aria-pressed={section === item.value}
+          >
+            <Icon name={item.icon} size={16} fill={section === item.value} />
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 
-      <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
-        {!accountId ? (
-          <RankingConnectionRequired onOpenSettings={props.onOpenSettings} />
-        ) : section === 'global' ? (
-          <GlobalRankings accountId={accountId} />
-        ) : (
-          <PersonalRankings accountId={accountId} languages={workspace.repositoryLanguages} />
-        )}
-      </main>
+  return (
+    <section className="rankings-page flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background" aria-label="排行榜">
+      {!accountId ? (
+        <RankingConnectionRequired onOpenSettings={props.onOpenSettings} />
+      ) : section === 'global' ? (
+        <GlobalRankings accountId={accountId} pageHeader={pageHeader} />
+      ) : (
+        <PersonalRankings accountId={accountId} languages={workspace.repositoryLanguages} pageHeader={pageHeader} />
+      )}
     </section>
   );
 }
 
 function RankingConnectionRequired(props: { onOpenSettings: () => void }) {
   return (
-    <div className="flex h-full min-h-[420px] items-center justify-center bg-background px-6 text-center">
+    <div className="rankings-page flex h-full min-h-[420px] items-center justify-center bg-background px-6 text-center">
       <div className="max-w-sm">
         <span className="mx-auto flex size-11 items-center justify-center rounded-md bg-primary/10 text-primary">
           <Icon name="leaderboard" size={24} />

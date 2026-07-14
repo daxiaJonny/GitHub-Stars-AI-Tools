@@ -113,6 +113,8 @@ const REPOSITORY_CARD_HEIGHT = 92;
 const REPOSITORY_CARD_GAP = 4;
 const REPOSITORY_ROW_HEIGHT = REPOSITORY_CARD_HEIGHT + REPOSITORY_CARD_GAP;
 const REPOSITORY_TABLE_ROW_HEIGHT = 54;
+/** 与 styles.css `.repositories-page { zoom }` 保持一致：用于补偿列宽拖拽在缩放下的位移。 */
+const REPOSITORY_PAGE_ZOOM = 0.9;
 const REPOSITORY_TABLE_HEADER_HEIGHT = 30;
 const LIST_OVERSCAN = 8;
 const MAX_RECOMMENDATION_SELECTION = 8;
@@ -350,7 +352,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
     <div
       ref={workspaceLayoutRef}
       style={!isRepositoryListCollapsed ? { '--repository-list-width': `${repositoryListWidth}px` } as CSSProperties : undefined}
-      className={`relative grid h-full min-w-0 flex-1 content-start grid-cols-1 overflow-y-auto p-3 text-[13px] md:min-h-0 md:content-stretch md:overflow-hidden ${
+      className={`repositories-page relative grid h-full min-w-0 flex-1 content-start grid-cols-1 overflow-y-auto p-3 text-[13px] md:min-h-0 md:content-stretch md:overflow-hidden ${
         isRepositoryListCollapsed
           ? 'gap-3 md:grid-cols-[56px_minmax(0,1fr)]'
           : 'gap-3 md:grid-cols-[var(--repository-list-width)_12px_minmax(0,1fr)] md:gap-0'
@@ -421,38 +423,40 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
               </button>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setIsRecommendationSelectionMode((current) => {
-                if (current) {
-                  setRecommendationSelection(new Set());
-                } else {
-                  setIsRepositoryListCollapsed(false);
-                }
-                return !current;
-              });
-            }}
-            className={`mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
-              isRecommendationSelectionMode
-                ? 'border-primary/35 bg-primary/10 text-primary'
-                : 'border-outline-variant/30 bg-surface text-on-surface-variant hover:border-primary/35 hover:text-primary'
-            }`}
-            aria-pressed={isRecommendationSelectionMode}
-          >
-            <Icon name={isRecommendationSelectionMode ? 'close' : 'travel_explore'} size={15} />
-            {isRecommendationSelectionMode ? '退出发现选择' : '选择用于发现'}
-          </button>
-          <button
-            type="button"
-            onClick={() => setIsRepositoryListCollapsed(true)}
-            className="mb-2 hidden w-full items-center justify-center gap-1.5 rounded-md border border-primary/25 bg-primary/10 px-2.5 py-1.5 text-xs font-semibold text-primary shadow-sm transition-colors hover:border-primary/45 hover:bg-primary/15 md:flex"
-            title="收起 Star 列表"
-            aria-label="收起 Star 列表"
-          >
-            <Icon name="left_panel_close" size={15} />
-            收起 Star 列表
-          </button>
+          <div className="mb-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => {
+                setIsRecommendationSelectionMode((current) => {
+                  if (current) {
+                    setRecommendationSelection(new Set());
+                  } else {
+                    setIsRepositoryListCollapsed(false);
+                  }
+                  return !current;
+                });
+              }}
+              className={`flex w-full items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                isRecommendationSelectionMode
+                  ? 'border-primary/35 bg-primary/10 text-primary'
+                  : 'border-outline-variant/30 bg-surface text-on-surface-variant hover:border-primary/35 hover:text-primary'
+              }`}
+              aria-pressed={isRecommendationSelectionMode}
+            >
+              <Icon name={isRecommendationSelectionMode ? 'close' : 'travel_explore'} size={15} />
+              {isRecommendationSelectionMode ? '退出发现选择' : '选择用于发现'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsRepositoryListCollapsed(true)}
+              className="hidden w-full items-center justify-center gap-1.5 rounded-md border border-outline-variant/30 bg-surface px-2.5 py-1.5 text-xs font-semibold text-on-surface-variant transition-colors hover:border-primary/35 hover:text-primary md:flex"
+              title="收起 Star 列表"
+              aria-label="收起 Star 列表"
+            >
+              <Icon name="left_panel_close" size={15} />
+              收起 Star 列表
+            </button>
+          </div>
           <div className="mb-2 overflow-hidden rounded-md border border-primary/25 bg-primary/5">
             <button
               type="button"
@@ -464,10 +468,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
                 <Icon name="bolt" size={15} />
                 批量处理
               </span>
-              <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-normal text-primary/80">
-                {isBatchPanelOpen ? '点击收起' : '点击展开'}
-                <Icon name="expand_more" size={15} className={`transition-transform ${isBatchPanelOpen ? 'rotate-180' : ''}`} />
-              </span>
+              <Icon name="expand_more" size={16} className={`shrink-0 text-primary/80 transition-transform ${isBatchPanelOpen ? 'rotate-180' : ''}`} />
             </button>
             {isBatchPanelOpen && (
             <div className="border-t border-primary/15 px-1 pb-1">
@@ -625,7 +626,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
           </div>
 
           {/* 快捷标签 */}
-          <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1 custom-scrollbar">
+          <div className="mt-2 flex flex-wrap gap-1.5">
             <button
               onClick={() => setSelectedTagId('')}
               className="whitespace-nowrap rounded-full bg-primary-container px-2 py-0.5 text-[11px] font-medium text-white transition-all cursor-pointer hover:brightness-110"
@@ -636,8 +637,10 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
               <button
                 key={tag.id}
                 onClick={() => setSelectedTagId(selectedTagId === tag.id ? '' : tag.id)}
-                className={`whitespace-nowrap rounded-full border border-outline-variant/30 px-2 py-0.5 text-[11px] font-medium transition-all cursor-pointer hover:bg-surface-variant/50 ${
-                  selectedTagId === tag.id ? 'bg-primary text-white' : 'text-on-surface'
+                className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium transition-all cursor-pointer ${
+                  selectedTagId === tag.id
+                    ? 'border-primary bg-primary text-white hover:brightness-110'
+                    : 'border-outline-variant/30 text-on-surface hover:bg-surface-variant/50'
                 }`}
               >
                 {tag.name}
@@ -732,6 +735,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
           defaultValue={Math.min(REPOSITORY_LIST_DEFAULT_WIDTH, repositoryListMaxWidth)}
           label="调整 Star 列表宽度"
           className="hidden md:flex"
+          scale={REPOSITORY_PAGE_ZOOM}
           onChange={(value) => setRepositoryListWidth(clampNumber(value, REPOSITORY_LIST_MIN_WIDTH, repositoryListMaxWidth))}
         />
       ) : null}
@@ -1508,6 +1512,7 @@ function RepoDetailPanel(props: {
           label="调整 AI 项目知识卡宽度"
           direction="reverse"
           className="hidden xl:flex"
+          scale={REPOSITORY_PAGE_ZOOM}
           onChange={(value) => setAiPanelWidth(clampNumber(value, AI_PANEL_MIN_WIDTH, aiPanelMaxWidth))}
         />
 

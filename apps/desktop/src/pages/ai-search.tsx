@@ -581,7 +581,7 @@ export function AISearchPage(props: AISearchPageProps) {
   }
 
   return (
-    <div className="h-full overflow-hidden">
+    <div className="ai-search-page h-full overflow-hidden">
       {isWorkspaceMode && hasActiveSession ? (
         <div className="flex h-full flex-col gap-4 p-4 sm:p-5 lg:p-6">
           <div className="flex flex-col gap-3 border-b border-outline-variant/30 pb-3 sm:flex-row sm:items-center sm:justify-between">
@@ -594,12 +594,12 @@ export function AISearchPage(props: AISearchPageProps) {
                 <Icon name="arrow_back" size={16} />
                 返回搜索主页
               </button>
-              <h2 className="truncate text-lg font-semibold text-on-surface">
+              <h2 className="truncate text-2xl font-bold tracking-tight text-on-surface">
                 {submittedQuery || '智能知识搜索'}
               </h2>
             </div>
-            <div className="flex shrink-0 items-center gap-2 text-xs text-on-surface-variant">
-              <span className="rounded-full border border-outline-variant/30 bg-surface-container-low px-2.5 py-1">
+            <div className="flex shrink-0 items-center gap-2 text-xs">
+              <span className="rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 font-medium text-primary">
                 {response ? `${response.totalCount} 个结果` : isSearching ? '正在搜索' : '等待搜索'}
               </span>
               {response?.aiEnhanced && (

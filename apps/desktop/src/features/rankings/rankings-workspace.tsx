@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
 import { Icon } from '@/components/ui/icon';
@@ -19,6 +19,7 @@ export function RankingsWorkspace(props: {
   command: 'list_github_rankings' | 'list_personal_rankings';
   title: string;
   description: string;
+  pageHeader?: ReactNode;
   kindOptions: RankingKindOption[];
   languageOptions: string[];
   allowRefresh: boolean;
@@ -69,6 +70,7 @@ export function RankingsWorkspace(props: {
     [page?.items, selectedFullName],
   );
   const pageCount = Math.max(1, Math.ceil((page?.totalCount ?? 0) / PAGE_SIZE));
+  const activeKind = props.kindOptions.find((option) => option.value === kind);
 
   async function handleStar(repository: RankingItem) {
     setPendingStarFullNames((current) => new Set(current).add(repository.fullName));
@@ -108,12 +110,14 @@ export function RankingsWorkspace(props: {
     <div className="flex h-full min-h-0 min-w-0 flex-col bg-background">
       <header className="shrink-0 border-b border-outline-variant/25 bg-surface px-4 py-4 sm:px-5">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div className="min-w-0">
-            <h1 className="text-lg font-semibold text-on-surface">{props.title}</h1>
-            <p className="mt-1 max-w-3xl text-xs leading-5 text-on-surface-variant">{props.description}</p>
-          </div>
+          {props.pageHeader ?? (
+            <div className="min-w-0">
+              <h1 className="text-lg font-semibold text-on-surface">{props.title}</h1>
+              <p className="mt-1 max-w-3xl text-xs leading-5 text-on-surface-variant">{props.description}</p>
+            </div>
+          )}
           {props.allowRefresh ? (
-            <Button size="sm" variant="outline" disabled={isRefreshing || isLoading} onClick={() => void loadRankings(true)}>
+            <Button size="sm" variant="outline" className="shrink-0" disabled={isRefreshing || isLoading} onClick={() => void loadRankings(true)}>
               <Icon name={isRefreshing ? 'progress_activity' : 'refresh'} size={15} className={isRefreshing ? 'animate-spin' : ''} />
               {isRefreshing ? '刷新中' : '刷新榜单'}
             </Button>
@@ -127,7 +131,7 @@ export function RankingsWorkspace(props: {
                 key={option.value}
                 type="button"
                 onClick={() => changeKind(option.value)}
-                className={`shrink-0 border-b-2 px-3 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${kind === option.value ? 'border-primary text-primary' : 'border-transparent text-on-surface-variant hover:text-on-surface'}`}
+                className={`shrink-0 border-b-2 px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${kind === option.value ? 'border-primary text-primary' : 'border-transparent text-on-surface-variant hover:text-on-surface'}`}
                 aria-pressed={kind === option.value}
                 title={option.description}
               >
@@ -147,6 +151,13 @@ export function RankingsWorkspace(props: {
             </select>
           </label>
         </div>
+
+        {activeKind?.description ? (
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs leading-5 text-on-surface-variant">
+            <Icon name="info" size={15} className="mt-px shrink-0 text-primary" />
+            <span><span className="font-medium text-on-surface">{activeKind.label}</span> · {activeKind.description}</span>
+          </div>
+        ) : null}
       </header>
 
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
