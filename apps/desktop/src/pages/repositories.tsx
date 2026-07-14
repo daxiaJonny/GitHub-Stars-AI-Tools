@@ -128,6 +128,11 @@ const AI_PANEL_MAX_WIDTH = 540;
 const README_PANEL_MIN_WIDTH = 420;
 const RESIZE_HANDLE_WIDTH = 12;
 
+/** 将受 `.repositories-page` 缩放影响的物理测量宽度还原为布局宽度。 */
+function getRepositoryLayoutWidth(measuredWidth: number) {
+  return measuredWidth > 0 ? measuredWidth / REPOSITORY_PAGE_ZOOM : 0;
+}
+
 type RepositoriesPageProps = {
   navigationKey?: number;
   globalSearchQuery?: string;
@@ -155,12 +160,13 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
   const [repositoryListWidth, setRepositoryListWidth] = usePersistentPanelWidth('gsat.repository-list-width', REPOSITORY_LIST_DEFAULT_WIDTH);
   const [workspaceLayoutRef, workspaceLayoutWidth] = useObservedElementWidth<HTMLDivElement>();
   const listViewportRef = useRef<HTMLDivElement | null>(null);
+  const repositoryLayoutWidth = getRepositoryLayoutWidth(workspaceLayoutWidth);
   const repositoryListMaxWidth = Math.max(
     REPOSITORY_LIST_MIN_WIDTH,
-    workspaceLayoutWidth > 0
+    repositoryLayoutWidth > 0
       ? Math.min(
           REPOSITORY_LIST_MAX_WIDTH,
-          workspaceLayoutWidth - REPOSITORY_DETAIL_MIN_WIDTH - RESIZE_HANDLE_WIDTH - 24,
+          repositoryLayoutWidth - REPOSITORY_DETAIL_MIN_WIDTH - RESIZE_HANDLE_WIDTH - 24,
         )
       : REPOSITORY_LIST_MAX_WIDTH,
   );
@@ -1291,12 +1297,13 @@ function RepoDetailPanel(props: {
   const [aiPanelWidth, setAiPanelWidth] = usePersistentPanelWidth('gsat.ai-knowledge-panel-width', AI_PANEL_DEFAULT_WIDTH);
   const [detailLayoutRef, detailLayoutWidth] = useObservedElementWidth<HTMLDivElement>();
   const tableOfContentsWidth = typeof window !== 'undefined' && window.innerWidth >= 1536 ? 120 : 0;
+  const detailLayoutLogicalWidth = getRepositoryLayoutWidth(detailLayoutWidth);
   const aiPanelMaxWidth = Math.max(
     AI_PANEL_MIN_WIDTH,
-    detailLayoutWidth > 0
+    detailLayoutLogicalWidth > 0
       ? Math.min(
           AI_PANEL_MAX_WIDTH,
-          detailLayoutWidth - README_PANEL_MIN_WIDTH - RESIZE_HANDLE_WIDTH - tableOfContentsWidth,
+          detailLayoutLogicalWidth - README_PANEL_MIN_WIDTH - RESIZE_HANDLE_WIDTH - tableOfContentsWidth,
         )
       : AI_PANEL_MAX_WIDTH,
   );
