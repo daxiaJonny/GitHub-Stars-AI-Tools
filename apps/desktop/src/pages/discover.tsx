@@ -143,8 +143,8 @@ export function DiscoverPage(props: DiscoverPageProps) {
   }
 
   return (
-    <section className="h-full min-w-0 overflow-y-auto bg-background p-4 sm:p-5 lg:p-6">
-      <div className="mx-auto flex min-h-full w-full max-w-[min(1400px,100%)] flex-col gap-4">
+    <section className="discover-page h-full min-w-0 overflow-y-auto bg-background p-4 sm:p-5 lg:p-6">
+      <div className="mx-auto flex min-h-full w-full max-w-[min(1600px,100%)] flex-col gap-4">
       <header className="shrink-0">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div className="min-w-0">
@@ -329,7 +329,7 @@ function DiscoverEmptyState(props: {
   onAction: () => void;
 }) {
   return (
-    <div className="flex h-full min-h-[320px] flex-col items-center justify-center px-6 text-center">
+    <div className="discover-page flex h-full min-h-[320px] flex-col items-center justify-center bg-background px-6 text-center">
       <span className="flex size-12 items-center justify-center rounded-lg bg-surface-container text-on-surface-variant">
         <Icon name={props.icon} size={26} />
       </span>

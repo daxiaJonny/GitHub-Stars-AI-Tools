@@ -516,45 +516,224 @@ textarea {
 }
 
 /* ===========================================================================
- * 欢迎页扁平化样式
+ * 欢迎页样式（按设计稿重构）
  * =========================================================================*/
 .welcome-surface {
-  background: var(--color-background);
+  /* 布局尺寸（以 Tauri 1280 × 820 窗口为基准） */
+  --welcome-sidebar-width: 288px;
+  --welcome-panel-radius: 20px;
+  /* 固定尺寸：此 WebView 下 vw 解析异常，clamp(vw) 会塌到最小值，故改用固定值 + 媒体查询 */
+  --welcome-panel-padding: 44px;
+
+  /* 颜色：浅色使用设计稿值，暗色见 .dark 覆盖 */
+  --welcome-bg: #f7f8fc;
+  --welcome-grid-line: rgb(148 163 184 / 0.14);
+  --welcome-primary: #2563eb;
+  --welcome-primary-hover: #1d4ed8;
+  --welcome-border-active: #4f7cff;
+
+  /* 仅在欢迎子树内统一主色与卡片边框，使其贴合设计稿 */
+  --color-primary: var(--welcome-primary);
+  --color-card-border: #e2e8f0;
+
+  background: var(--welcome-bg);
 }
 
+.dark .welcome-surface {
+  --welcome-bg: var(--color-surface-dim);
+  --welcome-grid-line: rgb(148 163 184 / 0.08);
+  --color-card-border: #2a3040;
+}
+
+/* 固定网格背景 */
 .welcome-surface::before {
   content: '';
   position: fixed;
   inset: 0;
   pointer-events: none;
-  opacity: 0.16;
   background-image:
-    linear-gradient(color-mix(in oklab, var(--color-outline-variant) 48%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in oklab, var(--color-outline-variant) 48%, transparent) 1px, transparent 1px);
+    linear-gradient(var(--welcome-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--welcome-grid-line) 1px, transparent 1px);
   background-size: 32px 32px;
-  mask-image: linear-gradient(to bottom, black, transparent 75%);
+  mask-image: linear-gradient(to bottom, black, transparent 82%);
 }
 
-.welcome-card,
-.welcome-progress-panel {
+/* 右侧主面板 */
+.welcome-panel {
+  border-radius: var(--welcome-panel-radius);
+  border: 1px solid var(--color-card-border);
+  background: var(--color-surface-container-lowest);
+  padding: var(--welcome-panel-padding);
+  box-shadow: 0 18px 48px -20px rgb(31 55 101 / 0.22);
   animation: welcomePanelIn 320ms var(--ease-out) both;
-  box-shadow: none;
+}
+
+@media (min-width: 960px) {
+  .welcome-panel {
+    display: flex;
+    flex-direction: column;
+  }
+  /* 仅让静态的欢迎首屏在面板内垂直居中；连接/同步/完成等动态步骤顶对齐，
+     避免同步进度卡变高变矮时整块反复重新居中导致抖动 */
+  .welcome-panel > .welcome-hero {
+    margin-block: auto;
+  }
+  /* align-content:center 让 [步骤栏 | 面板] 在更高的视口里整体居中，而不是被拉满，
+     从而在大屏/全屏下面板封顶居中、内容不悬浮 */
+  .welcome-body {
+    align-content: center;
+  }
+}
+@media (min-width: 960px) and (min-height: 820px) {
+  /* 达到基准窗口高度时面板填满一屏；更高的屏幕上由 align-content:center 封顶居中。
+     用固定值而非 calc(100vh)/min()，规避该 WebView 对视口单位参与 CSS 计算时的解析异常。 */
+  .welcome-panel {
+    min-height: 692px;
+  }
 }
 
 .welcome-step-panel {
   animation: welcomeStepIn 360ms var(--ease-out) both;
 }
 
-.welcome-icon-tile {
-  animation: welcomeIconIn 260ms var(--ease-out) both;
-}
-
 .welcome-message {
   animation: welcomeMessageIn 240ms var(--ease-out) both;
 }
 
-.dark .welcome-surface::before {
-  opacity: 0.1;
+/* 左侧步骤栏：计数徽标 */
+.welcome-step-count {
+  background: color-mix(in oklab, var(--color-on-surface) 8%, transparent);
+  color: var(--color-on-surface-variant);
+}
+
+/* 当前步骤高亮块 */
+.welcome-step-highlight {
+  border: 1px solid color-mix(in oklab, var(--welcome-border-active) 60%, transparent);
+  background: color-mix(in oklab, var(--welcome-primary) 8%, transparent);
+}
+
+/* 步骤圆点 */
+.welcome-step-dot[data-state='active'],
+.welcome-step-dot[data-state='done'] {
+  background: var(--welcome-primary);
+  color: #fff;
+}
+
+.welcome-step-dot[data-state='todo'] {
+  background: var(--color-surface-container-lowest);
+  border: 1.5px solid var(--color-outline-variant);
+  color: var(--color-on-surface-variant);
+}
+
+/* 纵向连接虚线（延伸进上下行内边距以保持连续） */
+.welcome-step-line {
+  position: absolute;
+  left: 50%;
+  width: 0;
+  transform: translateX(-50%);
+  border-left: 1.5px dashed var(--color-outline-variant);
+}
+.welcome-step-line--top {
+  top: -11px;
+  bottom: calc(50% + 18px);
+}
+.welcome-step-line--bottom {
+  top: calc(50% + 18px);
+  bottom: -11px;
+}
+
+/* 窄屏横向连接线 */
+.welcome-step-hline {
+  background: var(--color-outline-variant);
+}
+
+/* 步骤名与图标随状态变色 */
+.welcome-sidebar li[data-state='active'] .welcome-step-label {
+  color: var(--color-on-surface);
+}
+.welcome-sidebar li[data-state='active'] .welcome-step-icon {
+  color: var(--welcome-primary);
+}
+.welcome-sidebar li[data-state='done'] .welcome-step-label,
+.welcome-sidebar li[data-state='done'] .welcome-step-icon,
+.welcome-sidebar li[data-state='todo'] .welcome-step-label,
+.welcome-sidebar li[data-state='todo'] .welcome-step-icon {
+  color: var(--color-on-surface-variant);
+}
+
+/* 面板内“步骤 N / 4”徽标 */
+.welcome-step-badge {
+  background: color-mix(in oklab, var(--welcome-primary) 12%, transparent);
+  color: var(--welcome-primary);
+}
+
+/* Hero 文案（固定字号，避免 vw 塌缩） */
+.welcome-hero-title {
+  font-family: var(--font-headline-lg);
+  font-size: 46px;
+  font-weight: 800;
+  line-height: 1.16;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+.welcome-hero-subtitle {
+  font-size: 17px;
+  line-height: 1.7;
+}
+
+/* 步骤 2-4 标题 */
+.welcome-step-title {
+  font-family: var(--font-headline-lg);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+/* 响应式字号与内边距（媒体查询按视口宽度，可靠触发） */
+@media (max-width: 900px) {
+  .welcome-surface {
+    --welcome-panel-padding: 32px;
+  }
+  .welcome-hero-title {
+    font-size: 38px;
+  }
+}
+@media (max-width: 680px) {
+  .welcome-surface {
+    --welcome-panel-padding: 24px;
+  }
+  .welcome-hero-title {
+    font-size: 30px;
+  }
+  .welcome-step-title {
+    font-size: 24px;
+  }
+}
+
+/* 功能卡 hover */
+.welcome-feature-card:hover {
+  border-color: color-mix(in oklab, var(--welcome-primary) 35%, transparent);
+  background: color-mix(in oklab, var(--welcome-primary) 5%, transparent);
+}
+.welcome-feature-card:hover .welcome-feature-icon {
+  background: color-mix(in oklab, var(--welcome-primary) 16%, transparent);
+}
+
+/* 欢迎页主按钮：使用设计稿蓝 */
+.welcome-cta {
+  background: var(--welcome-primary);
+  color: #fff;
+  box-shadow: 0 10px 24px -12px color-mix(in oklab, var(--welcome-primary) 70%, transparent);
+}
+.welcome-cta:hover {
+  background: var(--welcome-primary-hover);
+}
+
+/* 窗口高度较小时允许滚动并隐藏装饰插画 */
+@media (max-height: 680px) {
+  .welcome-hero-art {
+    display: none;
+  }
 }
 
 @keyframes welcomePanelIn {
@@ -572,17 +751,6 @@ textarea {
   from {
     opacity: 0;
     transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes welcomeIconIn {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
   }
   to {
     opacity: 1;
@@ -610,4 +778,307 @@ textarea {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
+}
+
+/* ===========================================================================
+ * 标签网络页（按设计稿重构）
+ * 在页面子树内覆盖语义 token 至设计稿浅色系，保持主题感知（暗色见 .dark 覆盖）
+ * =========================================================================*/
+.tag-network-page {
+  --color-on-surface: #172033;
+  --color-on-surface-variant: #687386;
+  --color-primary: #2563eb;
+  --color-card-border: #e6eaf0;
+  --color-outline-variant: #e6eaf0;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f8faff;
+  --color-surface-container: #eef2f8;
+  --color-success: #169b62;
+
+  --tn-primary: #2563eb;
+  --tn-primary-soft: #eef4ff;
+  --tn-group-high: #4f7cff;
+  --tn-group-common: #10b981;
+  --tn-group-light: #f59e0b;
+  --tn-panel-shadow: 0 12px 32px rgb(30 52 90 / 0.06);
+
+  background: #f6f8fc;
+  color: var(--color-on-surface);
+}
+
+.dark .tag-network-page {
+  --color-on-surface: #f2f4fb;
+  --color-on-surface-variant: #c6cad6;
+  --color-primary: #6f9bff;
+  --color-card-border: #2a3040;
+  --color-outline-variant: #2a3040;
+  --color-surface-container-lowest: #12151b;
+  --color-surface-container-low: #171a21;
+  --color-surface-container: #1d2028;
+
+  --tn-primary: #6f9bff;
+  --tn-primary-soft: rgb(37 99 235 / 0.16);
+  --tn-panel-shadow: 0 12px 32px rgb(0 0 0 / 0.3);
+
+  background: #0d0f14;
+}
+
+/* 扁平白卡（替代 glass-card） */
+.tn-panel {
+  border: 1px solid var(--color-card-border);
+  border-radius: 12px;
+  background: var(--color-surface-container-lowest);
+  box-shadow: var(--tn-panel-shadow);
+}
+
+/* 分段控件 */
+.tn-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--color-card-border);
+  border-radius: 9px;
+  background: var(--color-surface-container-low);
+}
+.tn-seg > button {
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-on-surface-variant);
+  transition: background-color 0.15s, color 0.15s;
+}
+.tn-seg > button:hover {
+  color: var(--color-on-surface);
+}
+.tn-seg > button[data-active='true'] {
+  background: var(--color-surface-container-lowest);
+  color: var(--tn-primary);
+  box-shadow: 0 1px 2px rgb(30 52 90 / 0.12);
+}
+
+/* 热门标签热度条 */
+.tn-heatbar {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--tn-primary) 14%, transparent);
+  overflow: hidden;
+}
+.tn-heatbar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, color-mix(in oklab, var(--tn-primary) 70%, white), var(--tn-primary));
+}
+
+/* 图谱节点 hover/focus 光环 */
+.tag-network-node {
+  outline: none;
+}
+.tag-network-node:hover,
+.tag-network-node:focus-visible {
+  filter: drop-shadow(0 0 5px rgb(79 124 255 / 0.4));
+}
+
+/* 分组卡 chip（按分组着色） */
+.tn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  transition: filter 0.15s;
+}
+.tn-chip:hover {
+  filter: brightness(0.97);
+}
+.tn-group-high .tn-chip {
+  color: #2f4bbf;
+  background: rgb(79 124 255 / 0.1);
+  border-color: rgb(79 124 255 / 0.22);
+}
+.tn-group-common .tn-chip {
+  color: #0b7a52;
+  background: rgb(16 185 129 / 0.1);
+  border-color: rgb(16 185 129 / 0.22);
+}
+.tn-group-light .tn-chip {
+  color: #a86711;
+  background: rgb(245 158 11 / 0.12);
+  border-color: rgb(245 158 11 / 0.24);
+}
+.dark .tn-group-high .tn-chip {
+  color: #9db8ff;
+}
+.dark .tn-group-common .tn-chip {
+  color: #6ee7b7;
+}
+.dark .tn-group-light .tn-chip {
+  color: #fbbf24;
+}
+
+/* ===========================================================================
+ * AI 搜索页（按设计稿重构）
+ * 结构已与设计稿一致，主要在页面子树内覆盖语义 token 至设计稿浅色系
+ * =========================================================================*/
+.ai-search-page {
+  --color-on-surface: #172033;
+  --color-on-surface-variant: #687386;
+  --color-primary: #2563eb;
+  --color-card-border: #e6eaf0;
+  --color-outline-variant: #e6eaf0;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f8faff;
+  --color-surface-container: #eef2f8;
+  --color-surface-container-high: #e6ecf5;
+  --color-success: #169b62;
+  --color-warning: #c57a16;
+  --color-error: #d14343;
+
+  background: #f6f8fc;
+  color: var(--color-on-surface);
+}
+
+.dark .ai-search-page {
+  --color-on-surface: #f2f4fb;
+  --color-on-surface-variant: #c6cad6;
+  --color-primary: #6f9bff;
+  --color-card-border: #2a3040;
+  --color-outline-variant: #2a3040;
+  --color-surface-container-lowest: #12151b;
+  --color-surface-container-low: #171a21;
+  --color-surface-container: #1d2028;
+  --color-surface-container-high: #282c35;
+
+  background: #0d0f14;
+}
+
+/* 页面内把玻璃拟态卡片压平为设计稿的扁平白卡 */
+.ai-search-page .glass-panel,
+.ai-search-page .glass-card {
+  background: var(--color-surface-container-lowest);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: var(--color-card-border);
+  box-shadow: none;
+}
+
+/* 搜索框/追问框自身不再显示全局 :focus-visible 的描边——聚焦态由外层容器边框表达，
+   否则会在容器蓝框内再套一层带间距的蓝框，显得重复不协调。
+   （此处必须是未分层规则，才能盖过同为未分层的全局 :focus-visible） */
+.ai-search-page input:focus-visible,
+.ai-search-page textarea:focus-visible {
+  outline: none;
+}
+
+/* ===========================================================================
+ * 全部仓库页 v2（按设计稿重构）
+ * 三栏结构已就位，主要在页面子树内覆盖语义 token 至设计稿浅色系
+ * =========================================================================*/
+.repositories-page {
+  --color-on-surface: #172033;
+  --color-on-surface-variant: #687386;
+  --color-primary: #2563eb;
+  --color-primary-container: #2563eb;
+  --color-card-border: #e6eaf0;
+  --color-outline-variant: #e6eaf0;
+  --color-surface: #ffffff;
+  --color-surface-variant: #eef2f8;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f8faff;
+  --color-surface-container: #eef2f8;
+  --color-surface-container-high: #e6ecf5;
+  --color-success: #169b62;
+  --color-warning: #c57a16;
+  --color-error: #d14343;
+
+  background: #f6f8fc;
+  color: var(--color-on-surface);
+  /* 设计稿即“同一套代码 @ 0.9 缩放”的紧凑版；上游用可调列宽换掉了旧的整体缩放，
+     这里重新加回。列宽拖拽在 VerticalResizeHandle 里用 scale 反向补偿，避免错位。
+     注意：改这里的 0.9 时，repositories.tsx 传给两个 VerticalResizeHandle 的 scale 要同步。 */
+  zoom: 0.9;
+}
+
+.dark .repositories-page {
+  --color-on-surface: #f2f4fb;
+  --color-on-surface-variant: #c6cad6;
+  --color-primary: #6f9bff;
+  --color-primary-container: #2563eb;
+  --color-card-border: #2a3040;
+  --color-outline-variant: #2a3040;
+  --color-surface: #12151b;
+  --color-surface-variant: #1d2028;
+  --color-surface-container-lowest: #12151b;
+  --color-surface-container-low: #171a21;
+  --color-surface-container: #1d2028;
+  --color-surface-container-high: #282c35;
+
+  background: #0d0f14;
+}
+
+/* 页面内把玻璃拟态卡片压平为扁平白卡 */
+.repositories-page .glass-panel,
+.repositories-page .glass-card {
+  background: var(--color-surface-container-lowest);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: var(--color-card-border);
+}
+
+/* ===========================================================================
+ * 发现页 / 排行榜页（按设计稿重构·作用域 token）
+ * 这两页用 bg-background，故一并覆盖 --color-background
+ * =========================================================================*/
+.discover-page,
+.rankings-page {
+  --color-background: #f6f8fc;
+  --color-on-surface: #172033;
+  --color-on-surface-variant: #687386;
+  --color-primary: #2563eb;
+  --color-primary-container: #2563eb;
+  --color-card-border: #e6eaf0;
+  --color-outline-variant: #e6eaf0;
+  --color-surface: #ffffff;
+  --color-surface-variant: #eef2f8;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f8faff;
+  --color-surface-container: #eef2f8;
+  --color-surface-container-high: #e6ecf5;
+  --color-success: #169b62;
+  --color-warning: #c57a16;
+  --color-error: #d14343;
+
+  color: var(--color-on-surface);
+}
+
+.dark .discover-page,
+.dark .rankings-page {
+  --color-background: #0d0f14;
+  --color-on-surface: #f2f4fb;
+  --color-on-surface-variant: #c6cad6;
+  --color-primary: #6f9bff;
+  --color-primary-container: #2563eb;
+  --color-card-border: #2a3040;
+  --color-outline-variant: #2a3040;
+  --color-surface: #12151b;
+  --color-surface-variant: #1d2028;
+  --color-surface-container-lowest: #12151b;
+  --color-surface-container-low: #171a21;
+  --color-surface-container: #1d2028;
+  --color-surface-container-high: #282c35;
+}
+
+.discover-page .glass-panel,
+.discover-page .glass-card,
+.rankings-page .glass-panel,
+.rankings-page .glass-card {
+  background: var(--color-surface-container-lowest);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: var(--color-card-border);
 }

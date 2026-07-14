@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { RankingsWorkspace, type RankingKindOption } from '@/features/rankings/rankings-workspace';
 
 const GLOBAL_RANKING_KINDS: RankingKindOption[] = [
@@ -19,13 +20,14 @@ const GLOBAL_LANGUAGES = [
   'Swift',
 ];
 
-export function GlobalRankings(props: { accountId: string }) {
+export function GlobalRankings(props: { accountId: string; pageHeader?: ReactNode }) {
   return (
     <RankingsWorkspace
       accountId={props.accountId}
       command="list_github_rankings"
       title="开源榜单"
       description="基于 GitHub 公开搜索结果，按近期活跃度与总 Stars 生成近似榜单；不代表一段时间内的 Stars 增长量。"
+      pageHeader={props.pageHeader}
       kindOptions={GLOBAL_RANKING_KINDS}
       languageOptions={GLOBAL_LANGUAGES}
       allowRefresh
