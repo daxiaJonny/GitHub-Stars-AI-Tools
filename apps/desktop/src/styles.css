@@ -166,6 +166,12 @@
   --color-input: #252830;
 }
 
+:root {
+  /* 页面局部覆盖 --color-primary 时，仍可继承设置页选择的品牌色。 */
+  --gsat-brand-color: var(--color-primary);
+  --gsat-brand-foreground: var(--color-on-primary);
+}
+
 /* ===========================================================================
  * 全局基础样式
  * =========================================================================*/
@@ -525,12 +531,12 @@ textarea {
   /* 固定尺寸：此 WebView 下 vw 解析异常，clamp(vw) 会塌到最小值，故改用固定值 + 媒体查询 */
   --welcome-panel-padding: 44px;
 
-  /* 颜色：浅色使用设计稿值，暗色见 .dark 覆盖 */
+  /* 颜色：背景维持页面层级，强调色跟随设置页主题。 */
   --welcome-bg: #f7f8fc;
   --welcome-grid-line: rgb(148 163 184 / 0.14);
-  --welcome-primary: #2563eb;
-  --welcome-primary-hover: #1d4ed8;
-  --welcome-border-active: #4f7cff;
+  --welcome-primary: var(--gsat-brand-color);
+  --welcome-primary-hover: color-mix(in oklab, var(--gsat-brand-color) 88%, black);
+  --welcome-border-active: var(--gsat-brand-color);
 
   /* 仅在欢迎子树内统一主色与卡片边框，使其贴合设计稿 */
   --color-primary: var(--welcome-primary);
@@ -616,7 +622,7 @@ textarea {
 .welcome-step-dot[data-state='active'],
 .welcome-step-dot[data-state='done'] {
   background: var(--welcome-primary);
-  color: #fff;
+  color: var(--gsat-brand-foreground);
 }
 
 .welcome-step-dot[data-state='todo'] {
@@ -719,10 +725,10 @@ textarea {
   background: color-mix(in oklab, var(--welcome-primary) 16%, transparent);
 }
 
-/* 欢迎页主按钮：使用设计稿蓝 */
+/* 欢迎页主按钮：跟随用户设置的主题色。 */
 .welcome-cta {
   background: var(--welcome-primary);
-  color: #fff;
+  color: var(--gsat-brand-foreground);
   box-shadow: 0 10px 24px -12px color-mix(in oklab, var(--welcome-primary) 70%, transparent);
 }
 .welcome-cta:hover {
@@ -787,7 +793,7 @@ textarea {
 .tag-network-page {
   --color-on-surface: #172033;
   --color-on-surface-variant: #687386;
-  --color-primary: #2563eb;
+  --color-primary: var(--gsat-brand-color);
   --color-card-border: #e6eaf0;
   --color-outline-variant: #e6eaf0;
   --color-surface-container-lowest: #ffffff;
@@ -795,9 +801,9 @@ textarea {
   --color-surface-container: #eef2f8;
   --color-success: #169b62;
 
-  --tn-primary: #2563eb;
-  --tn-primary-soft: #eef4ff;
-  --tn-group-high: #4f7cff;
+  --tn-primary: var(--gsat-brand-color);
+  --tn-primary-soft: color-mix(in oklab, var(--gsat-brand-color) 10%, var(--color-surface-container-lowest));
+  --tn-group-high: var(--gsat-brand-color);
   --tn-group-common: #10b981;
   --tn-group-light: #f59e0b;
   --tn-panel-shadow: 0 12px 32px rgb(30 52 90 / 0.06);
@@ -809,15 +815,15 @@ textarea {
 .dark .tag-network-page {
   --color-on-surface: #f2f4fb;
   --color-on-surface-variant: #c6cad6;
-  --color-primary: #6f9bff;
+  --color-primary: var(--gsat-brand-color);
   --color-card-border: #2a3040;
   --color-outline-variant: #2a3040;
   --color-surface-container-lowest: #12151b;
   --color-surface-container-low: #171a21;
   --color-surface-container: #1d2028;
 
-  --tn-primary: #6f9bff;
-  --tn-primary-soft: rgb(37 99 235 / 0.16);
+  --tn-primary: var(--gsat-brand-color);
+  --tn-primary-soft: color-mix(in oklab, var(--gsat-brand-color) 18%, var(--color-surface-container-lowest));
   --tn-panel-shadow: 0 12px 32px rgb(0 0 0 / 0.3);
 
   background: #0d0f14;
@@ -878,7 +884,7 @@ textarea {
 }
 .tag-network-node:hover,
 .tag-network-node:focus-visible {
-  filter: drop-shadow(0 0 5px rgb(79 124 255 / 0.4));
+  filter: drop-shadow(0 0 5px color-mix(in oklab, var(--tn-primary) 40%, transparent));
 }
 
 /* 分组卡 chip（按分组着色） */
@@ -897,9 +903,9 @@ textarea {
   filter: brightness(0.97);
 }
 .tn-group-high .tn-chip {
-  color: #2f4bbf;
-  background: rgb(79 124 255 / 0.1);
-  border-color: rgb(79 124 255 / 0.22);
+  color: color-mix(in oklab, var(--tn-primary) 84%, var(--color-on-surface));
+  background: color-mix(in oklab, var(--tn-primary) 10%, transparent);
+  border-color: color-mix(in oklab, var(--tn-primary) 22%, transparent);
 }
 .tn-group-common .tn-chip {
   color: #0b7a52;
@@ -910,9 +916,6 @@ textarea {
   color: #a86711;
   background: rgb(245 158 11 / 0.12);
   border-color: rgb(245 158 11 / 0.24);
-}
-.dark .tn-group-high .tn-chip {
-  color: #9db8ff;
 }
 .dark .tn-group-common .tn-chip {
   color: #6ee7b7;
@@ -928,7 +931,7 @@ textarea {
 .ai-search-page {
   --color-on-surface: #172033;
   --color-on-surface-variant: #687386;
-  --color-primary: #2563eb;
+  --color-primary: var(--gsat-brand-color);
   --color-card-border: #e6eaf0;
   --color-outline-variant: #e6eaf0;
   --color-surface-container-lowest: #ffffff;
@@ -946,7 +949,7 @@ textarea {
 .dark .ai-search-page {
   --color-on-surface: #f2f4fb;
   --color-on-surface-variant: #c6cad6;
-  --color-primary: #6f9bff;
+  --color-primary: var(--gsat-brand-color);
   --color-card-border: #2a3040;
   --color-outline-variant: #2a3040;
   --color-surface-container-lowest: #12151b;
@@ -982,8 +985,8 @@ textarea {
 .repositories-page {
   --color-on-surface: #172033;
   --color-on-surface-variant: #687386;
-  --color-primary: #2563eb;
-  --color-primary-container: #2563eb;
+  --color-primary: var(--gsat-brand-color);
+  --color-primary-container: var(--gsat-brand-color);
   --color-card-border: #e6eaf0;
   --color-outline-variant: #e6eaf0;
   --color-surface: #ffffff;
@@ -1007,8 +1010,8 @@ textarea {
 .dark .repositories-page {
   --color-on-surface: #f2f4fb;
   --color-on-surface-variant: #c6cad6;
-  --color-primary: #6f9bff;
-  --color-primary-container: #2563eb;
+  --color-primary: var(--gsat-brand-color);
+  --color-primary-container: var(--gsat-brand-color);
   --color-card-border: #2a3040;
   --color-outline-variant: #2a3040;
   --color-surface: #12151b;
@@ -1039,8 +1042,8 @@ textarea {
   --color-background: #f6f8fc;
   --color-on-surface: #172033;
   --color-on-surface-variant: #687386;
-  --color-primary: #2563eb;
-  --color-primary-container: #2563eb;
+  --color-primary: var(--gsat-brand-color);
+  --color-primary-container: var(--gsat-brand-color);
   --color-card-border: #e6eaf0;
   --color-outline-variant: #e6eaf0;
   --color-surface: #ffffff;
@@ -1061,8 +1064,8 @@ textarea {
   --color-background: #0d0f14;
   --color-on-surface: #f2f4fb;
   --color-on-surface-variant: #c6cad6;
-  --color-primary: #6f9bff;
-  --color-primary-container: #2563eb;
+  --color-primary: var(--gsat-brand-color);
+  --color-primary-container: var(--gsat-brand-color);
   --color-card-border: #2a3040;
   --color-outline-variant: #2a3040;
   --color-surface: #12151b;
