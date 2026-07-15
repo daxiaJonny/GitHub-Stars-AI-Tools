@@ -33,7 +33,7 @@
 1. `Knowledge Pipeline` 是复杂度核心，需要状态机而不是临时脚本。
 2. `AI Service Layer` 已抽象出 OpenAI、OpenAI 兼容接口和 Anthropic 适配，后续新增服务必须继续挂在同一层。
 3. `Search Engine` 不应直接依赖 UI 参数，应使用统一查询 DSL。
-4. `Annotation Layer` 必须与 GitHub 事实层分离，避免全量重扫覆盖用户整理内容。
+4. `Annotation Layer` 必须与 GitHub 事实层分离，避免同步对账覆盖用户整理内容。
 
 ## 验收风险
 

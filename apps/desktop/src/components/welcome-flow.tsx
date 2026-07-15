@@ -1,16 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  BookMarked,
-  Check,
   ChevronRight,
   Database,
-  KeyRound,
   Search,
   Sparkles,
+  type LucideIcon,
 } from 'lucide-react';
-import { BrandIcon } from '@/components/ui/brand-icon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { WelcomeShell, type WelcomeStepId } from '@/components/welcome/welcome-shell';
 import type { GitHubUser, TaskProgressEvent } from '@/types';
 
 type WelcomeFlowProps = {
@@ -21,7 +19,7 @@ type WelcomeFlowProps = {
   taskProgress: TaskProgressEvent | null;
 };
 
-type Step = 'welcome' | 'github' | 'sync' | 'complete';
+type Step = WelcomeStepId;
 type GitHubConnectNextStep = 'workspace' | 'sync';
 
 export function WelcomeFlow(props: WelcomeFlowProps) {
@@ -149,296 +147,265 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
     }
   }
 
-  const activeStepIndex = getStepIndex(currentStep);
   const visibleTaskProgress = getVisibleWelcomeProgress(currentStep, props.taskProgress)
     ?? getFallbackWelcomeProgress(currentStep, isLoading, connectStatus);
 
   return (
-    <div className="welcome-surface fixed inset-0 z-40 overflow-y-auto bg-background px-4 py-4 sm:px-6 lg:px-8">
-      <main className="mx-auto flex min-h-full w-full max-w-5xl flex-col">
-        <header className="flex flex-col gap-4 border-b border-card-border pb-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex min-w-0 items-center gap-3">
-            <BrandIcon title="GitHub-Stars-AI-Tools 应用图标" className="size-12 rounded-xl shadow-sm" />
-            <div className="min-w-0">
-              <p className="truncate font-headline-md text-lg font-bold text-on-surface">GitHub-Stars-AI-Tools</p>
-              <p className="text-sm text-on-surface-variant">GSAT 本地 Stars 知识库</p>
+    <WelcomeShell
+      currentStep={currentStep}
+      onSkip={() => void completeWelcome()}
+      isCompleting={isCompleting}
+    >
+      {currentStep === 'welcome' && (
+        <section className="welcome-step-panel welcome-hero grid items-center gap-8 min-[960px]:grid-cols-[minmax(0,1.05fr)_minmax(0,0.9fr)]">
+          <div className="welcome-hero-copy min-w-0">
+            <StepBadge index={0} />
+            <h1 className="welcome-hero-title mt-5 text-on-surface">
+              让每一颗 Star，
+              <br className="hidden min-[520px]:block" />
+              都变成可检索的知识
+            </h1>
+            <p className="welcome-hero-subtitle mt-5 max-w-[520px] text-on-surface-variant">
+              GSAT 将你的 GitHub Stars 安全同步到本地，并用 AI 自动生成中文摘要、标签与关联。
+            </p>
+            <div className="mt-8 grid gap-4 min-[640px]:grid-cols-3">
+              <FeatureCard icon={Database} title="本地优先" description="数据只保存在你的设备" />
+              <FeatureCard icon={Search} title="智能检索" description="关键词、语义与组合筛选" />
+              <FeatureCard icon={Sparkles} title="AI 增强" description="中文摘要与标签网络" />
             </div>
-          </div>
-          <Button
-            variant="ghost"
-            size="lg"
-            className="self-start rounded-lg px-0 text-on-surface-variant hover:bg-transparent hover:text-on-surface sm:self-auto sm:px-3"
-            type="button"
-            disabled={isCompleting}
-            onClick={() => void completeWelcome()}
-          >
-            {isCompleting ? '正在进入工作台…' : '跳过，进入工作台'}
-          </Button>
-        </header>
-
-        <section className="grid flex-1 gap-5 py-5 lg:grid-cols-[minmax(220px,280px)_minmax(0,1fr)]">
-          <aside className="welcome-progress-panel border border-card-border bg-card p-4">
-            <p className="text-sm font-semibold text-on-surface">初始化进度</p>
-            <div className="relative mt-4 grid grid-cols-4 gap-2">
-              <div className="absolute left-[12.5%] right-[12.5%] top-5 hidden h-px bg-border sm:block" />
-              <div
-                className="absolute left-[12.5%] top-5 hidden h-px bg-primary transition-all duration-300 ease-out sm:block"
-                style={{ width: `${Math.min(activeStepIndex, 3) * 25}%` }}
-              />
-              <StepIndicator label="欢迎" icon={<BookMarked className="size-4" />} isActive={currentStep === 'welcome'} isCompleted={currentStep !== 'welcome'} />
-              <StepIndicator label="连接" icon={<KeyRound className="size-4" />} isActive={currentStep === 'github'} isCompleted={currentStep === 'sync' || currentStep === 'complete'} />
-              <StepIndicator label="同步" icon={<Database className="size-4" />} isActive={currentStep === 'sync'} isCompleted={currentStep === 'complete'} />
-              <StepIndicator label="完成" icon={<Check className="size-4" />} isActive={currentStep === 'complete'} isCompleted={false} />
-            </div>
-          </aside>
-
-          <div className="welcome-card border border-card-border bg-card p-5 sm:p-7 lg:p-8">
-          {currentStep === 'welcome' && (
-            <section className="welcome-step-panel">
-              <div className="welcome-icon-tile mb-6 grid size-12 place-items-center border border-primary/25 bg-primary/10 text-primary">
-                <BookMarked className="size-6" />
-              </div>
-              <h1 className="text-balance font-headline-lg text-2xl font-bold tracking-normal text-on-surface sm:text-3xl">欢迎使用 GitHub-Stars-AI-Tools</h1>
-              <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground sm:text-lg">
-                GSAT 将你的 GitHub Stars 转化为可搜索、可管理的个人知识库
-              </p>
-              <div className="mt-8 grid gap-3 md:grid-cols-3">
-                <FeatureItem icon={<Database className="size-5" />} title="本地优先" description="所有数据存储在本地数据库，完全掌控" />
-                <FeatureItem icon={<Search className="size-5" />} title="智能检索" description="支持关键词、上下文搜索和组合筛选" />
-                <FeatureItem icon={<Sparkles className="size-5" />} title="AI 增强" description="生成中文定位、关键词和标签网络" />
-              </div>
-              <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-                <Button
-                  size="lg"
-                  className="h-11 rounded-lg px-6"
-                  type="button"
-                  onClick={() => setCurrentStep('github')}
-                >
-                  开始使用
-                  <ChevronRight className="ml-2 size-5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="lg"
-                  className="h-11 rounded-lg px-6"
-                  type="button"
-                  disabled={isCompleting}
-                  onClick={() => void completeWelcome()}
-                >
-                  {isCompleting ? '正在进入工作台…' : '跳过，进入工作台'}
-                </Button>
-              </div>
-            </section>
-          )}
-
-          {currentStep === 'github' && (
-            <section className="welcome-step-panel">
-              <div className="welcome-icon-tile mb-6 grid size-12 place-items-center border border-primary/25 bg-primary/10 text-primary">
-                <KeyRound className="size-6" />
-              </div>
-              <h2 className="text-2xl font-bold tracking-normal">连接 GitHub</h2>
-              <p className="mt-3 max-w-2xl text-muted-foreground">
-                需要 Personal Access Token 才能同步你的 Stars
-              </p>
-              <form
-                className="mt-8 grid gap-4 text-left"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (isLoading) {
-                    return;
-                  }
-                  void handleGitHubConnect('workspace');
-                }}
-              >
-                <div className="border border-border/60 bg-muted/30 p-4">
-                  <p className="text-sm font-semibold">如何获取 Token？</p>
-                  <ol className="mt-3 space-y-2 text-sm text-muted-foreground">
-                    <li>1. 访问 <a href="https://github.com/settings/tokens/new" target="_blank" rel="noreferrer" className="text-primary hover:underline">GitHub Token 设置</a></li>
-                    <li>2. 同步公开 Stars 可使用只读 Token；如需读取私有仓库 Stars，再授予仓库读取权限</li>
-                    <li>3. 如需使用 Gist 备份，再勾选 <code className="rounded-lg bg-muted px-1 py-0.5">gist</code> 权限</li>
-                    <li>4. 生成并复制 Token</li>
-                  </ol>
-                </div>
-                <Input
-                  type="password"
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  inputMode="text"
-                  placeholder="粘贴 GitHub Token"
-                  value={token}
-                  className="h-12 rounded-lg border-border/70 bg-background shadow-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/30"
-                  onChange={(e) => setToken(e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Token 仅保存在本机系统凭据管理器，不会上传到任何服务器
-                </p>
-                {errorMessage && (
-                  <p role="alert" className="welcome-message rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                    {errorMessage}
-                  </p>
-                )}
-                {connectStatus && (
-                  <p id="welcome-connect-status" role="status" aria-live="polite" className="welcome-message rounded-lg border border-primary/20 bg-primary/10 px-3 py-2 text-sm text-primary">
-                    {connectStatus}
-                  </p>
-                )}
-                {isConnectionTakingLonger && (
-                  <p role="status" aria-live="polite" className="welcome-message rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
-                    连接没有卡住。你可以点击下方“先进入工作台，后台继续连接”，稍后在设置页查看连接结果。
-                  </p>
-                )}
-                {successMessage && (
-                  <p role="status" aria-live="polite" className="welcome-message rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-sm text-success">
-                    {successMessage}
-                  </p>
-                )}
-                {visibleTaskProgress && (
-                  <WelcomeTaskProgress progress={visibleTaskProgress} />
-                )}
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <Button
-                    variant="outline"
-                    size="lg"
-                    className="rounded-lg"
-                    type="button"
-                    disabled={isLoading}
-                    onClick={() => setCurrentStep('welcome')}
-                  >
-                    返回
-                  </Button>
-                  <Button
-                    size="lg"
-                    className="rounded-lg"
-                    type="submit"
-                    aria-busy={isLoading}
-                    aria-describedby={connectStatus ? 'welcome-connect-status' : undefined}
-                    disabled={!token.trim() || isLoading || isCompleting}
-                  >
-                    {isCompleting ? '正在进入工作台…' : isLoading ? '正在验证 Token…' : '验证并进入工作台'}
-                    <ChevronRight className="ml-2 size-5" />
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="lg"
-                    className="rounded-lg sm:col-span-2"
-                    type="button"
-                    aria-busy={isLoading}
-                    aria-describedby={connectStatus ? 'welcome-connect-status' : undefined}
-                    disabled={!token.trim() || isLoading || isCompleting}
-                    onClick={() => void handleGitHubConnect('sync')}
-                  >
-                    验证并同步 Stars
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="lg"
-                    className="rounded-lg sm:col-span-2"
-                    type="button"
-                    disabled={isCompleting}
-                    onClick={() => void completeWelcome(isLoading ? '正在进入工作台，GitHub 连接会继续在后台完成。' : undefined)}
-                  >
-                    {isCompleting ? '正在进入工作台…' : isLoading ? '先进入工作台，后台继续连接' : '暂不连接，进入工作台'}
-                  </Button>
-                </div>
-              </form>
-            </section>
-          )}
-
-          {currentStep === 'sync' && (
-            <section className="welcome-step-panel">
-              <div className="welcome-icon-tile mb-6 grid size-12 place-items-center border border-primary/25 bg-primary/10 text-primary">
-                <Database className="size-6" />
-              </div>
-              <h2 className="text-2xl font-bold tracking-normal">同步 Stars</h2>
-              <p className="mt-3 max-w-2xl text-muted-foreground">
-                首次同步可能需要几分钟，请耐心等待
-              </p>
-              <div className="mt-8 border border-border/60 bg-muted/30 p-5">
-                <p className="text-sm text-muted-foreground">
-                  {connectedUser ? `已连接 @${connectedUser.login}。` : ''}
-                  连接已完成，即将同步你的 GitHub Stars 到本地数据库，并缓存仓库 README。
-                  README 是中文定位和标签网络的上下文；配置 AI 后可以继续生成中文解析和项目标签。
-                </p>
-              </div>
-              {errorMessage && (
-                <p role="alert" className="welcome-message mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                  {errorMessage}
-                </p>
-              )}
-              {successMessage && (
-                <p role="status" aria-live="polite" className="welcome-message mt-4 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-sm text-success">
-                  {successMessage}
-                </p>
-              )}
-              {warningMessage && (
-                <p role="status" aria-live="polite" className="welcome-message mt-4 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
-                  {warningMessage}
-                </p>
-              )}
-              {visibleTaskProgress && (
-                <WelcomeTaskProgress progress={visibleTaskProgress} />
-              )}
-              <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-                <Button
-                  variant="outline"
-                  size="lg"
-                  className="flex-1 rounded-lg"
-                  type="button"
-                  disabled={isLoading || isCompleting}
-                  onClick={() => void completeWelcome()}
-                >
-                  {isCompleting ? '正在进入工作台…' : '进入工作台'}
-                </Button>
-                <Button
-                  size="lg"
-                  className="flex-1 rounded-lg"
-                  type="button"
-                  disabled={isLoading}
-                  onClick={handleSync}
-                >
-                  {isLoading ? '同步中…' : '开始同步'}
-                  <ChevronRight className="ml-2 size-5" />
-                </Button>
-              </div>
-            </section>
-          )}
-
-          {currentStep === 'complete' && (
-            <section className="welcome-step-panel">
-              <div className="welcome-icon-tile mb-6 grid size-12 place-items-center border border-success/25 bg-success/10 text-success">
-                <Check className="size-6" />
-              </div>
-              <h2 className="text-2xl font-bold tracking-normal">一切就绪</h2>
-              <p className="mt-3 max-w-2xl text-muted-foreground">
-                你的 Stars 已经同步完成，现在可以开始探索了
-              </p>
-              <div className="mt-8 grid gap-3 text-left">
-                <TipItem number="1" text="使用搜索框查找项目，支持名称、描述、Topics 和笔记" />
-                <TipItem number="2" text="为项目生成 AI 解析后，列表会显示更准确的中文定位" />
-                <TipItem number="3" text="在标签网络页生成项目标签，再按用途聚类和筛选" />
-              </div>
-              {warningMessage && (
-                <p role="status" aria-live="polite" className="mt-6 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
-                  {warningMessage}
-                </p>
-              )}
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
               <Button
                 size="lg"
-                className="mt-10 h-12 rounded-lg px-8"
+                className="welcome-cta h-[52px] rounded-[10px] px-6 text-base"
+                type="button"
+                onClick={() => setCurrentStep('github')}
+              >
+                开始设置
+                <ChevronRight className="ml-1 size-5" />
+              </Button>
+              <Button
+                variant="outline"
+                size="lg"
+                className="h-[52px] rounded-[10px] px-6 text-base"
                 type="button"
                 disabled={isCompleting}
                 onClick={() => void completeWelcome()}
               >
-                {isCompleting ? '正在进入工作台…' : '进入工作台'}
+                {isCompleting ? '正在进入工作台…' : '先逛逛工作台'}
               </Button>
-            </section>
-          )}
-        </div>
+            </div>
+          </div>
+          <div className="welcome-hero-art mt-4 flex justify-center min-[960px]:mt-0 min-[960px]:justify-end">
+            <img
+              src="/onboarding/welcome-knowledge-network.svg"
+              alt=""
+              aria-hidden="true"
+              draggable={false}
+              className="w-[82%] max-w-[300px] select-none min-[720px]:max-w-[340px] min-[960px]:w-full min-[960px]:max-w-[600px]"
+            />
+          </div>
         </section>
-      </main>
-    </div>
+      )}
+
+      {currentStep === 'github' && (
+        <section className="welcome-step-panel mx-auto w-full max-w-2xl">
+          <StepBadge index={1} />
+          <h2 className="welcome-step-title mt-4 text-on-surface">连接 GitHub</h2>
+          <p className="mt-3 text-on-surface-variant">
+            需要 Personal Access Token 才能同步你的 Stars
+          </p>
+          <form
+            className="mt-7 grid gap-4 text-left"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (isLoading) {
+                return;
+              }
+              void handleGitHubConnect('workspace');
+            }}
+          >
+            <div className="rounded-xl border border-card-border bg-surface-container-low/60 p-4">
+              <p className="text-sm font-semibold text-on-surface">如何获取 Token？</p>
+              <ol className="mt-3 space-y-2 text-sm text-on-surface-variant">
+                <li>1. 访问 <a href="https://github.com/settings/tokens/new" target="_blank" rel="noreferrer" className="text-primary hover:underline">GitHub Token 设置</a></li>
+                <li>2. 同步公开 Stars 可使用只读 Token；如需读取私有仓库 Stars，再授予仓库读取权限</li>
+                <li>3. 如需使用 Gist 备份，再勾选 <code className="rounded bg-surface-container px-1 py-0.5">gist</code> 权限</li>
+                <li>4. 生成并复制 Token</li>
+              </ol>
+            </div>
+            <Input
+              type="password"
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              inputMode="text"
+              placeholder="粘贴 GitHub Token"
+              value={token}
+              className="h-12 rounded-lg border-card-border bg-surface-container-lowest shadow-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/30"
+              onChange={(e) => setToken(e.target.value)}
+            />
+            <p className="text-xs text-on-surface-variant">
+              Token 仅保存在本机系统凭据管理器，不会上传到任何服务器
+            </p>
+            {errorMessage && (
+              <p role="alert" className="welcome-message rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {errorMessage}
+              </p>
+            )}
+            {connectStatus && (
+              <p id="welcome-connect-status" role="status" aria-live="polite" className="welcome-message rounded-lg border border-primary/20 bg-primary/10 px-3 py-2 text-sm text-primary">
+                {connectStatus}
+              </p>
+            )}
+            {isConnectionTakingLonger && (
+              <p role="status" aria-live="polite" className="welcome-message rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+                连接没有卡住。你可以点击下方“先进入工作台，后台继续连接”，稍后在设置页查看连接结果。
+              </p>
+            )}
+            {successMessage && (
+              <p role="status" aria-live="polite" className="welcome-message rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-sm text-success">
+                {successMessage}
+              </p>
+            )}
+            {visibleTaskProgress && (
+              <WelcomeTaskProgress progress={visibleTaskProgress} />
+            )}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Button
+                variant="outline"
+                size="lg"
+                className="rounded-lg"
+                type="button"
+                disabled={isLoading}
+                onClick={() => setCurrentStep('welcome')}
+              >
+                返回
+              </Button>
+              <Button
+                size="lg"
+                className="welcome-cta rounded-lg"
+                type="submit"
+                aria-busy={isLoading}
+                aria-describedby={connectStatus ? 'welcome-connect-status' : undefined}
+                disabled={!token.trim() || isLoading || isCompleting}
+              >
+                {isCompleting ? '正在进入工作台…' : isLoading ? '正在验证 Token…' : '验证并进入工作台'}
+                <ChevronRight className="ml-1 size-5" />
+              </Button>
+              <Button
+                variant="outline"
+                size="lg"
+                className="rounded-lg sm:col-span-2"
+                type="button"
+                aria-busy={isLoading}
+                aria-describedby={connectStatus ? 'welcome-connect-status' : undefined}
+                disabled={!token.trim() || isLoading || isCompleting}
+                onClick={() => void handleGitHubConnect('sync')}
+              >
+                验证并同步 Stars
+              </Button>
+              <Button
+                variant="ghost"
+                size="lg"
+                className="rounded-lg text-on-surface-variant hover:text-on-surface sm:col-span-2"
+                type="button"
+                disabled={isCompleting}
+                onClick={() => void completeWelcome(isLoading ? '正在进入工作台，GitHub 连接会继续在后台完成。' : undefined)}
+              >
+                {isCompleting ? '正在进入工作台…' : isLoading ? '先进入工作台，后台继续连接' : '暂不连接，进入工作台'}
+              </Button>
+            </div>
+          </form>
+        </section>
+      )}
+
+      {currentStep === 'sync' && (
+        <section className="welcome-step-panel mx-auto w-full max-w-2xl">
+          <StepBadge index={2} />
+          <h2 className="welcome-step-title mt-4 text-on-surface">同步 Stars</h2>
+          <p className="mt-3 text-on-surface-variant">
+            首次同步可能需要几分钟，请耐心等待
+          </p>
+          <div className="mt-7 rounded-xl border border-card-border bg-surface-container-low/60 p-5">
+            <p className="text-sm leading-6 text-on-surface-variant">
+              {connectedUser ? `已连接 @${connectedUser.login}。` : ''}
+              连接已完成，即将同步你的 GitHub Stars 到本地数据库，并缓存仓库 README。
+              README 是中文定位和标签网络的上下文；配置 AI 后可以继续生成中文解析和项目标签。
+            </p>
+          </div>
+          {errorMessage && (
+            <p role="alert" className="welcome-message mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {errorMessage}
+            </p>
+          )}
+          {successMessage && (
+            <p role="status" aria-live="polite" className="welcome-message mt-4 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-sm text-success">
+              {successMessage}
+            </p>
+          )}
+          {warningMessage && (
+            <p role="status" aria-live="polite" className="welcome-message mt-4 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+              {warningMessage}
+            </p>
+          )}
+          {visibleTaskProgress && (
+            <WelcomeTaskProgress progress={visibleTaskProgress} />
+          )}
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+            <Button
+              variant="outline"
+              size="lg"
+              className="flex-1 rounded-lg"
+              type="button"
+              disabled={isLoading || isCompleting}
+              onClick={() => void completeWelcome()}
+            >
+              {isCompleting ? '正在进入工作台…' : '进入工作台'}
+            </Button>
+            <Button
+              size="lg"
+              className="welcome-cta flex-1 rounded-lg"
+              type="button"
+              disabled={isLoading}
+              onClick={handleSync}
+            >
+              {isLoading ? '同步中…' : '开始同步'}
+              <ChevronRight className="ml-1 size-5" />
+            </Button>
+          </div>
+        </section>
+      )}
+
+      {currentStep === 'complete' && (
+        <section className="welcome-step-panel mx-auto w-full max-w-2xl">
+          <StepBadge index={3} />
+          <h2 className="welcome-step-title mt-4 text-on-surface">一切就绪</h2>
+          <p className="mt-3 text-on-surface-variant">
+            你的 Stars 已经同步完成，现在可以开始探索了
+          </p>
+          <div className="mt-7 grid gap-3 text-left">
+            <TipItem number="1" text="使用搜索框查找项目，支持名称、描述、Topics 和笔记" />
+            <TipItem number="2" text="为项目生成 AI 解析后，列表会显示更准确的中文定位" />
+            <TipItem number="3" text="在标签网络页生成项目标签，再按用途聚类和筛选" />
+          </div>
+          {warningMessage && (
+            <p role="status" aria-live="polite" className="mt-6 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+              {warningMessage}
+            </p>
+          )}
+          <Button
+            size="lg"
+            className="welcome-cta mt-9 h-[52px] rounded-[10px] px-8 text-base"
+            type="button"
+            disabled={isCompleting}
+            onClick={() => void completeWelcome()}
+          >
+            {isCompleting ? '正在进入工作台…' : '进入工作台'}
+          </Button>
+        </section>
+      )}
+    </WelcomeShell>
   );
 }
 
@@ -508,7 +475,7 @@ function WelcomeTaskProgress(props: { progress: TaskProgressEvent }) {
           <p className="font-medium">
             {isRunning ? '正在处理' : isFailed ? '任务失败' : isPartial ? '任务部分完成' : '任务完成'}
           </p>
-          <p className="mt-1 break-words text-current/85">{progress.message}</p>
+          <p className="mt-1 min-h-[2.6em] break-words line-clamp-2 text-current/85">{progress.message}</p>
           {(stageLabel || progress.repositoryName) && (
             <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-xs text-current/80">
               {stageLabel && (
@@ -570,8 +537,6 @@ function getWelcomeTaskStageLabel(stage: string) {
       return 'AI 分析';
     case 'partial-failure':
       return '部分失败';
-    case 'incremental-stop':
-      return '增量完成';
     case 'done':
       return '已完成';
     case 'error':
@@ -583,36 +548,24 @@ function getWelcomeTaskStageLabel(stage: string) {
   }
 }
 
-function StepIndicator(props: { label: string; icon: React.ReactNode; isActive: boolean; isCompleted: boolean }) {
+function StepBadge(props: { index: number }) {
   return (
-    <div className="relative z-10 flex flex-col items-center gap-2">
-      <div
-        className={`grid size-10 shrink-0 place-items-center rounded-lg border font-semibold transition-colors duration-200 ${
-          props.isCompleted
-            ? 'border-success bg-success text-success-foreground'
-            : props.isActive
-            ? 'border-primary bg-primary text-white'
-            : 'border-border bg-card text-muted-foreground'
-        }`}
-      >
-        {props.isCompleted ? <Check className="size-5" /> : props.icon}
-      </div>
-      <span className={`text-xs font-semibold ${props.isActive ? 'text-foreground' : 'text-muted-foreground'}`}>
-        {props.label}
-      </span>
-    </div>
+    <span className="welcome-step-badge inline-flex items-center rounded-full px-3 py-1 text-sm font-semibold">
+      步骤 {props.index + 1} / {4}
+    </span>
   );
 }
 
-function FeatureItem(props: { icon: React.ReactNode; title: string; description: string }) {
+function FeatureCard(props: { icon: LucideIcon; title: string; description: string }) {
+  const Icon = props.icon;
   return (
-    <div className="group flex items-start gap-4 rounded-lg border border-border/60 bg-muted/20 p-4 text-left transition-colors duration-200 hover:border-primary/35 hover:bg-primary/5">
-      <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
-        {props.icon}
-      </div>
-      <div>
-        <p className="font-semibold">{props.title}</p>
-        <p className="mt-1 text-sm text-muted-foreground">{props.description}</p>
+    <div className="welcome-feature-card group flex flex-col gap-3 rounded-xl border border-card-border bg-surface-container-lowest p-4 text-left transition-colors duration-200">
+      <span className="welcome-feature-icon grid size-11 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary transition-colors">
+        <Icon className="size-5" strokeWidth={1.75} />
+      </span>
+      <div className="min-w-0">
+        <p className="font-semibold text-on-surface">{props.title}</p>
+        <p className="mt-1 text-sm leading-snug text-on-surface-variant">{props.description}</p>
       </div>
     </div>
   );
@@ -620,26 +573,11 @@ function FeatureItem(props: { icon: React.ReactNode; title: string; description:
 
 function TipItem(props: { number: string; text: string }) {
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-border/40 bg-muted/20 p-3">
+    <div className="flex items-start gap-3 rounded-lg border border-card-border bg-surface-container-low/50 p-3">
       <span className="grid size-6 shrink-0 place-items-center rounded-lg bg-primary text-xs font-bold text-white">
         {props.number}
       </span>
-      <p className="text-sm text-muted-foreground">{props.text}</p>
+      <p className="text-sm text-on-surface-variant">{props.text}</p>
     </div>
   );
-}
-
-function getStepIndex(step: Step) {
-  switch (step) {
-    case 'welcome':
-      return 0;
-    case 'github':
-      return 1;
-    case 'sync':
-      return 2;
-    case 'complete':
-      return 3;
-    default:
-      return 0;
-  }
 }

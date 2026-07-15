@@ -174,6 +174,7 @@ export function TagNetworkPage(props: TagNetworkPageProps) {
   const tagStats = networkData?.nodes ?? [];
 
   const trendingTags = useMemo(() => [...tagStats].sort((a, b) => b.repoCount - a.repoCount).slice(0, 10), [tagStats]);
+  const maxTrendingRepoCount = useMemo(() => Math.max(...trendingTags.map((tag) => tag.repoCount), 1), [trendingTags]);
 
   const cloudTags = useMemo(() => {
     const tags = [...tagStats];
@@ -193,22 +194,24 @@ export function TagNetworkPage(props: TagNetworkPageProps) {
   );
 
   const tagGroups = useMemo(() => {
-    const groups = [
-      { id: 'high', name: '高频标签', tags: tagStats.filter((tag) => tag.repoCount >= 5) },
-      { id: 'mid', name: '常用标签', tags: tagStats.filter((tag) => tag.repoCount >= 2 && tag.repoCount < 5) },
-      { id: 'new', name: '轻量标签', tags: tagStats.filter((tag) => tag.repoCount < 2) },
+    const defs = [
+      { id: 'high', name: '高频标签', hint: '≥ 5 个仓库', tone: 'high', color: 'var(--tn-group-high)', match: (count: number) => count >= 5 },
+      { id: 'common', name: '常用标签', hint: '2-4 个仓库', tone: 'common', color: 'var(--tn-group-common)', match: (count: number) => count >= 2 && count < 5 },
+      { id: 'light', name: '轻量标签', hint: '< 2 个仓库', tone: 'light', color: 'var(--tn-group-light)', match: (count: number) => count < 2 },
     ];
-    return groups
-      .filter((group) => group.tags.length > 0)
-      .map((group, i) => ({
-        id: group.id,
-        name: group.name,
-        color: TAG_COLORS[i % TAG_COLORS.length],
-        tagCount: group.tags.length,
-        repoCount: group.tags.reduce((sum, tag) => sum + tag.repoCount, 0),
-        tags: group.tags.slice(0, 6).map((tag) => ({ id: tag.id, name: tag.name, count: tag.repoCount })),
-      }))
-      .slice(0, 4);
+    return defs.map((def) => {
+      const tags = tagStats.filter((tag) => def.match(tag.repoCount));
+      return {
+        id: def.id,
+        name: def.name,
+        hint: def.hint,
+        tone: def.tone,
+        color: def.color,
+        tagCount: tags.length,
+        repoCount: tags.reduce((sum, tag) => sum + tag.repoCount, 0),
+        tags: tags.slice(0, 18).map((tag) => ({ id: tag.id, name: tag.name, count: tag.repoCount })),
+      };
+    });
   }, [tagStats]);
 
   const visibleNetworkTags = useMemo(() => {
@@ -270,22 +273,28 @@ export function TagNetworkPage(props: TagNetworkPageProps) {
   const tagNetworkActionNoticeTone = !workspace.authState.user || hasNoSyncedRepositories || aiConfigMessage ? 'error' : 'muted';
 
   return (
-    <div className="h-full overflow-y-auto p-4 sm:p-5 lg:p-6">
-      <div className="mx-auto w-full max-w-[min(1400px,100%)] space-y-5">
-        {/* 顶部操作区 */}
-        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+    <div className="tag-network-page h-full overflow-y-auto p-4 sm:p-5 lg:p-6">
+      <div className="mx-auto w-full max-w-[min(1600px,100%)] space-y-5">
+        {/* 头部 */}
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div className="min-w-0">
-            <h2 className="font-headline-lg text-on-surface">标签网络</h2>
-            <p className="font-body-md text-on-surface-variant mt-1">
-              根据全部已同步 Stars 生成标签、关联和覆盖关系
+            <h2 className="text-2xl font-bold tracking-tight text-on-surface">标签网络</h2>
+            <p className="mt-1.5 text-sm text-on-surface-variant">
+              探索 {totalRepos} 个 Stars 仓库中的标签关联与主题聚类
             </p>
+            {totalTags > 0 && (
+              <p className="mt-1 text-xs text-on-surface-variant">
+                已生成 · <span className="font-semibold text-on-surface">{totalTags}</span> 个标签 ·{' '}
+                <span className="font-semibold text-on-surface">{totalLinks}</span> 条关联
+              </p>
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
               onClick={() => void handleSyncStars()}
               disabled={workspace.isSyncingStars || !workspace.authState.user}
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-outline-variant/35 bg-surface-container-low px-3 py-2 text-sm font-semibold text-on-surface shadow-sm transition-colors hover:border-primary/40 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex items-center justify-center gap-2 rounded-lg border border-card-border bg-surface-container-lowest px-3.5 py-2 text-sm font-semibold text-on-surface transition-colors hover:border-primary/50 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
               title={workspace.authState.user ? '同步 GitHub Stars 后刷新标签网络数据' : '请先连接 GitHub 账号'}
             >
               <Icon name={workspace.isSyncingStars ? 'progress_activity' : 'sync'} size={17} className={workspace.isSyncingStars ? 'animate-spin' : ''} />
@@ -305,26 +314,72 @@ export function TagNetworkPage(props: TagNetworkPageProps) {
             )}
           </div>
         </div>
+
+        {/* AI 上下文说明条 */}
         <div
-          className={`rounded-lg border px-4 py-3 text-sm ${
+          className={`flex items-start gap-2.5 rounded-xl border px-4 py-3 text-sm ${
             tagNetworkActionNoticeTone === 'error'
-              ? 'border-error/20 bg-error/10 text-error'
-              : 'border-outline-variant/30 bg-surface-container text-on-surface-variant'
+              ? 'border-error/25 bg-error/10 text-error'
+              : 'border-primary/20 bg-[var(--tn-primary-soft)] text-on-surface-variant'
           }`}
         >
-          {tagNetworkActionNotice}
+          <Icon
+            name={tagNetworkActionNoticeTone === 'error' ? 'error' : 'info'}
+            size={18}
+            className={`mt-px shrink-0 ${tagNetworkActionNoticeTone === 'error' ? 'text-error' : 'text-primary'}`}
+          />
+          <span>{tagNetworkActionNotice}</span>
         </div>
-        {errorMessage && <div className="rounded-lg border border-error/20 bg-error/10 px-4 py-3 text-error">{errorMessage}</div>}
-        {successMessage && <div className="rounded-lg border border-success/20 bg-success/10 px-4 py-3 text-success">{successMessage}</div>}
+        {errorMessage && <div className="rounded-xl border border-error/25 bg-error/10 px-4 py-3 text-sm text-error">{errorMessage}</div>}
+        {successMessage && <div className="rounded-xl border border-success/25 bg-success/10 px-4 py-3 text-sm text-success">{successMessage}</div>}
 
-        {/* Bento 网格布局 */}
+        {/* 主区域：图谱 + 热门标签 */}
         <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,2fr)_minmax(280px,0.9fr)]">
-          {/* 左侧主列 */}
-          <div className="space-y-5">
-            {/* 标签网络可视化主卡片 */}
-            <div className="glass-card relative h-[min(58vh,520px)] min-h-[360px] overflow-hidden rounded-xl p-1 group">
-              <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-tertiary-container/5" />
-              {/* 标签网络 SVG 图 */}
+          {/* 标签图谱 */}
+          <div className="tn-panel flex flex-col overflow-hidden">
+            <div className="flex flex-col gap-3 border-b border-card-border p-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <h3 className="flex items-center gap-2 text-base font-semibold text-on-surface">
+                  <Icon name="hub" size={18} className="text-primary" />
+                  Stars 标签图谱
+                </h3>
+                <p className="mt-1 text-xs text-on-surface-variant">拖动画布 · 点击标签查看仓库</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="tn-seg" role="group" aria-label="显示节点数量">
+                  {([10, 20, 40] as const).map((limit) => (
+                    <button
+                      key={limit}
+                      type="button"
+                      data-active={networkNodeLimit === limit}
+                      onClick={() => setNetworkNodeLimit(limit)}
+                    >
+                      {limit}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center overflow-hidden rounded-lg border border-card-border text-on-surface-variant">
+                  <button type="button" className="px-2.5 py-1.5 transition-colors hover:bg-surface-container" onClick={() => updateNetworkScale(networkTransform.scale - 0.18)} title="缩小图谱">
+                    <Icon name="remove" size={16} />
+                  </button>
+                  <span className="border-x border-card-border px-2 py-1.5 text-xs font-semibold tabular-nums">{Math.round(networkTransform.scale * 100)}%</span>
+                  <button type="button" className="px-2.5 py-1.5 transition-colors hover:bg-surface-container" onClick={() => updateNetworkScale(networkTransform.scale + 0.18)} title="放大图谱">
+                    <Icon name="add" size={16} />
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-card-border px-2.5 py-1.5 text-xs font-semibold text-on-surface-variant transition-colors hover:text-primary"
+                  onClick={resetNetworkView}
+                  title="重置图谱视图"
+                >
+                  <Icon name="center_focus_strong" size={16} />
+                  重置视图
+                </button>
+              </div>
+            </div>
+
+            <div className="relative h-[min(58vh,520px)] min-h-[360px] bg-[var(--color-surface-container-low)]">
               <svg
                 ref={networkSvgRef}
                 className={`absolute inset-0 h-full w-full select-none touch-none ${isDraggingNetwork ? 'cursor-grabbing' : 'cursor-grab'}`}
@@ -336,7 +391,6 @@ export function TagNetworkPage(props: TagNetworkPageProps) {
                 onPointerCancel={handleNetworkPointerEnd}
               >
                 <g transform={`translate(50 50) translate(${networkTransform.x} ${networkTransform.y}) scale(${networkTransform.scale}) translate(-50 -50)`}>
-                  {/* 关系边 */}
                   {networkEdges.map((edge, i) => {
                     const s = networkNodes[edge.source];
                     const t = networkNodes[edge.target];
@@ -350,16 +404,18 @@ export function TagNetworkPage(props: TagNetworkPageProps) {
                         x2={t.x}
                         y2={t.y}
                         stroke="var(--color-primary)"
-                        opacity={0.08 + weightRatio * 0.2}
+                        opacity={0.1 + weightRatio * 0.22}
                         strokeWidth={Math.min(0.9, 0.18 + weightRatio * 0.82)}
                       />
                     );
                   })}
-                  {/* 节点 */}
                   {networkNodes.map((node) => (
                     <g
                       key={node.id}
-                      className="cursor-pointer"
+                      className="tag-network-node cursor-pointer"
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`${node.name}：${node.repoCount} 个仓库`}
                       onClick={(event) => {
                         event.stopPropagation();
                         if (networkDragMovedRef.current) {
@@ -367,10 +423,16 @@ export function TagNetworkPage(props: TagNetworkPageProps) {
                         }
                         props.onSelectTag(node.id);
                       }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          props.onSelectTag(node.id);
+                        }
+                      }}
                     >
                       <title>{`${node.name}：${node.repoCount} 个仓库`}</title>
-                      <circle cx={node.x} cy={node.y} r={node.size / 6.6} fill={node.color} opacity="0.72" />
-                      <circle cx={node.x} cy={node.y} r={node.size / 6.6 + 0.65} fill="none" stroke={node.color} strokeOpacity="0.18" />
+                      <circle cx={node.x} cy={node.y} r={node.size / 6.6} fill={node.color} opacity="0.78" />
+                      <circle cx={node.x} cy={node.y} r={node.size / 6.6 + 0.65} fill="none" stroke={node.color} strokeOpacity="0.2" />
                       {node.showLabel && (
                         <text
                           x={node.x}
@@ -390,47 +452,14 @@ export function TagNetworkPage(props: TagNetworkPageProps) {
                           {truncateTagLabel(node.name)}
                         </text>
                       )}
-                  </g>
-                ))}
+                    </g>
+                  ))}
                 </g>
               </svg>
-              {/* 覆盖信息层 */}
-              <div className="absolute left-5 right-5 top-4 z-10 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <h3 className="font-headline-md text-[16px] text-on-surface font-semibold flex items-center gap-2">
-                  <Icon name="hub" size={18} className="text-primary" />
-                  Stars 标签图谱
-                </h3>
-                <div className="flex flex-wrap items-center gap-2">
-                  <label className="flex items-center gap-2 rounded-lg border border-outline-variant/25 bg-surface-container-lowest/85 px-2.5 py-1.5 text-xs text-on-surface-variant backdrop-blur-md">
-                    显示节点
-                    <select
-                      value={networkNodeLimit}
-                      onChange={(event) => setNetworkNodeLimit(Number(event.target.value) as NetworkNodeLimit)}
-                      className="rounded border border-outline-variant/30 bg-surface px-1.5 py-0.5 text-xs text-on-surface"
-                    >
-                      <option value={10}>10</option>
-                      <option value={20}>20</option>
-                      <option value={40}>40</option>
-                    </select>
-                  </label>
-                  <div className="flex items-center overflow-hidden rounded-lg border border-outline-variant/25 bg-surface-container-lowest/85 text-xs text-on-surface-variant shadow-sm backdrop-blur-md">
-                    <button type="button" className="px-2.5 py-1.5 hover:bg-surface-container" onClick={() => updateNetworkScale(networkTransform.scale - 0.18)} title="缩小图谱">
-                      <Icon name="remove" size={14} />
-                    </button>
-                    <span className="border-x border-outline-variant/20 px-2 py-1.5 font-label-sm">{Math.round(networkTransform.scale * 100)}%</span>
-                    <button type="button" className="px-2.5 py-1.5 hover:bg-surface-container" onClick={() => updateNetworkScale(networkTransform.scale + 0.18)} title="放大图谱">
-                      <Icon name="add" size={14} />
-                    </button>
-                    <button type="button" className="border-l border-outline-variant/20 px-2.5 py-1.5 hover:bg-surface-container" onClick={resetNetworkView} title="重置图谱视图">
-                      <Icon name="center_focus_strong" size={14} />
-                    </button>
-                  </div>
-                </div>
-              </div>
               {tagStats.length === 0 && (
-                <div className="absolute inset-x-5 top-1/2 z-10 -translate-y-1/2 rounded-xl border border-outline-variant/25 bg-surface-container-lowest/90 px-4 py-5 text-center shadow-sm backdrop-blur-md">
+                <div className="absolute inset-x-5 top-1/2 z-10 -translate-y-1/2 rounded-xl border border-card-border bg-surface-container-lowest/95 px-4 py-5 text-center shadow-sm">
                   <Icon name={hasNoSyncedRepositories ? 'sync_disabled' : 'hub'} size={42} className="mx-auto mb-2 text-on-surface-variant/45" />
-                  <p className="font-body-md text-sm font-semibold text-on-surface">
+                  <p className="text-sm font-semibold text-on-surface">
                     {hasNoSyncedRepositories ? '还没有可视化的 Stars 数据' : '还没有可视化标签'}
                   </p>
                   <p className="mx-auto mt-1 max-w-[420px] text-xs leading-relaxed text-on-surface-variant">
@@ -451,146 +480,129 @@ export function TagNetworkPage(props: TagNetworkPageProps) {
                   )}
                 </div>
               )}
-              <div className="absolute bottom-4 left-5 right-5 z-10 flex flex-wrap gap-2">
-                <span className="px-3 py-1 rounded-full bg-surface-container-lowest/80 border border-outline-variant/20 backdrop-blur-md font-label-sm text-on-surface shadow-sm">
-                  节点: {totalTags}
-                </span>
-                <span className="px-3 py-1 rounded-full bg-surface-container-lowest/80 border border-outline-variant/20 backdrop-blur-md font-label-sm text-on-surface shadow-sm">
-                  关联: {totalLinks}
-                </span>
-                <span className="px-3 py-1 rounded-full bg-surface-container-lowest/80 border border-outline-variant/20 backdrop-blur-md font-label-sm text-on-surface shadow-sm">
-                  仓库: {totalRepos}
-                </span>
-                {networkNodes.length > 0 && (
-                  <span className="px-3 py-1 rounded-full bg-surface-container-lowest/80 border border-outline-variant/20 backdrop-blur-md font-label-sm text-on-surface shadow-sm">
-                    当前显示: {networkNodes.length} 节点 / {networkEdges.length} 关系
-                  </span>
-                )}
-              </div>
             </div>
 
-            {/* 标签分组 */}
-            <div className="glass-card rounded-xl p-4 sm:p-5">
-              <div className="flex justify-between items-center mb-5">
-                <h3 className="font-headline-md text-[16px] text-on-surface font-semibold">标签分组</h3>
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                {tagGroups.length === 0 ? (
-                  <div className="col-span-2 flex flex-col items-center justify-center py-8 text-on-surface-variant gap-2">
-                    <Icon name="label_off" size={48} className="opacity-30" />
-                    <p className="font-body-md text-sm">创建并绑定标签后即可查看分组</p>
-                  </div>
-                ) : (
-                  tagGroups.map((group) => (
-                    <div
-                      key={group.id}
-                      className="p-4 rounded-lg bg-surface-container-low border border-outline-variant/20 hover:border-primary/30 transition-colors"
-                    >
-                      <div className="flex justify-between items-start mb-3">
-                        <div className="flex items-center gap-2">
-                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: group.color }} />
-                          <h4 className="font-body-md font-medium text-on-surface">{group.name}</h4>
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-2 mb-3">
-                        {group.tags.map((tag, i) => (
-                          <button
-                            key={tag.id}
-                            type="button"
-                            onClick={() => props.onSelectTag(tag.id)}
-                            className="tag-pill px-2.5 py-1 rounded-md font-label-sm text-on-surface-variant text-xs hover:text-primary"
-                          >
-                            {tag.name} ({tag.count > 1000 ? `${(tag.count / 1000).toFixed(0)}k` : tag.count})
-                          </button>
-                        ))}
-                      </div>
-                      <div className="text-xs text-on-surface-variant font-label-sm">
-                        包含 {group.tagCount} 个标签 · {group.repoCount} 个仓库
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
+            <div className="flex flex-wrap gap-2 border-t border-card-border p-4">
+              <StatChip label="标签" value={totalTags} />
+              <StatChip label="关联" value={totalLinks} />
+              <StatChip label="仓库" value={totalRepos} />
+              {networkNodes.length > 0 && (
+                <StatChip label="当前显示" value={`${networkNodes.length} 节点 / ${networkEdges.length} 关系`} />
+              )}
             </div>
           </div>
 
-          {/* 右侧辅助列 */}
-          <div className="space-y-5">
-            {/* 热门标签 */}
-            <div className="glass-card rounded-xl p-4 sm:p-5">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="font-headline-md text-[16px] text-on-surface font-semibold flex items-center gap-2">
-                  <Icon name="trending_up" size={18} className="text-tertiary-container" />
-                  热门标签
-                </h3>
-              </div>
-              <div className="space-y-3">
-                {trendingTags.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-8 text-on-surface-variant gap-2">
-                    <Icon name="label_off" size={48} className="opacity-30" />
-                    <p className="font-body-md text-sm">暂无标签</p>
-                  </div>
-                ) : (
-                  trendingTags.map((tag, index) => (
-                    <button
-                      type="button"
-                      key={tag.id}
-                      onClick={() => props.onSelectTag(tag.id)}
-                      className="flex items-center justify-between p-2 rounded-lg hover:bg-surface-container-low transition-colors group cursor-pointer border border-transparent hover:border-outline-variant/20"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="w-6 text-center font-label-sm text-on-surface-variant text-xs">{index + 1}</div>
-                        <div className="font-body-md font-medium text-on-surface">#{tag.name}</div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <span className="font-label-sm text-xs text-on-surface-variant bg-surface-container px-2 py-0.5 rounded">
-                          {tag.repoCount} 库
-                        </span>
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
+          {/* 热门标签 */}
+          <div className="tn-panel p-4 sm:p-5">
+            <h3 className="mb-4 flex items-center gap-2 text-base font-semibold text-on-surface">
+              <Icon name="local_fire_department" size={18} className="text-[#f97316]" />
+              热门标签
+            </h3>
+            <div className="space-y-1">
+              {trendingTags.length === 0 ? (
+                <div className="flex flex-col items-center justify-center gap-2 py-8 text-on-surface-variant">
+                  <Icon name="label_off" size={40} className="opacity-30" />
+                  <p className="text-sm">暂无标签</p>
+                </div>
+              ) : (
+                trendingTags.map((tag, index) => (
+                  <button
+                    type="button"
+                    key={tag.id}
+                    onClick={() => props.onSelectTag(tag.id)}
+                    className="group flex w-full items-center gap-3 rounded-lg border border-transparent px-2 py-2 text-left transition-colors hover:border-card-border hover:bg-surface-container-low"
+                  >
+                    <span className="w-4 shrink-0 text-center text-xs font-semibold tabular-nums text-on-surface-variant">{index + 1}</span>
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium text-on-surface">{tag.name}</span>
+                    <span className="tn-heatbar hidden w-14 shrink-0 sm:block xl:w-16" aria-hidden="true">
+                      <span style={{ width: `${Math.max(8, (tag.repoCount / maxTrendingRepoCount) * 100)}%` }} />
+                    </span>
+                    <span className="shrink-0 text-xs font-semibold tabular-nums text-on-surface-variant">{tag.repoCount} 库</span>
+                    <Icon name="chevron_right" size={16} className="shrink-0 text-on-surface-variant/50 transition-colors group-hover:text-primary" />
+                  </button>
+                ))
+              )}
             </div>
           </div>
         </div>
 
+        {/* 标签分组：高频 / 常用 / 轻量 */}
+        {tagStats.length > 0 && (
+          <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
+            {tagGroups.map((group) => (
+              <div key={group.id} className={`tn-panel tn-group-${group.tone} flex flex-col p-4 sm:p-5`}>
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="size-2.5 rounded-full" style={{ backgroundColor: group.color }} />
+                    <h4 className="text-sm font-semibold text-on-surface">{group.name}</h4>
+                  </div>
+                  <span className="shrink-0 text-xs text-on-surface-variant">{group.hint}</span>
+                </div>
+                {group.tags.length === 0 ? (
+                  <p className="flex-1 py-3 text-xs text-on-surface-variant">暂无该类标签</p>
+                ) : (
+                  <div className="flex flex-1 flex-wrap content-start gap-2">
+                    {group.tags.map((tag) => (
+                      <button key={tag.id} type="button" onClick={() => props.onSelectTag(tag.id)} className="tn-chip">
+                        {tag.name} <span className="opacity-65">({tag.count})</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-3 flex items-center gap-1.5 border-t border-card-border pt-3 text-xs text-on-surface-variant">
+                  <Icon name="folder_open" size={14} />
+                  {group.tagCount} 个标签 · {group.repoCount} 个仓库
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* 标签云 */}
-        <div className="glass-card rounded-xl p-4 sm:p-5">
+        <div className="tn-panel p-4 sm:p-5">
           <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h3 className="font-headline-md text-[16px] text-on-surface font-semibold">标签云</h3>
-            <div className="flex gap-2">
-              <select
-                value={cloudSort}
-                onChange={(event) => setCloudSort(event.target.value as 'hot' | 'name' | 'recent')}
-                className="bg-surface-container-low border border-outline-variant/30 rounded-lg px-3 py-1.5 text-sm font-body-md focus:outline-none focus:ring-1 focus:ring-primary"
-              >
-                <option value="hot">按热度排序</option>
-                <option value="name">按字母排序</option>
-                <option value="recent">最近添加</option>
-              </select>
+            <h3 className="flex items-center gap-2 text-base font-semibold text-on-surface">
+              <Icon name="cloud" size={18} className="text-primary" />
+              标签云
+            </h3>
+            <div className="tn-seg" role="group" aria-label="标签云排序">
+              {([
+                { key: 'hot', label: '按热度' },
+                { key: 'name', label: '按字母' },
+                { key: 'recent', label: '最近添加' },
+              ] as const).map((option) => (
+                <button
+                  key={option.key}
+                  type="button"
+                  data-active={cloudSort === option.key}
+                  onClick={() => setCloudSort(option.key)}
+                >
+                  {option.label}
+                </button>
+              ))}
             </div>
           </div>
           <div className="flex flex-wrap gap-2 md:gap-3">
             {cloudTags.length === 0 ? (
-              <p className="text-on-surface-variant font-body-md">暂无标签。同步 Stars 后，可以手动创建标签，或使用 AI 生成标签网络。</p>
+              <p className="text-sm text-on-surface-variant">暂无标签。同步 Stars 后，可以手动创建标签，或使用 AI 生成标签网络。</p>
             ) : (
-              cloudTags.map((tag, index) => {
+              cloudTags.map((tag) => {
                 const ratio = tag.repoCount / maxCloudRepoCount;
-                const sizeClass = ratio > 0.7 ? 'px-4 py-2 text-base' : ratio > 0.4 ? 'px-3 py-1.5 text-sm' : 'px-2.5 py-1 text-xs';
-                const radiusClass = ratio > 0.7 ? 'rounded-xl' : ratio > 0.4 ? 'rounded-lg' : 'rounded-md';
+                const sizeClass = ratio > 0.7 ? 'px-4 py-2 text-lg font-bold' : ratio > 0.4 ? 'px-3 py-1.5 text-sm font-semibold' : 'px-2.5 py-1 text-xs font-medium';
                 const isHot = ratio > 0.7;
                 return (
                   <button
                     type="button"
                     key={tag.id}
                     onClick={() => props.onSelectTag(tag.id)}
-                    className={`tag-pill ${sizeClass} ${radiusClass} font-body-md cursor-pointer flex items-center gap-1 ${
-                      isHot ? 'border-primary/30 bg-primary/5' : 'opacity-80'
+                    className={`inline-flex items-center gap-1 rounded-lg border transition-colors ${sizeClass} ${
+                      isHot
+                        ? 'border-primary/25 bg-[var(--tn-primary-soft)] text-primary hover:bg-primary/10'
+                        : 'border-card-border bg-surface-container-low text-on-surface hover:border-primary/40 hover:text-primary'
                     }`}
                   >
-                    <span className="text-primary font-bold">#</span> {tag.name}
-                    <span className="text-xs text-on-surface-variant ml-1">{tag.repoCount}</span>
+                    {tag.name}
+                    <span className="text-xs font-normal text-on-surface-variant">{tag.repoCount}</span>
                   </button>
                 );
               })
@@ -599,6 +611,15 @@ export function TagNetworkPage(props: TagNetworkPageProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+function StatChip(props: { label: string; value: number | string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-card-border bg-surface-container-low px-3 py-1 text-xs text-on-surface-variant">
+      {props.label}
+      <span className="font-semibold tabular-nums text-on-surface">{props.value}</span>
+    </span>
   );
 }
 

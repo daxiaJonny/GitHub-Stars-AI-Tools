@@ -169,5 +169,36 @@ CREATE TABLE IF NOT EXISTS github_recommendation_candidates (
 CREATE INDEX IF NOT EXISTS idx_recommendation_candidates_account_status ON github_recommendation_candidates(account_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_recommendation_candidates_account_full_name ON github_recommendation_candidates(account_id, full_name);
 
+CREATE TABLE IF NOT EXISTS github_recommendation_documents (
+  account_id TEXT NOT NULL,
+  full_name TEXT NOT NULL,
+  raw_markdown TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  fetched_at TEXT NOT NULL,
+  translation_markdown_zh TEXT,
+  translation_model TEXT,
+  translation_input_tokens INTEGER,
+  translation_output_tokens INTEGER,
+  translation_source_char_count INTEGER,
+  translation_translated_char_count INTEGER,
+  translation_is_truncated INTEGER,
+  translation_source_hash TEXT,
+  translation_generated_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (account_id, full_name),
+  FOREIGN KEY (account_id) REFERENCES github_accounts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_recommendation_documents_account_updated ON github_recommendation_documents(account_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS github_ranking_cache (
+  cache_key TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  fetched_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_ranking_cache_fetched_at ON github_ranking_cache(fetched_at DESC);
+
 INSERT OR IGNORE INTO schema_migrations(version, name)
 VALUES ('001', 'initial_schema');

@@ -18,6 +18,42 @@ export type GitHubAuthState = {
   user: GitHubUser | null;
 };
 
+export type AppPage = 'dashboard' | 'repositories' | 'discover' | 'rankings' | 'tag-network' | 'ai-search' | 'profile' | 'settings';
+
+export type RankingSection = 'global' | 'personal';
+export type GithubRankingKind = 'trending' | 'rising' | 'popular';
+export type PersonalRankingKind = 'stars' | 'updated' | 'starred';
+
+export type RankingItem = {
+  fullName: string;
+  description: string | null;
+  language: string | null;
+  topics: string[];
+  htmlUrl: string;
+  starsCount: number;
+  forksCount: number;
+  pushedAt: string | null;
+  starredAt: string | null;
+  isStarred: boolean;
+};
+
+export type RankingPage = {
+  kind: GithubRankingKind | PersonalRankingKind;
+  items: RankingItem[];
+  totalCount: number;
+  page: number;
+  limit: number;
+  hasMore: boolean;
+  generatedAt: string;
+  isStale: boolean;
+  fromCache: boolean;
+};
+
+export type RankingStarResult = {
+  fullName: string;
+  isStarred: boolean;
+};
+
 export type StarSyncSummary = {
   accountLogin: string;
   activeCount: number;
@@ -25,7 +61,6 @@ export type StarSyncSummary = {
   updatedCount: number;
   removedCount: number;
   scannedCount: number;
-  mode: 'full' | 'incremental';
 };
 
 export type ReadmeFetchSummary = {
@@ -280,6 +315,8 @@ export type AiTagNetworkSummary = {
 export type GithubRepositoryRecommendation = {
   candidateId: string | null;
   candidateStatus: 'new' | 'marked' | 'ignored' | 'starred' | null;
+  candidateUpdatedAt: string | null;
+  candidateCategory: string | null;
   fullName: string;
   description: string | null;
   language: string | null;
@@ -295,6 +332,41 @@ export type GithubRecommendationResponse = {
   queries: string[];
   searchFailures: { query: string; error: string }[];
   results: GithubRepositoryRecommendation[];
+};
+
+export type GithubRecommendationPage = {
+  rationaleZh: string;
+  queries: string[];
+  results: GithubRepositoryRecommendation[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  categories: GithubRecommendationCategoryCount[];
+};
+
+export type GithubRecommendationCategoryCount = {
+  value: string;
+  label: string;
+  count: number;
+};
+
+export type GithubRecommendationReadme = {
+  fullName: string;
+  rawMarkdown: string;
+  sourcePath: string;
+  fetchedAt: string;
+  fromCache: boolean;
+  translation: GithubReadmeTranslation | null;
+};
+
+export type GithubReadmeTranslation = {
+  markdownZh: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  sourceCharCount: number;
+  translatedCharCount: number;
+  isTruncated: boolean;
 };
 
 export type TagGroup = {
@@ -320,7 +392,7 @@ export type AiSearchResult = {
 
 export type AiSearchResponse = {
   query: string;
-  mode: 'local_knowledge' | 'keyword' | 'natural_language' | 'hybrid' | 'ai_enhanced';
+  mode: 'conversation' | 'local_knowledge' | 'keyword' | 'natural_language' | 'vector' | 'hybrid' | 'ai_enhanced';
   results: AiSearchResult[];
   totalCount: number;
   contextQueriesUsed: string[];
@@ -329,6 +401,10 @@ export type AiSearchResponse = {
   aiQuery: string | null;
   aiRationaleZh: string | null;
   aiError: string | null;
+  answerZh: string | null;
+  retrievalMode: 'none' | 'keyword' | 'vector' | 'vector+keyword';
+  vectorApplied: boolean;
+  vectorError: string | null;
 };
 
 /* ===========================================================================
@@ -345,5 +421,5 @@ export type ProfileStats = {
   recentRepos: RepositoryListItem[];
 };
 
-export type { AppSettings, ThemeSettings, SyncSettings, AISettings, GeneralSettings } from './types-settings';
+export type { AppSettings, ThemeSettings, SyncSettings, AISettings, EmbeddingSettings, GeneralSettings } from './types-settings';
 export { DEFAULT_SETTINGS, COLOR_PRESETS } from './types-settings';

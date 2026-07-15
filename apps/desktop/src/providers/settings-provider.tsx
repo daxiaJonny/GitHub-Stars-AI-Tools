@@ -49,7 +49,9 @@ function applyThemeSettings(settings: AppSettings) {
   };
 
   root.style.setProperty('--color-primary', brandColor);
+  root.style.setProperty('--gsat-brand-color', brandColor);
   root.style.setProperty('--color-on-primary', primaryForeground);
+  root.style.setProperty('--gsat-brand-foreground', primaryForeground);
   root.style.setProperty('--color-primary-foreground', primaryForeground);
   root.style.setProperty('--color-primary-container', brandColor);
   root.style.setProperty('--color-on-primary-container', primaryForeground);
