@@ -220,7 +220,6 @@ struct OpenAiModelsResponse {
 #[derive(Deserialize)]
 struct OpenAiEmbeddingResponse {
     data: Vec<OpenAiEmbeddingRecord>,
-    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -579,17 +578,11 @@ pub fn embed_text(
     if vector.iter().any(|value| !value.is_finite()) {
         return Err("Embedding 响应包含无效数值".to_owned());
     }
-    Ok(EmbeddingTestResultWithVector {
-        model: parsed
-            .model
-            .unwrap_or_else(|| config.model.trim().to_owned()),
-        vector,
-    })
+    Ok(EmbeddingTestResultWithVector { vector })
 }
 
 #[derive(Debug)]
 pub struct EmbeddingTestResultWithVector {
-    pub model: String,
     pub vector: Vec<f32>,
 }
 
@@ -3012,7 +3005,6 @@ mod tests {
         };
 
         let result = embed_text(&config, "Rust semantic search").expect("应解析 Embedding 响应");
-        assert_eq!(result.model, "embedding-test");
         assert_eq!(result.vector, vec![0.1, 0.2, 0.3]);
         let request = request_handle.join().expect("测试服务应正常退出");
         assert!(request.starts_with("POST /test/embeddings HTTP/1.1"));
