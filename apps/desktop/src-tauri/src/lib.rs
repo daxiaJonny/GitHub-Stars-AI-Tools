@@ -1,10 +1,13 @@
 mod ai;
 mod auth;
+mod embedding;
+mod embedding_state;
 mod github;
 mod ranking_query;
 mod storage;
 mod vector_index;
 
+use embedding::EmbeddingProviderPort;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -21,9 +24,10 @@ use tauri::{Emitter, Manager};
 
 const TASK_PROGRESS_EVENT: &str = "task-progress";
 const AI_STREAM_EVENT: &str = "ai-stream";
+const EMBEDDING_RUNTIME_EVENT: &str = "embedding-runtime-status";
 const README_FETCH_CONCURRENCY: usize = 6;
 const GITHUB_RECOMMENDATION_REFERENCE_LIMIT: usize = 8;
-const VECTOR_MODEL_VERSION: &str = "repository-knowledge-v1";
+const DEFAULT_OPENAI_EMBEDDING_BASE_URL: &str = "https://api.openai.com/v1";
 const AI_API_KEY_SERVICE: &str = "github-stars-ai-tools";
 const EMBEDDING_API_KEY_ACCOUNT: &str = "embedding-api-key:openai-compatible";
 const AI_API_KEY_PROVIDER_ACCOUNTS: &[&str] = &[
@@ -36,6 +40,13 @@ const GITHUB_AUTH_STATE_TOTAL_TIMEOUT_SECONDS: u64 = 25;
 const GITHUB_CONNECT_TOTAL_TIMEOUT_SECONDS: u64 = 25;
 static BACKGROUND_TASK_QUEUE: OnceLock<(Mutex<BackgroundTaskQueueState>, Condvar)> =
     OnceLock::new();
+static EMBEDDING_MAINTENANCE_WAKE: OnceLock<(Mutex<bool>, Condvar)> = OnceLock::new();
+
+#[derive(Deserialize, Serialize)]
+struct StoredEmbeddingApiCredential {
+    scope: String,
+    api_key: String,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -344,7 +355,10 @@ where
     );
 
     match run_background_task(task_label, operation).await {
-        Ok(output) => Ok(output),
+        Ok(output) => {
+            notify_embedding_maintenance();
+            Ok(output)
+        }
         Err(error) => {
             emit_task_progress(
                 &app_handle,
@@ -370,7 +384,10 @@ where
         .await
         .map_err(|error| format!("{task_label}执行失败：{error}"))?
     {
-        Ok(output) => Ok(output),
+        Ok(output) => {
+            notify_embedding_maintenance();
+            Ok(output)
+        }
         Err(error) => {
             emit_task_progress(
                 &app_handle,
@@ -608,6 +625,13 @@ struct VectorIndexStatusRequest {
     embedding_config: Option<ai::EmbeddingRequestConfig>,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmbeddingRuntimeRequest {
+    account_id: String,
+    embedding_config: Option<ai::EmbeddingRequestConfig>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct VectorIndexBuildSummary {
@@ -617,6 +641,13 @@ struct VectorIndexBuildSummary {
     skipped_count: usize,
     failed_count: usize,
     failures: Vec<String>,
+    #[serde(skip_serializing)]
+    failed_repository_ids: Vec<String>,
+}
+
+enum VectorBuildState {
+    Restored,
+    Indexed,
 }
 
 #[derive(Serialize)]
@@ -1041,22 +1072,71 @@ fn save_ai_api_key(provider: String, api_key: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn has_embedding_api_key() -> Result<bool, String> {
-    Ok(
-        auth::read_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT)?
-            .as_deref()
-            .is_some_and(|api_key| !api_key.trim().is_empty()),
-    )
+fn has_embedding_api_key(provider: String, base_url: Option<String>) -> Result<bool, String> {
+    Ok(read_embedding_api_key(&provider, base_url.as_deref())?.is_some())
 }
 
 #[tauri::command]
-fn save_embedding_api_key(api_key: String) -> Result<(), String> {
-    auth::save_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT, &api_key)
+fn save_embedding_api_key(
+    provider: String,
+    base_url: Option<String>,
+    api_key: String,
+) -> Result<(), String> {
+    let normalized_api_key = api_key.trim();
+    if normalized_api_key.is_empty() {
+        return clear_embedding_api_key();
+    }
+    let credential = StoredEmbeddingApiCredential {
+        scope: embedding_api_key_scope(&provider, base_url.as_deref())?,
+        api_key: normalized_api_key.to_owned(),
+    };
+    let serialized = serde_json::to_string(&credential)
+        .map_err(|error| format!("Embedding Key 安全记录序列化失败：{error}"))?;
+    auth::save_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT, &serialized)
 }
 
 #[tauri::command]
 fn clear_embedding_api_key() -> Result<(), String> {
     auth::delete_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT)
+}
+
+fn read_embedding_api_key(
+    provider: &str,
+    base_url: Option<&str>,
+) -> Result<Option<String>, String> {
+    let expected_scope = embedding_api_key_scope(provider, base_url)?;
+    let Some(serialized) =
+        auth::read_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT)?
+    else {
+        return Ok(None);
+    };
+    Ok(embedding_api_key_from_serialized(
+        &serialized,
+        &expected_scope,
+    ))
+}
+
+fn embedding_api_key_from_serialized(serialized: &str, expected_scope: &str) -> Option<String> {
+    let credential = serde_json::from_str::<StoredEmbeddingApiCredential>(serialized).ok()?;
+    (credential.scope == expected_scope && !credential.api_key.trim().is_empty())
+        .then_some(credential.api_key)
+}
+
+fn embedding_api_key_scope(provider: &str, base_url: Option<&str>) -> Result<String, String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    if !matches!(provider.as_str(), "openai" | "openai-compatible") {
+        return Err("Embedding Key 只能保存到 OpenAI 或 OpenAI 兼容接口配置。".to_owned());
+    }
+    let base_url = base_url
+        .map(str::trim)
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    let base_url = if provider == "openai" && base_url.is_empty() {
+        DEFAULT_OPENAI_EMBEDDING_BASE_URL
+    } else {
+        base_url
+    };
+    Ok(format!("{provider}\n{base_url}"))
 }
 
 fn read_ai_api_key_for_provider(provider: &str) -> Result<Option<String>, String> {
@@ -1103,19 +1183,34 @@ fn hydrate_embedding_request_config(
     config: Option<ai::EmbeddingRequestConfig>,
 ) -> Result<Option<ai::EmbeddingRequestConfig>, String> {
     let saved_config = load_saved_embedding_request_config(app_handle)?;
-    let Some(mut config) = config.or(saved_config) else {
+    let Some(config) = config.or(saved_config) else {
         return Ok(None);
     };
     if !config.enabled || config.provider.trim().eq_ignore_ascii_case("none") {
         return Ok(None);
     }
+    if config
+        .provider
+        .trim()
+        .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+    {
+        let mut local = config;
+        local.api_key.clear();
+        local.base_url = None;
+        local.model = embedding::LOCAL_MODEL_ID.to_owned();
+        local.dimensions = embedding::LOCAL_DIMENSIONS;
+        local.min_score = local.min_score.clamp(0.0, 1.0);
+        local.max_results = local.max_results.clamp(1, 10);
+        return Ok(Some(local));
+    }
+    let mut config = config;
     if config.api_key.trim().is_empty() {
         let can_use_keyless_local = config
             .provider
             .trim()
             .eq_ignore_ascii_case("openai-compatible")
             && config.base_url.as_deref().is_some_and(is_local_ai_base_url);
-        match auth::read_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT) {
+        match read_embedding_api_key(&config.provider, config.base_url.as_deref()) {
             Ok(Some(api_key)) if !api_key.trim().is_empty() => config.api_key = api_key,
             Ok(_) => {}
             Err(_) if can_use_keyless_local => {}
@@ -1125,6 +1220,18 @@ fn hydrate_embedding_request_config(
     config.max_results = config.max_results.clamp(1, 10);
     config.min_score = config.min_score.clamp(0.0, 1.0);
     Ok(Some(config))
+}
+
+fn embedding_storage_model(config: &ai::EmbeddingRequestConfig) -> String {
+    embedding::profile_for_config(config).profile_id()
+}
+
+fn embedding_storage_version(config: &ai::EmbeddingRequestConfig) -> String {
+    embedding::profile_for_config(config).knowledge_text_version
+}
+
+fn embedding_display_model(config: &ai::EmbeddingRequestConfig) -> String {
+    embedding::profile_for_config(config).model
 }
 
 fn can_use_ai_without_api_key(config: &ai::AiRequestConfig) -> bool {
@@ -1229,19 +1336,32 @@ fn embedding_request_config_from_settings_value(
     settings: &serde_json::Value,
 ) -> Option<ai::EmbeddingRequestConfig> {
     let embedding = settings.get("embedding")?.as_object()?;
+    let mut provider = json_string_field(embedding, "provider")
+        .unwrap_or_else(|| embedding::LOCAL_PROVIDER_ID.to_owned());
+    let legacy_disabled = provider.eq_ignore_ascii_case("none");
+    if legacy_disabled {
+        provider = embedding::LOCAL_PROVIDER_ID.to_owned();
+    }
     let enabled = embedding
         .get("enabled")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+        .unwrap_or(false)
+        && !legacy_disabled;
     let dimensions = embedding
         .get("dimensions")
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(1536);
+        .unwrap_or_else(|| {
+            if provider.eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID) {
+                embedding::LOCAL_DIMENSIONS
+            } else {
+                1536
+            }
+        });
     let min_score = embedding
         .get("minScore")
         .and_then(serde_json::Value::as_f64)
-        .unwrap_or(0.72) as f32;
+        .unwrap_or(0.80) as f32;
     let max_results = embedding
         .get("maxResults")
         .and_then(serde_json::Value::as_u64)
@@ -1249,7 +1369,7 @@ fn embedding_request_config_from_settings_value(
         .unwrap_or(8);
     Some(ai::EmbeddingRequestConfig {
         enabled,
-        provider: json_string_field(embedding, "provider").unwrap_or_else(|| "none".to_owned()),
+        provider,
         api_key: String::new(),
         base_url: json_string_field(embedding, "baseUrl").filter(|value| !value.trim().is_empty()),
         model: json_string_field(embedding, "model").unwrap_or_default(),
@@ -1294,14 +1414,420 @@ async fn test_embedding_connection(
     tauri::async_runtime::spawn_blocking(move || {
         let config = hydrate_embedding_request_config(&app_handle, Some(request.embedding_config))?
             .ok_or_else(|| "向量检索尚未启用".to_owned())?;
-        let result = ai::embed_text(&config, "GitHub Stars 本地知识库向量检索测试")?;
+        let cache_dir = app_handle
+            .path()
+            .app_cache_dir()
+            .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+        let service = embedding::EmbeddingService::new(config, cache_dir);
+        service.prepare(&|_| {})?;
+        let vector = service.embed_query("GitHub Stars 本地知识库向量检索测试")?;
         Ok(ai::EmbeddingTestResult {
-            model: result.model,
-            dimensions: result.vector.len(),
+            model: service.descriptor().model,
+            dimensions: vector.len(),
         })
     })
     .await
     .map_err(|error| format!("Embedding 配置测试执行失败：{error}"))?
+}
+
+fn local_embedding_config() -> ai::EmbeddingRequestConfig {
+    ai::EmbeddingRequestConfig {
+        enabled: true,
+        provider: embedding::LOCAL_PROVIDER_ID.to_owned(),
+        api_key: String::new(),
+        base_url: None,
+        model: embedding::LOCAL_MODEL_ID.to_owned(),
+        dimensions: embedding::LOCAL_DIMENSIONS,
+        min_score: 0.80,
+        max_results: 8,
+    }
+}
+
+fn emit_embedding_runtime_status(
+    app_handle: &tauri::AppHandle,
+    account_id: &str,
+    status: embedding::EmbeddingRuntimeStatus,
+) -> embedding::EmbeddingRuntimeStatus {
+    let status = embedding::set_runtime_status(account_id, status).unwrap_or_else(|_| {
+        embedding::EmbeddingRuntimeStatus::local(account_id, "error", "Embedding 状态保存失败")
+    });
+    let _ = app_handle.emit(EMBEDDING_RUNTIME_EVENT, status.clone());
+    status
+}
+
+fn read_local_runtime_status(
+    app_handle: &tauri::AppHandle,
+    account_id: &str,
+    enabled: bool,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    if !enabled {
+        let mut status =
+            embedding::EmbeddingRuntimeStatus::local(account_id, "disabled", "向量检索尚未启用");
+        status.enabled = false;
+        let cache_dir = app_handle
+            .path()
+            .app_cache_dir()
+            .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+        status.cache_bytes = embedding::local_cache_size(&cache_dir);
+        return Ok(status);
+    }
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+    let config = local_embedding_config();
+    let storage_model = embedding_storage_model(&config);
+    let storage_version = embedding_storage_version(&config);
+    let storage = AppStorage::from_app_handle(app_handle)?;
+    let candidates = storage.list_vector_index_candidates(
+        account_id,
+        &storage_model,
+        config.dimensions,
+        &storage_version,
+    )?;
+    let sqlite_state = storage.get_repository_embedding_state(
+        account_id,
+        &storage_model,
+        config.dimensions,
+        &storage_version,
+    )?;
+    let index = vector_index::ZvecRepositoryIndex::from_app_handle(app_handle)?;
+    let zvec_count = index
+        .count(account_id, &storage_model, config.dimensions)
+        .unwrap_or(0);
+    let zvec_fingerprint = index
+        .bucket_fingerprint(account_id, &storage_model, config.dimensions)
+        .ok()
+        .flatten();
+    let model_ready = embedding::local_model_is_ready(&cache_dir);
+    let index_ready = embedding_snapshot_is_ready(
+        candidates.len(),
+        sqlite_state.count,
+        zvec_count,
+        zvec_fingerprint.as_deref(),
+        &sqlite_state.fingerprint,
+    );
+    let ready = model_ready && index_ready;
+    let state = if !model_ready {
+        "missing"
+    } else if ready {
+        "ready"
+    } else {
+        "partial"
+    };
+    let message = match state {
+        "missing" => "本地模型尚未下载，打开开关后即可准备".to_owned(),
+        "ready" => format!("本地向量检索可用，共 {zvec_count} 个仓库"),
+        _ if sqlite_state.count == 0 => "模型已准备，尚未生成仓库向量".to_owned(),
+        _ => "本地向量索引需要增量恢复或重建".to_owned(),
+    };
+    let mut status = embedding::EmbeddingRuntimeStatus::local(account_id, state, message);
+    status.cache_bytes = embedding::local_cache_size(&cache_dir);
+    status.indexed_count = zvec_count;
+    status.total_count = candidates.len();
+    Ok(status)
+}
+
+fn embedding_snapshot_is_ready(
+    candidate_count: usize,
+    sqlite_count: usize,
+    zvec_count: usize,
+    zvec_fingerprint: Option<&str>,
+    sqlite_fingerprint: &str,
+) -> bool {
+    sqlite_count == candidate_count
+        && zvec_count == sqlite_count
+        && zvec_fingerprint == Some(sqlite_fingerprint)
+}
+
+fn run_local_embedding_setup(
+    app_handle: tauri::AppHandle,
+    account_id: String,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    if account_id.trim().is_empty() {
+        return Err("缺少 GitHub 账号编号，无法建立向量索引".to_owned());
+    }
+    embedding::begin_runtime_job(&account_id)?;
+    let result: Result<embedding::EmbeddingRuntimeStatus, String> = (|| {
+        emit_embedding_runtime_status(
+            &app_handle,
+            &account_id,
+            embedding::EmbeddingRuntimeStatus::local(
+                &account_id,
+                "downloading",
+                "正在下载本地 Embedding 模型",
+            ),
+        );
+        let cache_dir = app_handle
+            .path()
+            .app_cache_dir()
+            .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+        let provider = embedding::local_provider();
+        let stage_account = account_id.clone();
+        provider.prepare(&cache_dir, &|stage| {
+            let (state, message) = match stage {
+                "verifying" => ("verifying", "正在校验本地模型工件"),
+                "loading" => ("loading", "正在加载本地 Embedding 模型"),
+                _ => ("downloading", "正在下载本地 Embedding 模型"),
+            };
+            emit_embedding_runtime_status(
+                &app_handle,
+                &stage_account,
+                embedding::EmbeddingRuntimeStatus::local(&stage_account, state, message),
+            );
+        })?;
+        emit_embedding_runtime_status(
+            &app_handle,
+            &account_id,
+            embedding::EmbeddingRuntimeStatus::local(
+                &account_id,
+                "indexing",
+                "正在批量生成仓库向量并写入 zvec",
+            ),
+        );
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let claimed_dirty_ids = storage.take_dirty_embedding_repositories(&account_id, 500)?;
+        let summary = match rebuild_vector_index_worker(
+            app_handle.clone(),
+            RebuildVectorIndexRequest {
+                account_id: account_id.clone(),
+                embedding_config: Some(local_embedding_config()),
+            },
+        ) {
+            Ok(summary) => summary,
+            Err(error) => {
+                storage.queue_dirty_embedding_repositories(&account_id, &claimed_dirty_ids)?;
+                return Err(error);
+            }
+        };
+        storage.queue_dirty_embedding_repositories(&account_id, &summary.failed_repository_ids)?;
+        let mut status = read_local_runtime_status(&app_handle, &account_id, true)?;
+        status.state = if summary.failed_count == 0 {
+            "ready"
+        } else {
+            "partial"
+        }
+        .to_owned();
+        status.failed_count = summary.failed_count;
+        status.can_retry = summary.failed_count > 0;
+        status.message = if summary.failed_count == 0 {
+            format!("本地向量检索已就绪，共 {} 个仓库", summary.total_count)
+        } else {
+            format!("本地向量索引部分完成，{} 个仓库失败", summary.failed_count)
+        };
+        Ok(emit_embedding_runtime_status(
+            &app_handle,
+            &account_id,
+            status,
+        ))
+    })();
+    embedding::finish_runtime_job(&account_id);
+    match result {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            let status =
+                embedding::EmbeddingRuntimeStatus::local(&account_id, "error", error.clone());
+            emit_embedding_runtime_status(&app_handle, &account_id, status);
+            Err(error)
+        }
+    }
+}
+
+fn embedding_maintenance_wake() -> &'static (Mutex<bool>, Condvar) {
+    EMBEDDING_MAINTENANCE_WAKE.get_or_init(|| (Mutex::new(false), Condvar::new()))
+}
+
+fn notify_embedding_maintenance() {
+    let (pending, notifier) = embedding_maintenance_wake();
+    if let Ok(mut pending) = pending.lock() {
+        *pending = true;
+        notifier.notify_one();
+    }
+}
+
+fn wait_for_embedding_maintenance() {
+    let (pending, notifier) = embedding_maintenance_wake();
+    let Ok(pending) = pending.lock() else {
+        thread::sleep(Duration::from_secs(30));
+        return;
+    };
+    let Ok((mut pending, _)) =
+        notifier.wait_timeout_while(pending, Duration::from_secs(30), |pending| !*pending)
+    else {
+        return;
+    };
+    *pending = false;
+}
+
+fn run_embedding_maintenance_once(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(app_handle)?;
+    let Some(config) = load_saved_embedding_request_config(app_handle)? else {
+        return Ok(());
+    };
+    if !config.enabled
+        || !config
+            .provider
+            .trim()
+            .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+    {
+        return Ok(());
+    }
+    let Some(account) = storage.get_recent_github_account()? else {
+        return Ok(());
+    };
+    let account_id = account.id.to_string();
+    let status = read_local_runtime_status(app_handle, &account_id, true)?;
+    if matches!(
+        status.state.as_str(),
+        "missing" | "downloading" | "indexing"
+    ) {
+        return Ok(());
+    }
+    let dirty = !storage
+        .list_dirty_embedding_repositories(&account_id, 1)?
+        .is_empty();
+    if dirty || status.state == "partial" {
+        run_local_embedding_setup(app_handle.clone(), account_id)?;
+    }
+    Ok(())
+}
+
+fn start_embedding_maintenance(app_handle: tauri::AppHandle) {
+    thread::spawn(move || loop {
+        let _ = run_embedding_maintenance_once(&app_handle);
+        wait_for_embedding_maintenance();
+    });
+}
+
+#[tauri::command]
+async fn get_embedding_runtime_status(
+    app_handle: tauri::AppHandle,
+    request: EmbeddingRuntimeRequest,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = request
+            .embedding_config
+            .or(load_saved_embedding_request_config(&app_handle)?)
+            .unwrap_or_else(local_embedding_config);
+        if let Some(status) = embedding::runtime_status(&request.account_id) {
+            let requested_local = config
+                .provider
+                .trim()
+                .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID);
+            let status_local = status.provider == embedding::LOCAL_PROVIDER_ID;
+            let is_running = matches!(
+                status.state.as_str(),
+                "downloading" | "verifying" | "loading" | "indexing"
+            );
+            if is_running && status.enabled == config.enabled && requested_local == status_local {
+                return Ok(status);
+            }
+        }
+        if config
+            .provider
+            .trim()
+            .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+        {
+            read_local_runtime_status(&app_handle, &request.account_id, config.enabled)
+        } else {
+            let mut status = embedding::EmbeddingRuntimeStatus::local(
+                &request.account_id,
+                if config.enabled { "ready" } else { "disabled" },
+                if config.enabled {
+                    "远程 Embedding 配置已启用"
+                } else {
+                    "向量检索尚未启用"
+                },
+            );
+            let profile = embedding::profile_for_config(&config);
+            status.enabled = config.enabled;
+            status.provider = profile.provider.clone();
+            status.model = profile.model.clone();
+            status.revision = Some(profile.revision.clone());
+            status.profile_id = profile.profile_id();
+            status.dimensions = profile.dimensions;
+            Ok(status)
+        }
+    })
+    .await
+    .map_err(|error| format!("读取 Embedding 运行状态失败：{error}"))?
+}
+
+#[tauri::command]
+async fn enable_local_embedding(
+    app_handle: tauri::AppHandle,
+    request: EmbeddingRuntimeRequest,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_local_embedding_setup(app_handle, request.account_id)
+    })
+    .await
+    .map_err(|error| format!("启用本地 Embedding 失败：{error}"))?
+}
+
+#[tauri::command]
+async fn retry_embedding_setup(
+    app_handle: tauri::AppHandle,
+    request: EmbeddingRuntimeRequest,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    enable_local_embedding(app_handle, request).await
+}
+
+#[tauri::command]
+fn disable_embedding_runtime(
+    app_handle: tauri::AppHandle,
+    request: EmbeddingRuntimeRequest,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    embedding::local_provider().unload()?;
+    let mut status = embedding::EmbeddingRuntimeStatus::local(
+        &request.account_id,
+        "disabled",
+        "向量检索已关闭，当前使用关键词检索",
+    );
+    status.enabled = false;
+    Ok(emit_embedding_runtime_status(
+        &app_handle,
+        &request.account_id,
+        status,
+    ))
+}
+
+#[tauri::command]
+fn delete_local_embedding_model(
+    app_handle: tauri::AppHandle,
+    request: EmbeddingRuntimeRequest,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    if embedding::runtime_job_is_running() {
+        return Err("本地 Embedding 正在准备，请等待完成后再删除模型".to_owned());
+    }
+    let saved_enabled = load_saved_embedding_request_config(&app_handle)?.is_some_and(|config| {
+        config.enabled
+            && config
+                .provider
+                .trim()
+                .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+    });
+    if saved_enabled
+        || embedding::runtime_status(&request.account_id).is_some_and(|status| status.enabled)
+    {
+        return Err("请先关闭向量检索，再删除本地模型".to_owned());
+    }
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+    embedding::delete_local_model(&cache_dir)?;
+    let mut status = embedding::EmbeddingRuntimeStatus::local(
+        &request.account_id,
+        "missing",
+        "本地模型已删除，重新启用时会再次下载",
+    );
+    status.enabled = false;
+    Ok(emit_embedding_runtime_status(
+        &app_handle,
+        &request.account_id,
+        status,
+    ))
 }
 
 #[tauri::command]
@@ -1326,25 +1852,50 @@ fn rebuild_vector_index_worker(
 ) -> Result<VectorIndexBuildSummary, String> {
     let config = hydrate_embedding_request_config(&app_handle, request.embedding_config)?
         .ok_or_else(|| "请先在设置中启用并配置向量检索".to_owned())?;
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+    let service = embedding::EmbeddingService::new(config.clone(), cache_dir);
+    service.prepare(&|_| {})?;
+    let storage_model = embedding_storage_model(&config);
+    let storage_version = embedding_storage_version(&config);
     let storage = AppStorage::from_app_handle(&app_handle)?;
     let candidates = storage.list_vector_index_candidates(
         &request.account_id,
-        &config.model,
+        &storage_model,
         config.dimensions,
-        VECTOR_MODEL_VERSION,
+        &storage_version,
     )?;
-    let stored_embeddings = storage.list_stored_repository_embeddings(
+    let mut stored_embeddings = storage.list_stored_repository_embeddings(
         &request.account_id,
-        &config.model,
+        &storage_model,
         config.dimensions,
-        VECTOR_MODEL_VERSION,
+        &storage_version,
     )?;
+    if stored_embeddings.is_empty()
+        && !config
+            .provider
+            .trim()
+            .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+    {
+        let legacy_records = storage.list_stored_repository_embeddings(
+            &request.account_id,
+            &config.model,
+            config.dimensions,
+            "repository-knowledge-v1",
+        )?;
+        stored_embeddings.extend(legacy_records.into_iter().map(|mut record| {
+            record.model = storage_model.clone();
+            record
+        }));
+    }
     let stored_by_repo = stored_embeddings
         .into_iter()
         .map(|record| (record.repo_id.clone(), record))
         .collect::<HashMap<_, _>>();
     let index = vector_index::ZvecRepositoryIndex::from_app_handle(&app_handle)?;
-    index.reset_bucket(&request.account_id, &config.model, config.dimensions)?;
+    let mut built_records = Vec::with_capacity(candidates.len());
     let mut summary = VectorIndexBuildSummary {
         total_count: candidates.len(),
         indexed_count: 0,
@@ -1352,6 +1903,7 @@ fn rebuild_vector_index_worker(
         skipped_count: 0,
         failed_count: 0,
         failures: Vec::new(),
+        failed_repository_ids: Vec::new(),
     };
     emit_task_progress(
         &app_handle,
@@ -1366,58 +1918,94 @@ fn rebuild_vector_index_worker(
         ),
     );
 
-    for (position, candidate) in candidates.into_iter().enumerate() {
-        let result =
-            if candidate.existing_source_hash.as_deref() == Some(candidate.source_hash.as_str()) {
-                if let Some(stored) = stored_by_repo.get(&candidate.repo_id) {
-                    index
-                        .upsert(&vector_index::RepositoryVectorRecord {
-                            account_id: stored.account_id.clone(),
-                            repo_id: stored.repo_id.clone(),
-                            source_hash: stored.source_hash.clone(),
-                            model: stored.model.clone(),
-                            vector: stored.vector.clone(),
-                        })
-                        .map(|_| "restored")
-                } else {
-                    Ok("missing")
-                }
-            } else {
-                Ok("missing")
+    let mut pending_candidates = Vec::new();
+    for candidate in candidates {
+        let can_restore = candidate.existing_source_hash.as_deref()
+            == Some(candidate.source_hash.as_str())
+            || stored_by_repo
+                .get(&candidate.repo_id)
+                .is_some_and(|record| record.source_hash == candidate.source_hash);
+        if can_restore {
+            if let Some(stored) = stored_by_repo.get(&candidate.repo_id) {
+                summary.restored_count += 1;
+                built_records.push((
+                    VectorBuildState::Restored,
+                    candidate.full_name,
+                    stored.clone(),
+                ));
+                continue;
             }
-            .and_then(|state| {
-                if state == "restored" {
-                    return Ok(state);
-                }
-                let embedding = ai::embed_text(&config, &candidate.knowledge_text)?;
-                let record = storage::StoredRepositoryEmbedding {
-                    account_id: candidate.account_id.clone(),
-                    repo_id: candidate.repo_id.clone(),
-                    source_hash: candidate.source_hash.clone(),
-                    model: config.model.clone(),
-                    vector: embedding.vector,
-                };
-                storage.save_repository_embedding(&record, VECTOR_MODEL_VERSION)?;
-                index.upsert(&vector_index::RepositoryVectorRecord {
-                    account_id: record.account_id,
-                    repo_id: record.repo_id,
-                    source_hash: record.source_hash,
-                    model: record.model,
-                    vector: record.vector,
-                })?;
-                Ok("indexed")
-            });
+        }
+        pending_candidates.push(candidate);
+    }
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "rebuild-vector-index",
+            "vector-index",
+            "embedding",
+            summary.restored_count,
+            summary.total_count.max(1),
+            format!(
+                "已恢复 {} 个本地向量，准备批量生成 {} 个向量",
+                summary.restored_count,
+                pending_candidates.len()
+            ),
+            None,
+        ),
+    );
 
-        match result {
-            Ok("restored") => summary.restored_count += 1,
-            Ok("indexed") => summary.indexed_count += 1,
-            Ok(_) => summary.skipped_count += 1,
-            Err(error) => {
-                summary.failed_count += 1;
+    let batch_size = if config
+        .provider
+        .trim()
+        .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+    {
+        embedding::LOCAL_BATCH_SIZE
+    } else {
+        1
+    };
+    for batch in pending_candidates.chunks(batch_size) {
+        let texts = batch
+            .iter()
+            .map(|candidate| candidate.knowledge_text.clone())
+            .collect::<Vec<_>>();
+        match service.embed_passages(&texts) {
+            Ok(vectors) if vectors.len() == batch.len() => {
+                for (candidate, vector) in batch.iter().zip(vectors) {
+                    summary.indexed_count += 1;
+                    built_records.push((
+                        VectorBuildState::Indexed,
+                        candidate.full_name.clone(),
+                        storage::StoredRepositoryEmbedding {
+                            account_id: candidate.account_id.clone(),
+                            repo_id: candidate.repo_id.clone(),
+                            source_hash: candidate.source_hash.clone(),
+                            model: storage_model.clone(),
+                            vector,
+                        },
+                    ));
+                }
+            }
+            Ok(_) => {
+                summary.failed_count += batch.len();
+                summary
+                    .failed_repository_ids
+                    .extend(batch.iter().map(|candidate| candidate.repo_id.clone()));
                 if summary.failures.len() < 20 {
                     summary
                         .failures
-                        .push(format!("{}：{error}", candidate.full_name));
+                        .push("Embedding 批量返回数量不匹配".to_owned());
+                }
+            }
+            Err(error) => {
+                summary.failed_count += batch.len();
+                summary
+                    .failed_repository_ids
+                    .extend(batch.iter().map(|candidate| candidate.repo_id.clone()));
+                if summary.failures.len() < 20 {
+                    summary
+                        .failures
+                        .push(format!("{}：{error}", batch[0].full_name));
                 }
             }
         }
@@ -1427,16 +2015,85 @@ fn rebuild_vector_index_worker(
                 "rebuild-vector-index",
                 "vector-index",
                 "embedding",
-                position + 1,
+                summary.indexed_count + summary.restored_count + summary.failed_count,
                 summary.total_count.max(1),
                 format!(
                     "向量索引进度：新生成 {}，本地恢复 {}，失败 {}",
                     summary.indexed_count, summary.restored_count, summary.failed_count
                 ),
-                Some(candidate.full_name),
+                batch.first().map(|candidate| candidate.full_name.clone()),
             ),
         );
     }
+
+    let mut vector_records = built_records
+        .iter()
+        .map(|(_, _, record)| record.clone())
+        .collect::<Vec<_>>();
+    storage.replace_repository_embeddings(
+        &request.account_id,
+        &storage_model,
+        config.dimensions,
+        &storage_version,
+        &vector_records,
+    )?;
+    let current_source_hashes = storage
+        .list_vector_index_candidates(
+            &request.account_id,
+            &storage_model,
+            config.dimensions,
+            &storage_version,
+        )?
+        .into_iter()
+        .map(|candidate| (candidate.repo_id, candidate.source_hash))
+        .collect::<HashMap<_, _>>();
+    built_records.retain(|(state, full_name, record)| {
+        if current_source_hashes.get(&record.repo_id) == Some(&record.source_hash) {
+            return true;
+        }
+
+        match state {
+            VectorBuildState::Restored => summary.restored_count -= 1,
+            VectorBuildState::Indexed => summary.indexed_count -= 1,
+        }
+        summary.failed_count += 1;
+        summary.failed_repository_ids.push(record.repo_id.clone());
+        if summary.failures.len() < 20 {
+            summary
+                .failures
+                .push(format!("{full_name}：内容在重建期间发生变化，请重新重建"));
+        }
+        false
+    });
+    if built_records.len() != vector_records.len() {
+        vector_records = built_records
+            .iter()
+            .map(|(_, _, record)| record.clone())
+            .collect();
+        storage.replace_repository_embeddings(
+            &request.account_id,
+            &storage_model,
+            config.dimensions,
+            &storage_version,
+            &vector_records,
+        )?;
+    }
+    let zvec_records = vector_records
+        .into_iter()
+        .map(|record| vector_index::RepositoryVectorRecord {
+            account_id: record.account_id,
+            repo_id: record.repo_id,
+            source_hash: record.source_hash,
+            model: record.model,
+            vector: record.vector,
+        })
+        .collect::<Vec<_>>();
+    index.replace_bucket(
+        &request.account_id,
+        &storage_model,
+        config.dimensions,
+        &zvec_records,
+    )?;
 
     emit_task_progress(
         &app_handle,
@@ -1486,30 +2143,36 @@ async fn get_vector_index_status(
                 message: "向量检索尚未启用".to_owned(),
             });
         };
+        let storage_model = embedding_storage_model(&config);
+        let storage_version = embedding_storage_version(&config);
         let storage = AppStorage::from_app_handle(&app_handle)?;
-        let sqlite_count = storage
-            .list_stored_repository_embeddings(
-                &request.account_id,
-                &config.model,
-                config.dimensions,
-                VECTOR_MODEL_VERSION,
-            )?
-            .len();
+        let sqlite_state = storage.get_repository_embedding_state(
+            &request.account_id,
+            &storage_model,
+            config.dimensions,
+            &storage_version,
+        )?;
         let index = vector_index::ZvecRepositoryIndex::from_app_handle(&app_handle)?;
         let zvec_count = index
-            .count(&request.account_id, &config.model, config.dimensions)
+            .count(&request.account_id, &storage_model, config.dimensions)
             .unwrap_or(0);
-        let ready = sqlite_count > 0 && zvec_count == sqlite_count;
+        let zvec_fingerprint = index
+            .bucket_fingerprint(&request.account_id, &storage_model, config.dimensions)
+            .ok()
+            .flatten();
+        let ready = sqlite_state.count > 0
+            && zvec_count == sqlite_state.count
+            && zvec_fingerprint.as_deref() == Some(sqlite_state.fingerprint.as_str());
         Ok(VectorIndexStatusData {
             enabled: true,
-            model: Some(config.model),
+            model: Some(embedding_display_model(&config)),
             dimensions: Some(config.dimensions),
-            sqlite_count,
+            sqlite_count: sqlite_state.count,
             zvec_count,
             ready,
             message: if ready {
                 format!("向量索引可用，共 {zvec_count} 个仓库")
-            } else if sqlite_count > 0 {
+            } else if sqlite_state.count > 0 {
                 "zvec 索引需要从 SQLite 恢复，请执行重建".to_owned()
             } else {
                 "尚未生成仓库向量，请执行重建".to_owned()
@@ -2415,8 +3078,11 @@ fn compute_removed_repository_ids(
     existing_states
         .iter()
         .filter_map(|(repository_id, sync_status)| {
-            (sync_status == "active" && !incoming_ids.contains(repository_id.as_str()))
-                .then(|| repository_id.to_owned())
+            if sync_status == "active" && !incoming_ids.contains(repository_id.as_str()) {
+                Some(repository_id.to_owned())
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -2846,19 +3512,23 @@ fn update_tag(
 ) -> Result<storage::TagItem, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
 
-    storage.update_tag(
+    let tag = storage.update_tag(
         &request.account_id,
         &request.tag_id,
         &request.name,
         request.color.as_deref(),
-    )
+    )?;
+    notify_embedding_maintenance();
+    Ok(tag)
 }
 
 #[tauri::command]
 fn delete_tag(app_handle: tauri::AppHandle, request: DeleteTagRequest) -> Result<(), String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
 
-    storage.delete_tag(&request.account_id, &request.tag_id)
+    storage.delete_tag(&request.account_id, &request.tag_id)?;
+    notify_embedding_maintenance();
+    Ok(())
 }
 
 #[tauri::command]
@@ -2893,11 +3563,13 @@ fn set_repository_tags(
 ) -> Result<storage::RepositoryAnnotationView, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
 
-    storage.set_repository_tags(
+    let annotation = storage.set_repository_tags(
         &request.repository_id,
         &request.account_id,
         &request.tag_ids,
-    )
+    )?;
+    notify_embedding_maintenance();
+    Ok(annotation)
 }
 
 #[tauri::command]
@@ -3351,18 +4023,18 @@ fn generate_repository_ai_document_worker(
         },
     )?;
 
-    storage.save_repository_ai_document(
-        &source.id,
-        &document.summary_zh,
-        document.readme_zh.as_deref(),
-        &document.keywords,
-        &document.suggested_tags,
-        &document.model,
-        &document.prompt_version,
-        &readme.content_hash,
-        document.input_tokens,
-        document.output_tokens,
-    )?;
+    storage.save_repository_ai_document(storage::RepositoryAiDocumentInput {
+        repository_id: &source.id,
+        summary_zh: &document.summary_zh,
+        readme_zh: document.readme_zh.as_deref(),
+        keywords: &document.keywords,
+        suggested_tags: &document.suggested_tags,
+        model: &document.model,
+        prompt_version: &document.prompt_version,
+        source_hash: &readme.content_hash,
+        input_tokens: document.input_tokens,
+        output_tokens: document.output_tokens,
+    })?;
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::succeeded(
@@ -3542,18 +4214,18 @@ fn batch_generate_repository_ai_documents_worker(
                 source.description.as_deref(),
                 &readme.raw_markdown,
             )?;
-            storage.save_repository_ai_document(
-                &source.id,
-                &document.summary_zh,
-                document.readme_zh.as_deref(),
-                &document.keywords,
-                &document.suggested_tags,
-                &document.model,
-                &document.prompt_version,
-                &readme.content_hash,
-                document.input_tokens,
-                document.output_tokens,
-            )?;
+            storage.save_repository_ai_document(storage::RepositoryAiDocumentInput {
+                repository_id: &source.id,
+                summary_zh: &document.summary_zh,
+                readme_zh: document.readme_zh.as_deref(),
+                keywords: &document.keywords,
+                suggested_tags: &document.suggested_tags,
+                model: &document.model,
+                prompt_version: &document.prompt_version,
+                source_hash: &readme.content_hash,
+                input_tokens: document.input_tokens,
+                output_tokens: document.output_tokens,
+            })?;
             Ok(BatchItemOutcome::Generated)
         })();
 
@@ -3991,47 +4663,88 @@ fn build_vector_search_scores(
             max_results: 8,
         });
     };
-    let embedding = ai::embed_text(&config, query)?;
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+    let service = embedding::EmbeddingService::new(config.clone(), cache_dir);
+    service.prepare(&|_| {})?;
+    let query_vector = service.embed_query(query)?;
+    let storage_model = embedding_storage_model(&config);
+    let storage_version = embedding_storage_version(&config);
     let index = vector_index::ZvecRepositoryIndex::from_app_handle(app_handle)?;
+    let is_local = config
+        .provider
+        .trim()
+        .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID);
     let request = vector_index::VectorSearchRequest {
         account_id: account_id.to_owned(),
-        model: config.model.clone(),
-        vector: embedding.vector,
+        model: storage_model.clone(),
+        vector: query_vector,
         limit: config.max_results.saturating_mul(3).clamp(10, 30),
-        min_score: config.min_score,
+        min_score: if is_local {
+            embedding::raw_local_similarity_threshold(config.min_score)
+        } else {
+            config.min_score
+        },
     };
+    let sqlite_state = storage.get_repository_embedding_state(
+        account_id,
+        &storage_model,
+        config.dimensions,
+        &storage_version,
+    )?;
+    let zvec_count = index
+        .count(account_id, &storage_model, config.dimensions)
+        .ok();
+    let zvec_fingerprint = index
+        .bucket_fingerprint(account_id, &storage_model, config.dimensions)
+        .ok()
+        .flatten();
     let mut hits = index.search(&request);
-    let should_restore = hits.as_ref().is_err()
-        || (hits.as_ref().is_ok_and(Vec::is_empty)
-            && index
-                .count(account_id, &config.model, config.dimensions)
-                .unwrap_or(0)
-                == 0);
+    let should_restore = vector_index_needs_restore(
+        hits.is_err(),
+        zvec_count,
+        sqlite_state.count,
+        zvec_fingerprint.as_deref(),
+        &sqlite_state.fingerprint,
+    );
     if should_restore {
-        let stored = storage.list_stored_repository_embeddings(
-            account_id,
-            &config.model,
-            config.dimensions,
-            VECTOR_MODEL_VERSION,
-        )?;
-        if !stored.is_empty() {
-            index.reset_bucket(account_id, &config.model, config.dimensions)?;
-            for record in stored {
-                index.upsert(&vector_index::RepositoryVectorRecord {
+        if sqlite_state.count == 0 {
+            index.replace_bucket(account_id, &storage_model, config.dimensions, &[])?;
+            hits = Ok(Vec::new());
+        } else {
+            let stored = storage.list_stored_repository_embeddings(
+                account_id,
+                &storage_model,
+                config.dimensions,
+                &storage_version,
+            )?;
+            let records = stored
+                .into_iter()
+                .map(|record| vector_index::RepositoryVectorRecord {
                     account_id: record.account_id,
                     repo_id: record.repo_id,
                     source_hash: record.source_hash,
                     model: record.model,
                     vector: record.vector,
-                })?;
-            }
+                })
+                .collect::<Vec<_>>();
+            index.replace_bucket(account_id, &storage_model, config.dimensions, &records)?;
             hits = index.search(&request);
         }
     }
     let hits = hits?;
     let scores = hits
         .into_iter()
-        .map(|hit| (hit.repo_id, f64::from(hit.score)))
+        .map(|hit| {
+            let score = if is_local {
+                embedding::normalize_local_similarity(hit.score)
+            } else {
+                hit.score
+            };
+            (hit.repo_id, f64::from(score))
+        })
         .collect::<HashMap<_, _>>();
     let message = scores
         .is_empty()
@@ -4041,6 +4754,18 @@ fn build_vector_search_scores(
         error: message,
         max_results: config.max_results.clamp(1, 10),
     })
+}
+
+fn vector_index_needs_restore(
+    search_failed: bool,
+    zvec_count: Option<usize>,
+    sqlite_count: usize,
+    zvec_fingerprint: Option<&str>,
+    sqlite_fingerprint: &str,
+) -> bool {
+    search_failed
+        || zvec_count != Some(sqlite_count)
+        || zvec_fingerprint != Some(sqlite_fingerprint)
 }
 
 fn build_local_search_answer(query: &str, response: &storage::AiSearchResponseData) -> String {
@@ -5250,6 +5975,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            start_embedding_maintenance(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_backend_status,
             get_github_auth_state,
@@ -5262,6 +5991,11 @@ pub fn run() {
             save_embedding_api_key,
             clear_embedding_api_key,
             test_embedding_connection,
+            get_embedding_runtime_status,
+            enable_local_embedding,
+            disable_embedding_runtime,
+            retry_embedding_setup,
+            delete_local_embedding_model,
             rebuild_vector_index,
             get_vector_index_status,
             get_app_settings,
@@ -5345,11 +6079,129 @@ mod tests {
             "save_embedding_api_key",
             "clear_embedding_api_key",
             "test_embedding_connection",
+            "get_embedding_runtime_status",
+            "enable_local_embedding",
+            "disable_embedding_runtime",
+            "retry_embedding_setup",
+            "delete_local_embedding_model",
             "rebuild_vector_index",
             "get_vector_index_status",
         ] {
             assert!(permissions.contains(&format!("\"{command}\"")));
         }
+    }
+
+    #[test]
+    fn embedding_api_key_scope_is_bound_to_provider_and_endpoint() {
+        let openai_scope = embedding_api_key_scope("openai", Some("https://api.openai.com/v1/"))
+            .expect("OpenAI 凭据作用域应有效");
+        assert_eq!(
+            openai_scope,
+            embedding_api_key_scope(" OPENAI ", Some("https://api.openai.com/v1"))
+                .expect("末尾斜杠不应改变凭据作用域")
+        );
+        assert_eq!(
+            openai_scope,
+            embedding_api_key_scope("openai", None)
+                .expect("OpenAI 默认地址应与显式官方地址使用同一作用域")
+        );
+        assert_ne!(
+            openai_scope,
+            embedding_api_key_scope(
+                "openai-compatible",
+                Some("https://embedding.example.com/v1")
+            )
+            .expect("兼容接口凭据作用域应有效")
+        );
+    }
+
+    #[test]
+    fn embedding_api_key_requires_matching_serialized_scope() {
+        let credential = StoredEmbeddingApiCredential {
+            scope: "openai\nhttps://api.openai.com/v1".to_owned(),
+            api_key: "secret-key".to_owned(),
+        };
+        let serialized = serde_json::to_string(&credential).expect("凭据测试数据应可序列化");
+
+        assert_eq!(
+            embedding_api_key_from_serialized(&serialized, "openai\nhttps://api.openai.com/v1")
+                .as_deref(),
+            Some("secret-key")
+        );
+        assert!(embedding_api_key_from_serialized(
+            &serialized,
+            "openai-compatible\nhttps://embedding.example.com/v1"
+        )
+        .is_none());
+        assert!(embedding_api_key_from_serialized(
+            "legacy-unscoped-secret",
+            "openai\nhttps://api.openai.com/v1"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn partial_or_unreadable_vector_index_requires_restore() {
+        assert!(!vector_index_needs_restore(
+            false,
+            Some(12),
+            12,
+            Some("current"),
+            "current"
+        ));
+        assert!(vector_index_needs_restore(
+            false,
+            Some(3),
+            12,
+            Some("current"),
+            "current"
+        ));
+        assert!(vector_index_needs_restore(
+            false,
+            Some(12),
+            12,
+            Some("stale"),
+            "current"
+        ));
+        assert!(vector_index_needs_restore(
+            false,
+            Some(12),
+            12,
+            None,
+            "current"
+        ));
+        assert!(vector_index_needs_restore(
+            true,
+            Some(12),
+            12,
+            Some("current"),
+            "current"
+        ));
+    }
+
+    #[test]
+    fn embedding_runtime_only_reports_complete_snapshot_as_ready() {
+        assert!(embedding_snapshot_is_ready(
+            12,
+            12,
+            12,
+            Some("current"),
+            "current"
+        ));
+        assert!(!embedding_snapshot_is_ready(
+            12,
+            11,
+            11,
+            Some("partial"),
+            "partial"
+        ));
+        assert!(!embedding_snapshot_is_ready(
+            12,
+            12,
+            12,
+            Some("stale"),
+            "current"
+        ));
     }
 
     #[test]

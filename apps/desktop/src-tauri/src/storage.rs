@@ -12,6 +12,10 @@ use tauri::Manager;
 
 const INITIAL_SCHEMA_SQL: &str =
     include_str!("../../../../packages/storage/migrations/001_initial_schema.sql");
+const EMBEDDING_INVALIDATION_MIGRATION_SQL: &str =
+    include_str!("../../../../packages/storage/migrations/002_embedding_invalidation.sql");
+const EMBEDDING_DIRTY_QUEUE_MIGRATION_SQL: &str =
+    include_str!("../../../../packages/storage/migrations/003_embedding_dirty_queue.sql");
 const LEGACY_SQLITE_DATABASE_FILE_NAMES: &[&str] = &["stars-ai-tools.sqlite3"];
 const OTHER_LANGUAGE_LABEL: &str = "其他";
 const RECOMMENDATION_CATEGORY_OPTIONS: &[(&str, &str)] = &[
@@ -389,6 +393,20 @@ pub struct RepositoryListFilters<'a> {
     pub tag_id: Option<&'a str>,
 }
 
+/// 保存仓库 AI 文档所需的完整字段。
+pub(crate) struct RepositoryAiDocumentInput<'a> {
+    pub(crate) repository_id: &'a str,
+    pub(crate) summary_zh: &'a str,
+    pub(crate) readme_zh: Option<&'a str>,
+    pub(crate) keywords: &'a [String],
+    pub(crate) suggested_tags: &'a [String],
+    pub(crate) model: &'a str,
+    pub(crate) prompt_version: &'a str,
+    pub(crate) source_hash: &'a str,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryListItem {
@@ -625,6 +643,11 @@ pub struct StoredRepositoryEmbedding {
     pub vector: Vec<f32>,
 }
 
+pub struct RepositoryEmbeddingState {
+    pub count: usize,
+    pub fingerprint: String,
+}
+
 #[derive(Deserialize)]
 struct VectorIndexCandidateRow {
     account_id: String,
@@ -648,6 +671,17 @@ struct StoredRepositoryEmbeddingRow {
     source_hash: String,
     model: String,
     vector_json: String,
+}
+
+#[derive(Deserialize)]
+struct StoredRepositoryEmbeddingSourceRow {
+    repo_id: String,
+    source_hash: String,
+}
+
+#[derive(Deserialize)]
+struct DirtyEmbeddingRow {
+    repo_id: String,
 }
 
 impl AppStorage {
@@ -2185,7 +2219,7 @@ ON CONFLICT(account_id, name) DO UPDATE SET
         for repository in &snapshot.repositories {
             let local_repository_id = match local_repository_ids
                 .contains(repository.repository_id.as_str())
-                .then(|| repository.repository_id.as_str())
+                .then_some(repository.repository_id.as_str())
                 .or_else(|| {
                     local_repository_ids_by_full_name
                         .get(repository.full_name.as_str())
@@ -3163,19 +3197,22 @@ WHERE r.sync_status = 'active'{account_clause};
     }
 
     /// 保存 AI 文档（摘要、关键词、建议标签）
-    pub fn save_repository_ai_document(
+    pub(crate) fn save_repository_ai_document(
         &self,
-        repository_id: &str,
-        summary_zh: &str,
-        readme_zh: Option<&str>,
-        keywords: &[String],
-        suggested_tags: &[String],
-        model: &str,
-        prompt_version: &str,
-        source_hash: &str,
-        input_tokens: u64,
-        output_tokens: u64,
+        document: RepositoryAiDocumentInput<'_>,
     ) -> Result<(), String> {
+        let RepositoryAiDocumentInput {
+            repository_id,
+            summary_zh,
+            readme_zh,
+            keywords,
+            suggested_tags,
+            model,
+            prompt_version,
+            source_hash,
+            input_tokens,
+            output_tokens,
+        } = document;
         let keywords_json =
             serde_json::to_string(keywords).map_err(|e| format!("关键词序列化失败：{e}"))?;
         let suggested_tags_json = serde_json::to_string(suggested_tags)
@@ -3327,6 +3364,7 @@ ORDER BY r.starred_at DESC;
             .collect::<HashSet<_>>();
         let context_tokens = tokenize_query(&context_text);
         let query_tokens = tokenize_query(normalized_query);
+        let query_coverage_tokens = tokenize_query_coverage(normalized_query);
         let mut results = rows
             .into_iter()
             .filter_map(|row| {
@@ -3335,6 +3373,7 @@ ORDER BY r.starred_at DESC;
                     row,
                     normalized_query,
                     &query_tokens,
+                    &query_coverage_tokens,
                     &context_tokens,
                     &context_repository_set,
                     vector_score,
@@ -3436,19 +3475,53 @@ ORDER BY r.starred_at DESC;
         rows.into_iter().map(build_vector_index_candidate).collect()
     }
 
-    pub fn save_repository_embedding(
+    pub fn replace_repository_embeddings(
         &self,
-        record: &StoredRepositoryEmbedding,
+        account_id: &str,
+        model: &str,
+        dimensions: usize,
         model_version: &str,
+        records: &[StoredRepositoryEmbedding],
     ) -> Result<(), String> {
-        if record.vector.is_empty() || record.vector.iter().any(|value| !value.is_finite()) {
-            return Err("不能保存空向量或包含无效数值的向量".to_owned());
+        let mut repository_ids = HashSet::with_capacity(records.len());
+        for record in records {
+            if record.account_id != account_id
+                || record.model != model
+                || record.vector.len() != dimensions
+            {
+                return Err(format!("仓库 {} 的向量分桶信息不一致", record.repo_id));
+            }
+            if record.vector.is_empty() || record.vector.iter().any(|value| !value.is_finite()) {
+                return Err(format!("仓库 {} 的向量数值无效", record.repo_id));
+            }
+            if !repository_ids.insert(record.repo_id.as_str()) {
+                return Err(format!("仓库 {} 的向量记录重复", record.repo_id));
+            }
         }
-        let vector_json = serde_json::to_string(&record.vector)
-            .map_err(|error| format!("仓库向量序列化失败：{error}"))?;
+
         let timestamp = self.current_database_timestamp()?;
-        let sql = format!(
+        let mut sql = format!(
             r#"
+PRAGMA foreign_keys = ON;
+BEGIN;
+DELETE FROM repo_embeddings
+WHERE source_kind = 'repository_knowledge'
+  AND model = {model}
+  AND model_version = {model_version}
+  AND repo_id IN (
+    SELECT id FROM repositories WHERE account_id = {account_id}
+  );
+"#,
+            account_id = sql_text(account_id),
+            model = sql_text(model),
+            model_version = sql_text(model_version),
+        );
+
+        for record in records {
+            let vector_json = serde_json::to_string(&record.vector)
+                .map_err(|error| format!("仓库 {} 向量序列化失败：{error}", record.repo_id))?;
+            sql.push_str(&format!(
+                r#"
 INSERT INTO repo_embeddings (
   repo_id,
   source_kind,
@@ -3468,21 +3541,19 @@ VALUES (
   {dimensions},
   {vector_json},
   {timestamp}
-)
-ON CONFLICT(repo_id, source_kind, model, model_version) DO UPDATE SET
-  source_hash = excluded.source_hash,
-  dimensions = excluded.dimensions,
-  vector_json = excluded.vector_json,
-  generated_at = excluded.generated_at;
+);
 "#,
-            repo_id = sql_text(&record.repo_id),
-            source_hash = sql_text(&record.source_hash),
-            model = sql_text(&record.model),
-            model_version = sql_text(model_version),
-            dimensions = record.vector.len(),
-            vector_json = sql_text(&vector_json),
-            timestamp = sql_text(&timestamp),
-        );
+                repo_id = sql_text(&record.repo_id),
+                source_hash = sql_text(&record.source_hash),
+                model = sql_text(&record.model),
+                model_version = sql_text(model_version),
+                dimensions = record.vector.len(),
+                vector_json = sql_text(&vector_json),
+                timestamp = sql_text(&timestamp),
+            ));
+        }
+
+        sql.push_str("COMMIT;\n");
         self.execute_sql(&sql)
     }
 
@@ -3538,9 +3609,126 @@ ORDER BY e.repo_id;
             .collect()
     }
 
+    pub fn list_dirty_embedding_repositories(
+        &self,
+        account_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, String> {
+        let limit = limit.clamp(1, 500);
+        let sql = format!(
+            r#"
+.mode json
+SELECT DISTINCT repo_id
+FROM embedding_dirty_queue
+WHERE account_id = {account_id}
+ORDER BY dirty_at ASC, repo_id ASC
+LIMIT {limit};
+"#,
+            account_id = sql_text(account_id),
+        );
+        parse_json_rows::<DirtyEmbeddingRow>(
+            &self.query_sql(&sql)?,
+            "SQLite Embedding 待处理队列解析失败",
+        )
+        .map(|rows| rows.into_iter().map(|row| row.repo_id).collect())
+    }
+
+    pub fn take_dirty_embedding_repositories(
+        &self,
+        account_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, String> {
+        let limit = limit.clamp(1, 500);
+        let sql = format!(
+            r#"
+.mode json
+DELETE FROM embedding_dirty_queue
+WHERE rowid IN (
+  SELECT rowid
+  FROM embedding_dirty_queue
+  WHERE account_id = {account_id}
+  ORDER BY dirty_at ASC, repo_id ASC
+  LIMIT {limit}
+)
+RETURNING repo_id;
+"#,
+            account_id = sql_text(account_id),
+        );
+        parse_json_rows::<DirtyEmbeddingRow>(
+            &self.query_sql(&sql)?,
+            "SQLite Embedding 待处理队列领取失败",
+        )
+        .map(|rows| rows.into_iter().map(|row| row.repo_id).collect())
+    }
+
+    pub fn queue_dirty_embedding_repositories(
+        &self,
+        account_id: &str,
+        repository_ids: &[String],
+    ) -> Result<(), String> {
+        if repository_ids.is_empty() {
+            return Ok(());
+        }
+        let mut sql = String::from("BEGIN;\n");
+        for repository_id in repository_ids {
+            sql.push_str(&format!(
+                r#"
+INSERT INTO embedding_dirty_queue(account_id, repo_id)
+VALUES ({account_id}, {repo_id})
+ON CONFLICT(account_id, repo_id) DO UPDATE SET
+  dirty_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+"#,
+                account_id = sql_text(account_id),
+                repo_id = sql_text(repository_id),
+            ));
+        }
+        sql.push_str("COMMIT;\n");
+        self.execute_sql(&sql)
+    }
+
+    pub fn get_repository_embedding_state(
+        &self,
+        account_id: &str,
+        model: &str,
+        dimensions: usize,
+        model_version: &str,
+    ) -> Result<RepositoryEmbeddingState, String> {
+        let sql = format!(
+            r#"
+.mode json
+SELECT e.repo_id, e.source_hash
+FROM repo_embeddings e
+JOIN repositories r ON r.id = e.repo_id
+WHERE r.sync_status = 'active'
+  AND r.account_id = {account_id}
+  AND e.source_kind = 'repository_knowledge'
+  AND e.model = {model}
+  AND e.model_version = {model_version}
+  AND e.dimensions = {dimensions}
+ORDER BY e.repo_id;
+"#,
+            account_id = sql_text(account_id),
+            model = sql_text(model),
+            model_version = sql_text(model_version),
+        );
+        let rows = parse_json_rows::<StoredRepositoryEmbeddingSourceRow>(
+            &self.query_sql(&sql)?,
+            "SQLite 仓库向量状态解析失败",
+        )?;
+        let fingerprint = crate::embedding_state::fingerprint(
+            rows.iter()
+                .map(|row| (row.repo_id.as_str(), row.source_hash.as_str())),
+        );
+        Ok(RepositoryEmbeddingState {
+            count: rows.len(),
+            fingerprint,
+        })
+    }
+
     fn migrate(&self) -> Result<(), String> {
-        self.reset_incompatible_database()?;
         self.execute_sql(INITIAL_SCHEMA_SQL)?;
+        self.execute_sql(EMBEDDING_INVALIDATION_MIGRATION_SQL)?;
+        self.execute_sql(EMBEDDING_DIRTY_QUEUE_MIGRATION_SQL)?;
 
         if !self.database_uses_current_schema()? {
             return Err("本地数据库初始化后仍缺少当前版本所需表结构".to_owned());
@@ -3555,14 +3743,6 @@ ORDER BY e.repo_id;
 
     fn query_sql(&self, sql: &str) -> Result<String, String> {
         execute_sqlite(&self.database_path, sql)
-    }
-
-    fn reset_incompatible_database(&self) -> Result<(), String> {
-        if !self.database_path.exists() || self.database_uses_current_schema()? {
-            return Ok(());
-        }
-
-        remove_sqlite_database_files(&self.database_path)
     }
 
     fn database_uses_current_schema(&self) -> Result<bool, String> {
@@ -3966,11 +4146,15 @@ fn build_repository_filter_clause(filters: &RepositoryListFilters<'_>) -> String
 fn build_vector_index_candidate(
     row: VectorIndexCandidateRow,
 ) -> Result<VectorIndexCandidate, String> {
-    let topics = parse_json_string_array(&row.topics_json, "SQLite 向量候选 Topics 解析失败")?;
-    let keywords = parse_optional_json_array(row.keywords_json.as_deref())?;
-    let suggested_tags = parse_optional_json_array(row.suggested_tags_json.as_deref())?;
-    let tag_names =
+    let mut topics = parse_json_string_array(&row.topics_json, "SQLite 向量候选 Topics 解析失败")?;
+    let mut keywords = parse_optional_json_array(row.keywords_json.as_deref())?;
+    let mut suggested_tags = parse_optional_json_array(row.suggested_tags_json.as_deref())?;
+    let mut tag_names =
         parse_json_string_array(&row.tag_names_json, "SQLite 向量候选个人标签解析失败")?;
+    topics.sort();
+    keywords.sort();
+    suggested_tags.sort();
+    tag_names.sort();
     let knowledge_text = [
         Some(format!("仓库：{}", row.full_name)),
         row.description
@@ -4009,6 +4193,7 @@ fn score_search_row(
     row: SearchRepositoryRow,
     query: &str,
     query_tokens: &[String],
+    query_coverage_tokens: &[String],
     context_tokens: &[String],
     context_repository_ids: &HashSet<&str>,
     vector_score: Option<f64>,
@@ -4086,13 +4271,21 @@ fn score_search_row(
 
     let vector_score =
         vector_score.filter(|score| score.is_finite() && (0.0..=1.0).contains(score));
-    let required_token_matches = match query_tokens.len() {
+    let matched_coverage_tokens = query_coverage_tokens
+        .iter()
+        .filter(|token| {
+            fields
+                .iter()
+                .any(|(_, value, _)| find_search_term_byte_index(value, token).is_some())
+        })
+        .count();
+    let required_token_matches = match query_coverage_tokens.len() {
         0 | 1 => 1,
         2..=4 => 2,
         _ => 3,
     };
     let has_direct_match = lexical_score >= MIN_LEXICAL_SCORE
-        && (matched_keywords.len() >= required_token_matches
+        && (matched_coverage_tokens >= required_token_matches
             || full_name_query_match
             || summary_query_match);
     let requires_exact_lexical_match = is_short_ascii_search_term(query);
@@ -4330,28 +4523,24 @@ fn is_short_ascii_search_term(query: &str) -> bool {
 
 fn tokenize_query(query: &str) -> Vec<String> {
     let mut tokens = Vec::new();
-    for token in query
-        .split(|character: char| {
-            character.is_whitespace()
-                || [
-                    ',', '，', '.', '。', ';', '；', '!', '！', '?', '？', '(', ')', '（', '）',
-                    '[', ']', '【', '】',
-                ]
-                .contains(&character)
-        })
+    let segments = query
+        .split(is_query_separator)
         .map(str::trim)
         .filter(|token| token.chars().count() >= 2)
-    {
+        .collect::<Vec<_>>();
+    for token in &segments {
         push_unique(&mut tokens, token);
     }
 
-    let chinese_chars = query
-        .chars()
-        .filter(|character| ('\u{4e00}'..='\u{9fff}').contains(character))
-        .collect::<Vec<_>>();
-    for window in chinese_chars.windows(2) {
-        let token = window.iter().collect::<String>();
-        push_unique(&mut tokens, &token);
+    for segment in segments {
+        let chinese_chars = segment
+            .chars()
+            .filter(|character| is_cjk_character(*character))
+            .collect::<Vec<_>>();
+        for window in chinese_chars.windows(2) {
+            let token = window.iter().collect::<String>();
+            push_unique(&mut tokens, &token);
+        }
     }
 
     if tokens.is_empty() {
@@ -4359,6 +4548,73 @@ fn tokenize_query(query: &str) -> Vec<String> {
     }
 
     tokens
+}
+
+fn tokenize_query_coverage(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for segment in query
+        .split(is_query_separator)
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+    {
+        let mut run = String::new();
+        let mut run_is_cjk = None;
+        for character in segment.chars() {
+            let is_cjk = is_cjk_character(character);
+            if !is_cjk && !character.is_ascii_alphanumeric() {
+                push_query_coverage_run(&mut tokens, &mut run, run_is_cjk.unwrap_or(false));
+                run_is_cjk = None;
+                continue;
+            }
+            if run_is_cjk.is_some_and(|current| current != is_cjk) {
+                push_query_coverage_run(&mut tokens, &mut run, run_is_cjk.unwrap_or(false));
+            }
+            run_is_cjk = Some(is_cjk);
+            run.push(character);
+        }
+        push_query_coverage_run(&mut tokens, &mut run, run_is_cjk.unwrap_or(false));
+    }
+    if tokens.is_empty() {
+        push_unique(&mut tokens, query);
+    }
+    tokens
+}
+
+fn push_query_coverage_run(tokens: &mut Vec<String>, run: &mut String, is_cjk: bool) {
+    if run.is_empty() {
+        return;
+    }
+    if !is_cjk {
+        if run.chars().count() >= 2 {
+            push_unique(tokens, run);
+        }
+        run.clear();
+        return;
+    }
+
+    let characters = run.chars().collect::<Vec<_>>();
+    let mut start = 0;
+    while characters.len().saturating_sub(start) >= 2 {
+        let remaining = characters.len() - start;
+        let width = if remaining == 3 { 3 } else { 2 };
+        let token = characters[start..start + width].iter().collect::<String>();
+        push_unique(tokens, &token);
+        start += width;
+    }
+    run.clear();
+}
+
+fn is_query_separator(character: char) -> bool {
+    character.is_whitespace()
+        || [
+            ',', '，', '.', '。', ';', '；', '!', '！', '?', '？', '(', ')', '（', '）', '[', ']',
+            '【', '】',
+        ]
+        .contains(&character)
+}
+
+fn is_cjk_character(character: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&character)
 }
 
 fn contains_token(tokens: &[String], needle: &str) -> bool {
@@ -4709,6 +4965,26 @@ mod tests {
         (storage, database_path)
     }
 
+    fn replace_test_repository_embedding(storage: &AppStorage, source_hash: &str) {
+        let record = StoredRepositoryEmbedding {
+            account_id: "1001".to_owned(),
+            repo_id: "1001:1".to_owned(),
+            source_hash: source_hash.to_owned(),
+            model: "embedding-test".to_owned(),
+            vector: vec![1.0, 0.0],
+        };
+        storage
+            .replace_repository_embeddings("1001", "embedding-test", 2, "v-test", &[record])
+            .expect("写入测试向量");
+    }
+
+    fn test_repository_embedding_count(storage: &AppStorage) -> usize {
+        storage
+            .get_repository_embedding_state("1001", "embedding-test", 2, "v-test")
+            .expect("读取测试向量状态")
+            .count
+    }
+
     #[test]
     fn sql_like_pattern_escapes_wildcards_and_quotes() {
         assert_eq!(sql_like_pattern("50%_owner's"), "'%50\\%\\_owner''s%'");
@@ -4795,7 +5071,7 @@ SELECT content FROM readmes;
     }
 
     #[test]
-    fn initialization_resets_incompatible_local_test_database() {
+    fn initialization_preserves_incompatible_local_test_database() {
         let database_path = std::env::temp_dir().join(format!(
             "gsat-incompatible-schema-test-{}.sqlite3",
             SystemTime::now()
@@ -4833,29 +5109,7 @@ VALUES ('legacy-repo', '旧测试数据');
             database_path: database_path.clone(),
         };
 
-        storage.migrate().expect("不兼容旧测试库应自动删除并重建");
-
-        let ai_columns = execute_sqlite(
-            &database_path,
-            r#"
-.mode list
-PRAGMA table_info(repo_ai_documents);
-"#,
-        )
-        .expect("应能读取重建后的 AI 文档表结构");
-        assert!(ai_columns.contains("|readme_zh|"));
-        assert!(ai_columns.contains("|input_tokens|"));
-        assert!(ai_columns.contains("|output_tokens|"));
-
-        let recommendation_table_count = execute_sqlite(
-            &database_path,
-            r#"
-.mode list
-SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'github_recommendation_candidates';
-"#,
-        )
-        .expect("应能读取重建后的推荐候选表");
-        assert_eq!(recommendation_table_count.trim(), "1");
+        assert!(storage.migrate().is_err(), "不兼容旧库应报告迁移错误");
 
         let legacy_row_count = execute_sqlite(
             &database_path,
@@ -4864,16 +5118,8 @@ SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'github_recom
 SELECT COUNT(*) FROM repo_ai_documents WHERE repo_id = 'legacy-repo';
 "#,
         )
-        .expect("应能确认旧测试数据已清理");
-        assert_eq!(legacy_row_count.trim(), "0");
-        for path in legacy_sidecar_paths {
-            assert!(
-                !path.exists(),
-                "不兼容旧库重建后不应保留 SQLite 旁路文件：{}",
-                path.display()
-            );
-        }
-
+        .expect("应能确认旧测试数据仍在");
+        assert_eq!(legacy_row_count.trim(), "1");
         let _ = remove_sqlite_database_files(&database_path);
     }
 
@@ -5122,18 +5368,18 @@ VALUES ('1001:42', '1001', 'owner', 'repo', '演示仓库', '可验证 README �
             })
             .expect("保存 README");
         storage
-            .save_repository_ai_document(
-                "1001:42",
-                "这是中文摘要",
-                Some("这是 README 中文整理"),
-                &["关键词".to_owned(), "工具".to_owned()],
-                &["AI 工具".to_owned(), "开发效率".to_owned()],
-                "gpt-test",
-                "v1",
-                "readme-hash",
-                321,
-                45,
-            )
+            .save_repository_ai_document(RepositoryAiDocumentInput {
+                repository_id: "1001:42",
+                summary_zh: "这是中文摘要",
+                readme_zh: Some("这是 README 中文整理"),
+                keywords: &["关键词".to_owned(), "工具".to_owned()],
+                suggested_tags: &["AI 工具".to_owned(), "开发效率".to_owned()],
+                model: "gpt-test",
+                prompt_version: "v1",
+                source_hash: "readme-hash",
+                input_tokens: 321,
+                output_tokens: 45,
+            })
             .expect("保存 AI 文档");
 
         let detail = storage
@@ -6140,12 +6386,14 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
         };
 
         let query_tokens = tokenize_query("组件化 UI");
+        let query_coverage_tokens = tokenize_query_coverage("组件化 UI");
         let context_tokens = Vec::new();
         let context_repository_ids = HashSet::new();
         let result = score_search_row(
             row,
             "组件化 UI",
             &query_tokens,
+            &query_coverage_tokens,
             &context_tokens,
             &context_repository_ids,
             None,
@@ -6195,6 +6443,8 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             tag_names_json: r#"["前端","组件库"]"#.to_owned(),
         };
         let query_tokens = tokenize_query("React UI TypeScript frontend hooks component");
+        let query_coverage_tokens =
+            tokenize_query_coverage("React UI TypeScript frontend hooks component");
         let context_tokens = tokenize_query("离线缓存");
         let context_repository_ids = HashSet::new();
 
@@ -6202,6 +6452,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             row,
             "React UI TypeScript frontend hooks component",
             &query_tokens,
+            &query_coverage_tokens,
             &context_tokens,
             &context_repository_ids,
             None,
@@ -6242,6 +6493,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             tag_names_json: "[]".to_owned(),
         };
         let query_tokens = tokenize_query("deployment target release");
+        let query_coverage_tokens = tokenize_query_coverage("deployment target release");
         let context_tokens = Vec::new();
         let context_repository_ids = HashSet::new();
 
@@ -6249,6 +6501,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             row,
             "deployment target release",
             &query_tokens,
+            &query_coverage_tokens,
             &context_tokens,
             &context_repository_ids,
             None,
@@ -6288,12 +6541,14 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             tag_names_json: "[]".to_owned(),
         };
         let query_tokens = tokenize_query("obscure");
+        let query_coverage_tokens = tokenize_query_coverage("obscure");
         let context_repository_ids = HashSet::new();
 
         let weak_keyword = score_search_row(
             make_row(),
             "obscure",
             &query_tokens,
+            &query_coverage_tokens,
             &[],
             &context_repository_ids,
             None,
@@ -6305,6 +6560,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             make_row(),
             "obscure",
             &query_tokens,
+            &query_coverage_tokens,
             &[],
             &context_repository_ids,
             Some(0.91),
@@ -6343,10 +6599,12 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             tag_names_json: "[]".to_owned(),
         };
         let query_tokens = tokenize_query("React animation");
+        let query_coverage_tokens = tokenize_query_coverage("React animation");
         let result = score_search_row(
             row,
             "React animation",
             &query_tokens,
+            &query_coverage_tokens,
             &[],
             &HashSet::new(),
             None,
@@ -6354,6 +6612,64 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
         .expect("多词关键词评分应可执行");
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn chinese_coverage_does_not_count_overlapping_bigrams_as_separate_terms() {
+        let query = "支持离线缓存的 Rust HTTP 客户端";
+        let query_tokens = tokenize_query(query);
+        let query_coverage_tokens = tokenize_query_coverage(query);
+        assert_eq!(
+            query_coverage_tokens,
+            vec!["支持", "离线", "缓存的", "Rust", "HTTP", "客户端"]
+        );
+
+        let make_row = |description: &str| SearchRepositoryRow {
+            id: "1001:47".to_owned(),
+            account_id: "1001".to_owned(),
+            owner: "owner".to_owned(),
+            name: "desktop-client".to_owned(),
+            full_name: "owner/desktop-client".to_owned(),
+            description: Some(description.to_owned()),
+            language: Some("Rust".to_owned()),
+            topics_json: "[]".to_owned(),
+            html_url: "https://github.com/owner/desktop-client".to_owned(),
+            stars_count: 100,
+            forks_count: 5,
+            starred_at: "2026-01-01T00:00:00Z".to_owned(),
+            pushed_at: None,
+            has_readme: 0,
+            note_markdown: None,
+            summary_zh: None,
+            keywords_json: None,
+            suggested_tags_json: None,
+            readme_excerpt: None,
+            tag_names_json: "[]".to_owned(),
+        };
+
+        let unrelated = score_search_row(
+            make_row("跨平台桌面客户端"),
+            query,
+            &query_tokens,
+            &query_coverage_tokens,
+            &[],
+            &HashSet::new(),
+            None,
+        )
+        .expect("中文覆盖门槛应可执行");
+        assert!(unrelated.is_none());
+
+        let relevant = score_search_row(
+            make_row("支持离线缓存的 Rust HTTP 客户端"),
+            query,
+            &query_tokens,
+            &query_coverage_tokens,
+            &[],
+            &HashSet::new(),
+            None,
+        )
+        .expect("相关中文查询应可执行");
+        assert!(relevant.is_some());
     }
 
     #[test]
@@ -6449,7 +6765,7 @@ VALUES ('1001:2', 'Build available utility classes and maintain design tokens.',
     }
 
     #[test]
-    fn repository_embedding_save_is_idempotent_and_readable() {
+    fn repository_embedding_bucket_replacement_is_idempotent_and_readable() {
         let (storage, database_path) = temp_storage("embedding-persistence");
         storage
             .execute_sql(
@@ -6468,7 +6784,13 @@ VALUES ('1001:1', '1001', 'owner', 'repo', 'owner/repo', 'Vector repository', 'R
             vector: vec![1.0, 0.0],
         };
         storage
-            .save_repository_embedding(&first, "v-test")
+            .replace_repository_embeddings(
+                "1001",
+                "embedding-test",
+                2,
+                "v-test",
+                std::slice::from_ref(&first),
+            )
             .expect("首次保存向量");
         let updated = StoredRepositoryEmbedding {
             source_hash: "hash-2".to_owned(),
@@ -6476,7 +6798,13 @@ VALUES ('1001:1', '1001', 'owner', 'repo', 'owner/repo', 'Vector repository', 'R
             ..first
         };
         storage
-            .save_repository_embedding(&updated, "v-test")
+            .replace_repository_embeddings(
+                "1001",
+                "embedding-test",
+                2,
+                "v-test",
+                std::slice::from_ref(&updated),
+            )
             .expect("相同仓库向量应幂等更新");
 
         let records = storage
@@ -6485,6 +6813,185 @@ VALUES ('1001:1', '1001', 'owner', 'repo', 'owner/repo', 'Vector repository', 'R
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_hash, "hash-2");
         assert_eq!(records[0].vector, vec![0.0, 1.0]);
+        assert_eq!(
+            storage
+                .get_repository_embedding_state("1001", "embedding-test", 2, "v-test")
+                .expect("应能读取当前账号的向量状态")
+                .count,
+            1
+        );
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn vector_candidate_hash_is_independent_of_category_order() {
+        let first = build_vector_index_candidate(VectorIndexCandidateRow {
+            account_id: "1001".to_owned(),
+            repo_id: "1001:1".to_owned(),
+            full_name: "owner/repo".to_owned(),
+            description: Some("Vector repository".to_owned()),
+            language: Some("Rust".to_owned()),
+            topics_json: r#"["vector","database"]"#.to_owned(),
+            summary_zh: Some("向量仓库".to_owned()),
+            keywords_json: Some(r#"["检索","索引"]"#.to_owned()),
+            suggested_tags_json: Some(r#"["工具","数据库"]"#.to_owned()),
+            readme_excerpt: Some("README".to_owned()),
+            tag_names_json: r#"["本地","收藏"]"#.to_owned(),
+            existing_source_hash: None,
+        })
+        .expect("构建第一份向量候选");
+        let reordered = build_vector_index_candidate(VectorIndexCandidateRow {
+            account_id: "1001".to_owned(),
+            repo_id: "1001:1".to_owned(),
+            full_name: "owner/repo".to_owned(),
+            description: Some("Vector repository".to_owned()),
+            language: Some("Rust".to_owned()),
+            topics_json: r#"["database","vector"]"#.to_owned(),
+            summary_zh: Some("向量仓库".to_owned()),
+            keywords_json: Some(r#"["索引","检索"]"#.to_owned()),
+            suggested_tags_json: Some(r#"["数据库","工具"]"#.to_owned()),
+            readme_excerpt: Some("README".to_owned()),
+            tag_names_json: r#"["收藏","本地"]"#.to_owned(),
+            existing_source_hash: None,
+        })
+        .expect("构建重排后的向量候选");
+
+        assert_eq!(first.knowledge_text, reordered.knowledge_text);
+        assert_eq!(first.source_hash, reordered.source_hash);
+    }
+
+    #[test]
+    fn repository_knowledge_changes_invalidate_stored_embeddings() {
+        let (storage, database_path) = temp_storage("embedding-invalidation");
+        storage
+            .execute_sql(
+                r#"
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, description, language, topics_json, html_url, stars_count, forks_count, starred_at)
+VALUES ('1001:1', '1001', 'owner', 'repo', 'owner/repo', 'Vector repository', 'Rust', '[]', 'https://github.com/owner/repo', 10, 1, '2026-01-01T00:00:00Z');
+"#,
+            )
+            .expect("写入向量失效测试数据");
+
+        replace_test_repository_embedding(&storage, "metadata-1");
+        storage
+            .execute_sql("UPDATE repositories SET description = description WHERE id = '1001:1';")
+            .expect("写入未变化的仓库元数据");
+        assert_eq!(test_repository_embedding_count(&storage), 1);
+        storage
+            .execute_sql("UPDATE repositories SET description = 'Changed' WHERE id = '1001:1';")
+            .expect("更新仓库元数据");
+        assert_eq!(test_repository_embedding_count(&storage), 0);
+
+        let readme = ReadmeDocument {
+            repo_id: "1001:1".to_owned(),
+            raw_markdown: "# Original".to_owned(),
+            content_hash: "readme-1".to_owned(),
+            source_path: "README.md".to_owned(),
+            fetched_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        replace_test_repository_embedding(&storage, "readme-1");
+        storage.save_readme(&readme).expect("首次保存 README");
+        assert_eq!(test_repository_embedding_count(&storage), 0);
+        replace_test_repository_embedding(&storage, "readme-1");
+        storage.save_readme(&readme).expect("重复保存 README");
+        assert_eq!(test_repository_embedding_count(&storage), 1);
+        let changed_readme = ReadmeDocument {
+            raw_markdown: "# Changed".to_owned(),
+            content_hash: "readme-2".to_owned(),
+            ..readme
+        };
+        storage
+            .save_readme(&changed_readme)
+            .expect("保存更新后的 README");
+        assert_eq!(test_repository_embedding_count(&storage), 0);
+
+        let keywords = vec!["向量".to_owned()];
+        let suggested_tags = vec!["数据库".to_owned()];
+        replace_test_repository_embedding(&storage, "ai-1");
+        storage
+            .save_repository_ai_document(RepositoryAiDocumentInput {
+                repository_id: "1001:1",
+                summary_zh: "原摘要",
+                readme_zh: None,
+                keywords: &keywords,
+                suggested_tags: &suggested_tags,
+                model: "test-model",
+                prompt_version: "v1",
+                source_hash: "readme-2",
+                input_tokens: 1,
+                output_tokens: 1,
+            })
+            .expect("首次保存 AI 文档");
+        assert_eq!(test_repository_embedding_count(&storage), 0);
+        replace_test_repository_embedding(&storage, "ai-1");
+        storage
+            .save_repository_ai_document(RepositoryAiDocumentInput {
+                repository_id: "1001:1",
+                summary_zh: "更新摘要",
+                readme_zh: None,
+                keywords: &keywords,
+                suggested_tags: &suggested_tags,
+                model: "test-model",
+                prompt_version: "v1",
+                source_hash: "readme-2",
+                input_tokens: 1,
+                output_tokens: 1,
+            })
+            .expect("更新 AI 文档");
+        assert_eq!(test_repository_embedding_count(&storage), 0);
+
+        let tag = storage
+            .create_tag("1001", "数据库", Some("#3b82f6"))
+            .expect("创建标签");
+        replace_test_repository_embedding(&storage, "tag-1");
+        storage
+            .set_repository_tags("1001:1", "1001", std::slice::from_ref(&tag.id))
+            .expect("关联标签");
+        assert_eq!(test_repository_embedding_count(&storage), 0);
+        replace_test_repository_embedding(&storage, "tag-2");
+        storage
+            .update_tag("1001", &tag.id, "数据库", Some("#10b981"))
+            .expect("只更新标签颜色");
+        assert_eq!(test_repository_embedding_count(&storage), 1);
+        storage
+            .update_tag("1001", &tag.id, "向量数据库", Some("#10b981"))
+            .expect("更新标签名称");
+        assert_eq!(test_repository_embedding_count(&storage), 0);
+        replace_test_repository_embedding(&storage, "tag-3");
+        storage.delete_tag("1001", &tag.id).expect("删除标签");
+        assert_eq!(test_repository_embedding_count(&storage), 0);
+
+        let dirty = storage
+            .list_dirty_embedding_repositories("1001", 10)
+            .expect("知识变化应进入 Embedding 待处理队列");
+        assert_eq!(dirty, vec!["1001:1"]);
+        let dirty_count = storage
+            .query_sql(
+                ".mode list\nSELECT COUNT(*) FROM embedding_dirty_queue WHERE account_id = '1001';",
+            )
+            .expect("应能读取待处理队列行数");
+        assert_eq!(dirty_count.trim(), "1");
+        let claimed = storage
+            .take_dirty_embedding_repositories("1001", 10)
+            .expect("后台任务应能原子领取待处理仓库");
+        assert_eq!(claimed, vec!["1001:1"]);
+        assert!(storage
+            .list_dirty_embedding_repositories("1001", 10)
+            .expect("已领取仓库不应继续留在队列")
+            .is_empty());
+        storage
+            .queue_dirty_embedding_repositories("1001", &claimed)
+            .expect("处理失败时应能重新入队");
+        let completed = storage
+            .take_dirty_embedding_repositories("1001", 10)
+            .expect("重试完成后应能再次领取待处理仓库");
+        assert_eq!(completed, claimed);
+        assert!(storage
+            .list_dirty_embedding_repositories("1001", 10)
+            .expect("应能读取已清理队列")
+            .is_empty());
+
         let _ = std::fs::remove_file(database_path);
     }
 
