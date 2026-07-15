@@ -12,6 +12,7 @@
 
 | 项目介绍 | 项目介绍 |
 | --- | --- |
+| ![AI 搜索正在分阶段筛选仓库](docs/images/ai-search-filtering.png) | ![本地向量检索设置](docs/images/vector-search-settings.png) |
 | ![GitHub-Stars-AI-Tools 首页](https://img1.tucang.cc/api/image/show/be56ddb20e18515e7f11c8586bf5eb86) | ![GitHub-Stars-AI-Tools 发现页](https://img1.tucang.cc/api/image/show/0c9f4a0d7d2f0ea942dcb92bd98cc07f) |
 | ![GitHub-Stars-AI-Tools 排行榜页](https://img1.tucang.cc/api/image/show/bacb1108cf5c9bf7d6a0b73c52888111) | ![GitHub-Stars-AI-Tools 个人主页](https://img1.tucang.cc/api/image/show/9287046286bfccd34e263bcaf10252a1) |
 | ![GitHub-Stars-AI-Tools 搜索聊天页](https://img1.tucang.cc/api/image/show/0380a0d41ecd1cc6cb045a7701f7d8c7) | ![GitHub-Stars-AI-Tools 知识库页](https://img1.tucang.cc/api/image/show/b32c3cb323e3b481d07639dce838269e) |
@@ -30,7 +31,8 @@
 | --- | --- |
 | Stars 本地知识库 | 同步 GitHub Stars 到本机 SQLite，保留仓库元数据、Topics、语言、README、标签、笔记和阅读状态 |
 | README 解析 | 缓存 README，并生成中文摘要、关键词、建议标签和项目知识卡 |
-| 聊天式 AI 搜索 | 像对话一样描述需求，AI 会实时输出理解过程，并在右侧展示分页后的匹配仓库 |
+| 本地向量检索 | 首次启用时下载中英双语 Embedding 模型，通过 SQLite 与 zvec 在本机完成语义召回，下载后可离线检索 |
+| 聊天式 AI 搜索 | 像对话一样描述需求，先从本地向量索引召回候选，再由 AI 筛选并同步生成回答和最终仓库列表 |
 | 搜索结果解释 | 每个结果展示匹配原因、命中字段、README 片段和可继续追问的操作 |
 | AI 标签网络 | 根据收藏仓库生成标签建议和项目关联，帮助整理技术栈 |
 | 相似项目发现 | 基于已收藏项目生成 GitHub Search 策略，发现替代项目或同类项目 |
@@ -39,8 +41,10 @@
 
 ## 最近更新
 
-- AI 搜索升级为聊天式工作区：左侧对话、右侧结果，支持 Markdown 渲染、深度思考折叠、分页结果和最近会话恢复。
-- README AI 解析支持流式输出，生成过程中可以实时看到当前阶段和模型返回内容。
+- 向量检索新增独立设置页：首次启用会确认并下载本地中英双语模型，展示下载、校验、加载和建库进度。
+- AI 搜索先召回最多 30 个向量候选，再由 AI 筛选 0 到 10 个最终结果；回答和右侧仓库列表保持一致。
+- 搜索过程中展示理解问题、向量召回、核对证据和 AI 筛选阶段，未经确认的候选不会提前显示。
+- README AI 解析改为增量处理，只更新缺少摘要或 README 内容已经变化的仓库。
 - AI 设置新增常用预设：OpenAI、Anthropic、OpenRouter、DeepSeek、Moonshot/Kimi、通义 Qwen、智谱 GLM、硅基流动、Ollama、LM Studio 和自定义 OpenAI 兼容接口。
 - 主题系统支持品牌色、字号和图标联动，应用图标、主要按钮、导航状态和图表颜色会跟随主题色变化。
 - 顶部快捷面板支持常用任务入口，通知面板和快捷面板支持点击空白处关闭。
