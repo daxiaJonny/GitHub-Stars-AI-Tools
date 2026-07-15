@@ -9,6 +9,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -197,6 +198,9 @@ function findZvecLibrary(root, targetTripleValue, fileName) {
 function patchExecutableRuntimePath(root, targetTripleValue, targetPlatform) {
   if (targetPlatform === 'windows') return;
   const executable = findReleaseExecutable(root, targetTripleValue);
+  if (targetPlatform === 'macos' && executableHasMacRuntimePath(executable)) {
+    return;
+  }
   const command = targetPlatform === 'macos' ? 'install_name_tool' : 'patchelf';
   const args = targetPlatform === 'macos'
     ? ['-add_rpath', '@executable_path/../Frameworks', executable]
@@ -207,13 +211,24 @@ function patchExecutableRuntimePath(root, targetTripleValue, targetPlatform) {
   }
 }
 
+function executableHasMacRuntimePath(executable) {
+  const runtimePath = '@executable_path/../Frameworks';
+  const result = spawnSync('otool', ['-l', executable], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(`otool 读取主程序运行库路径失败，退出码：${result.status ?? 'unknown'}`);
+  }
+  return result.stdout.includes(`path ${runtimePath} (`);
+}
+
 function findReleaseExecutable(root, targetTripleValue) {
   const executableName = process.platform === 'win32' ? 'gsat-desktop.exe' : 'gsat-desktop';
   const candidates = [
     path.join(root, targetTripleValue, 'release', executableName),
     path.join(root, 'release', executableName),
   ];
-  const executable = candidates.find((candidate) => existsSync(candidate));
+  const executable = candidates
+    .filter((candidate) => existsSync(candidate))
+    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0];
   if (!executable) {
     throw new Error(`没有找到 ${targetTripleValue} 的 release 主程序。`);
   }
