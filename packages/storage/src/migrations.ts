@@ -10,4 +10,9 @@ export const storageMigrations: SqlMigration[] = [
     name: 'initial_schema',
     fileName: '001_initial_schema.sql',
   },
+  {
+    version: '002',
+    name: 'embedding_invalidation',
+    fileName: '002_embedding_invalidation.sql',
+  },
 ];
