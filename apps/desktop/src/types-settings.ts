@@ -42,7 +42,7 @@ export type AISettings = {
 
 export type EmbeddingSettings = {
   enabled: boolean;
-  provider: 'openai' | 'openai-compatible' | 'none';
+  provider: 'local' | 'openai' | 'openai-compatible' | 'none';
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -87,12 +87,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   embedding: {
     enabled: false,
-    provider: 'none',
+    provider: 'local',
     baseUrl: '',
     apiKey: '',
-    model: 'text-embedding-3-small',
-    dimensions: 1536,
-    minScore: 0.72,
+    model: 'intfloat/multilingual-e5-small',
+    dimensions: 384,
+    minScore: 0.8,
     maxResults: 8,
   },
   general: {

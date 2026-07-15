@@ -36,13 +36,27 @@ export function toBackendEmbeddingRequestConfig(embedding: EmbeddingSettings): B
 }
 
 export function normalizeEmbeddingSettings(embedding: EmbeddingSettings): EmbeddingSettings {
-  const provider = embedding.provider === 'openai'
+  const configuredProvider = embedding.provider === 'local'
+    || embedding.provider === 'openai'
     || embedding.provider === 'openai-compatible'
     || embedding.provider === 'none'
     ? embedding.provider
     : DEFAULT_SETTINGS.embedding.provider;
+  const provider = configuredProvider === 'none' ? 'local' : configuredProvider;
+  const enabled = configuredProvider !== 'none' && Boolean(embedding.enabled);
+  if (provider === 'local') {
+    return {
+      ...DEFAULT_SETTINGS.embedding,
+      enabled,
+      apiKey: '',
+      minScore: configuredProvider === 'none'
+        ? DEFAULT_SETTINGS.embedding.minScore
+        : normalizeBoundedNumber(embedding.minScore, DEFAULT_SETTINGS.embedding.minScore, 0, 1, false),
+      maxResults: normalizeBoundedNumber(embedding.maxResults, DEFAULT_SETTINGS.embedding.maxResults, 1, 10, true),
+    };
+  }
   return {
-    enabled: provider !== 'none' && Boolean(embedding.enabled),
+    enabled,
     provider,
     baseUrl: typeof embedding.baseUrl === 'string' ? embedding.baseUrl.trim() : '',
     apiKey: typeof embedding.apiKey === 'string' ? embedding.apiKey : '',
@@ -86,7 +100,7 @@ export function shouldFlushAiApiKey(ai: AISettings): boolean {
 
 export function shouldFlushEmbeddingApiKey(embedding: EmbeddingSettings): boolean {
   const apiKey = embedding.apiKey.trim();
-  if (embedding.provider === 'none' || isSavedAiApiKeyPlaceholder(apiKey)) {
+  if (embedding.provider === 'local' || embedding.provider === 'none' || isSavedAiApiKeyPlaceholder(apiKey)) {
     return false;
   }
   if (embedding.provider === 'openai-compatible' && isLocalAiBaseUrl(embedding.baseUrl) && !apiKey) {
@@ -98,6 +112,9 @@ export function shouldFlushEmbeddingApiKey(embedding: EmbeddingSettings): boolea
 export function getEmbeddingConfigMessage(embedding: EmbeddingSettings): string | null {
   if (!embedding.enabled) {
     return '向量检索尚未启用。';
+  }
+  if (embedding.provider === 'local') {
+    return null;
   }
   if (embedding.provider === 'none') {
     return '请选择 OpenAI 或 OpenAI 兼容的 Embedding 服务。';

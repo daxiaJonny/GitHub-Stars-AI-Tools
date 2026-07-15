@@ -26,14 +26,35 @@ describe('Embedding 配置', () => {
     expect(normalized.maxResults).toBe(10);
   });
 
-  it('关闭 provider 时强制关闭向量检索', () => {
+  it('旧版 none provider 迁移为关闭的本地模式', () => {
     const normalized = normalizeEmbeddingSettings({
       ...DEFAULT_SETTINGS.embedding,
       enabled: true,
       provider: 'none',
+      minScore: 0.72,
     });
 
     expect(normalized.enabled).toBe(false);
+    expect(normalized.provider).toBe('local');
+    expect(normalized.model).toBe('intfloat/multilingual-e5-small');
+    expect(normalized.dimensions).toBe(384);
+    expect(normalized.minScore).toBe(0.8);
+  });
+
+  it('本地 provider 固定 multilingual-e5-small 参数并清空 Key', () => {
+    const normalized = normalizeEmbeddingSettings({
+      ...DEFAULT_SETTINGS.embedding,
+      enabled: true,
+      provider: 'local',
+      apiKey: 'should-not-persist',
+      model: 'fake-model',
+      dimensions: 1536,
+    });
+
+    expect(normalized.provider).toBe('local');
+    expect(normalized.model).toBe('intfloat/multilingual-e5-small');
+    expect(normalized.dimensions).toBe(384);
+    expect(normalized.apiKey).toBe('');
   });
 
   it('后端配置不携带明文 API Key', () => {
