@@ -146,11 +146,12 @@ impl ZvecRepositoryIndex {
             if !score.is_finite() || score < request.min_score {
                 continue;
             }
-            let repo_id = doc
+            let stored_repo_id = doc
                 .get_string("repo_id")
                 .map_err(zvec_error("读取 zvec 查询结果失败"))?
                 .or_else(|| doc.get_pk().map(str::to_owned));
-            if let Some(repo_id) = repo_id {
+            if let Some(stored_repo_id) = stored_repo_id {
+                let repo_id = decode_repository_id(&stored_repo_id)?;
                 hits.push(VectorSearchHit { repo_id, score });
             }
         }
@@ -369,8 +370,9 @@ fn validate_vector(vector: &[f32]) -> Result<(), String> {
 
 fn repository_vector_doc(record: &RepositoryVectorRecord) -> Result<Doc, String> {
     let mut doc = Doc::new().map_err(zvec_error("创建向量文档失败"))?;
-    doc.set_pk(&record.repo_id);
-    doc.add_string("repo_id", &record.repo_id)
+    let primary_key = repository_vector_primary_key(&record.repo_id);
+    doc.set_pk(&primary_key);
+    doc.add_string("repo_id", &encode_repository_id(&record.repo_id))
         .map_err(zvec_error("写入仓库编号失败"))?;
     doc.add_string("account_id", &record.account_id)
         .map_err(zvec_error("写入账号编号失败"))?;
@@ -383,6 +385,50 @@ fn repository_vector_doc(record: &RepositoryVectorRecord) -> Result<Doc, String>
     Ok(doc)
 }
 
+fn repository_vector_primary_key(repo_id: &str) -> String {
+    let digest = Sha256::digest(repo_id.as_bytes());
+    let digest = format!("{digest:x}");
+    format!("repo_{}", &digest[..24])
+}
+
+fn encode_repository_id(repo_id: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(7 + repo_id.len() * 2);
+    encoded.push_str("repoid_");
+    for byte in repo_id.as_bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_repository_id(stored: &str) -> Result<String, String> {
+    let Some(encoded) = stored.strip_prefix("repoid_") else {
+        return Ok(stored.to_owned());
+    };
+    if encoded.len() % 2 != 0 {
+        return Err("zvec 仓库编号编码长度无效".to_owned());
+    }
+    let bytes = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = decode_hex_digit(pair[0])?;
+            let low = decode_hex_digit(pair[1])?;
+            Ok((high << 4) | low)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    String::from_utf8(bytes).map_err(|error| format!("zvec 仓库编号不是有效 UTF-8：{error}"))
+}
+
+fn decode_hex_digit(value: u8) -> Result<u8, String> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err("zvec 仓库编号包含无效十六进制字符".to_owned()),
+    }
+}
+
 fn zvec_error(prefix: &'static str) -> impl FnOnce(zvec_rust::Error) -> String {
     move |error| format!("{prefix}：{error}")
 }
@@ -390,6 +436,8 @@ fn zvec_error(prefix: &'static str) -> impl FnOnce(zvec_rust::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ai, embedding};
+    use rusqlite::{Connection, OpenFlags};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_index(name: &str) -> (ZvecRepositoryIndex, PathBuf) {
@@ -437,6 +485,32 @@ mod tests {
         assert_eq!(hits[0].repo_id, "rust-search");
         assert!(hits[0].score > hits[1].score);
         reopened.reset_all().expect("清理测试索引");
+    }
+
+    #[test]
+    fn zvec_index_accepts_composite_repository_ids() {
+        let (index, _) = test_index("composite-repository-id");
+        let repo_id = "71560643:1279057919";
+        let mut composite_record = record("71560643", repo_id, &[1.0, 0.0]);
+        composite_record.source_hash = "source_hash_composite".to_owned();
+        let records = vec![composite_record];
+
+        index
+            .replace_bucket("71560643", "embedding-test", 2, &records)
+            .expect("复合仓库编号应能写入 zvec");
+        let hits = index
+            .search(&VectorSearchRequest {
+                account_id: "71560643".to_owned(),
+                model: "embedding-test".to_owned(),
+                vector: vec![1.0, 0.0],
+                limit: 1,
+                min_score: 0.0,
+            })
+            .expect("复合仓库编号应能从 zvec 检索");
+
+        assert_eq!(hits[0].repo_id, repo_id);
+        assert!(!repository_vector_primary_key(repo_id).contains(':'));
+        index.reset_all().expect("清理测试索引");
     }
 
     #[test]
@@ -583,5 +657,116 @@ mod tests {
             .expect("阈值查询成功");
         assert!(hits.is_empty());
         index.reset_all().expect("清理测试索引");
+    }
+
+    #[test]
+    #[ignore = "需要通过环境变量指定本机应用数据、模型缓存和账号"]
+    fn local_user_catalog_vector_search_smoke() {
+        let data_dir = std::env::var_os("GSAT_VECTOR_TEST_DATA_DIR")
+            .map(PathBuf::from)
+            .expect("请设置 GSAT_VECTOR_TEST_DATA_DIR");
+        let cache_dir = std::env::var_os("GSAT_EMBEDDING_TEST_CACHE")
+            .map(PathBuf::from)
+            .expect("请设置 GSAT_EMBEDDING_TEST_CACHE");
+        let account_id = std::env::var("GSAT_VECTOR_TEST_ACCOUNT_ID")
+            .expect("请设置 GSAT_VECTOR_TEST_ACCOUNT_ID");
+        let queries = std::env::var("GSAT_VECTOR_TEST_QUERIES")
+            .unwrap_or_else(|_| {
+                [
+                    "Grok",
+                    "轻量级进程内向量数据库",
+                    "OCR document recognition",
+                    "agentic video production",
+                    "AI coding agent CLI",
+                ]
+                .join("|")
+            })
+            .split('|')
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert!(!queries.is_empty(), "至少需要一条向量检索测试查询");
+
+        let database_path = data_dir.join("gsat.sqlite3");
+        let connection =
+            Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("应能以只读方式打开本机数据库");
+        let active_repository_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM repositories WHERE sync_status = 'active' AND account_id = ?1",
+                [&account_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应能统计活跃仓库");
+        let profile = embedding::local_profile();
+        let storage_model = profile.profile_id();
+        let sqlite_vector_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM repo_embeddings e JOIN repositories r ON r.id = e.repo_id WHERE r.account_id = ?1 AND e.model = ?2 AND e.dimensions = ?3 AND e.model_version = ?4",
+                rusqlite::params![
+                    account_id,
+                    storage_model,
+                    embedding::LOCAL_DIMENSIONS as i64,
+                    embedding::KNOWLEDGE_TEXT_VERSION,
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应能统计 SQLite 向量");
+        let index = ZvecRepositoryIndex::new(data_dir.join("vector-index"));
+        let zvec_count = index
+            .count(&account_id, &storage_model, embedding::LOCAL_DIMENSIONS)
+            .expect("应能统计 zvec 文档");
+        assert_eq!(active_repository_count, sqlite_vector_count);
+        assert_eq!(sqlite_vector_count, zvec_count as i64);
+
+        let service = embedding::EmbeddingService::new(
+            ai::EmbeddingRequestConfig {
+                enabled: true,
+                provider: embedding::LOCAL_PROVIDER_ID.to_owned(),
+                api_key: String::new(),
+                base_url: None,
+                model: embedding::LOCAL_MODEL_ID.to_owned(),
+                dimensions: embedding::LOCAL_DIMENSIONS,
+                min_score: 0.72,
+                max_results: 10,
+            },
+            cache_dir,
+        );
+        service
+            .prepare(&|_| {})
+            .expect("应能从现有缓存校验并加载本地模型");
+
+        println!(
+            "CATALOG active={active_repository_count} sqlite_vectors={sqlite_vector_count} zvec={zvec_count}"
+        );
+        for query in queries {
+            let vector = service.embed_query(&query).expect("查询应能生成向量");
+            let hits = index
+                .search(&VectorSearchRequest {
+                    account_id: account_id.clone(),
+                    model: storage_model.clone(),
+                    vector,
+                    limit: 30,
+                    min_score: 0.0,
+                })
+                .expect("zvec 查询应成功");
+            assert!(!hits.is_empty(), "查询 {query} 不应没有任何 zvec 候选");
+            println!("QUERY {query}");
+            for hit in hits.iter().take(10) {
+                let (full_name, description) = connection
+                    .query_row(
+                        "SELECT full_name, COALESCE(description, '') FROM repositories WHERE id = ?1",
+                        [&hit.repo_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .expect("zvec 结果应能回查仓库");
+                println!(
+                    "  {:.4}\t{full_name}\t{}",
+                    embedding::normalize_local_similarity(hit.score),
+                    description.replace(['\n', '\r', '\t'], " ")
+                );
+            }
+        }
     }
 }

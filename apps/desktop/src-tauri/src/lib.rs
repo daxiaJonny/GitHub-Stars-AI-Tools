@@ -27,6 +27,8 @@ const AI_STREAM_EVENT: &str = "ai-stream";
 const EMBEDDING_RUNTIME_EVENT: &str = "embedding-runtime-status";
 const README_FETCH_CONCURRENCY: usize = 6;
 const GITHUB_RECOMMENDATION_REFERENCE_LIMIT: usize = 8;
+const AI_SEARCH_CANDIDATE_LIMIT: usize = 30;
+const AI_SEARCH_FINAL_LIMIT: usize = 10;
 const DEFAULT_OPENAI_EMBEDDING_BASE_URL: &str = "https://api.openai.com/v1";
 const AI_API_KEY_SERVICE: &str = "github-stars-ai-tools";
 const EMBEDDING_API_KEY_ACCOUNT: &str = "embedding-api-key:openai-compatible";
@@ -1461,13 +1463,19 @@ fn read_local_runtime_status(
     enabled: bool,
 ) -> Result<embedding::EmbeddingRuntimeStatus, String> {
     if !enabled {
-        let mut status =
-            embedding::EmbeddingRuntimeStatus::local(account_id, "disabled", "向量检索尚未启用");
-        status.enabled = false;
         let cache_dir = app_handle
             .path()
             .app_cache_dir()
             .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+        let model_ready = embedding::local_model_is_ready(&cache_dir);
+        let message = if model_ready {
+            "本地模型已下载，打开开关即可启用向量检索"
+        } else {
+            "本地模型尚未下载，启用时会先确认约 490 MB 下载"
+        };
+        let mut status = embedding::EmbeddingRuntimeStatus::local(account_id, "disabled", message);
+        status.enabled = false;
+        status.model_ready = model_ready;
         status.cache_bytes = embedding::local_cache_size(&cache_dir);
         return Ok(status);
     }
@@ -1522,6 +1530,7 @@ fn read_local_runtime_status(
         _ => "本地向量索引需要增量恢复或重建".to_owned(),
     };
     let mut status = embedding::EmbeddingRuntimeStatus::local(account_id, state, message);
+    status.model_ready = model_ready;
     status.cache_bytes = embedding::local_cache_size(&cache_dir);
     status.indexed_count = zvec_count;
     status.total_count = candidates.len();
@@ -1596,6 +1605,14 @@ fn run_local_embedding_setup(
         ) {
             Ok(summary) => summary,
             Err(error) => {
+                emit_task_progress(
+                    &app_handle,
+                    TaskProgressEvent::failed(
+                        "rebuild-vector-index",
+                        "vector-index",
+                        error.clone(),
+                    ),
+                );
                 storage.queue_dirty_embedding_repositories(&account_id, &claimed_dirty_ids)?;
                 return Err(error);
             }
@@ -1625,8 +1642,14 @@ fn run_local_embedding_setup(
     match result {
         Ok(status) => Ok(status),
         Err(error) => {
-            let status =
-                embedding::EmbeddingRuntimeStatus::local(&account_id, "error", error.clone());
+            let mut status = read_local_runtime_status(&app_handle, &account_id, true)
+                .unwrap_or_else(|_| {
+                    embedding::EmbeddingRuntimeStatus::local(&account_id, "error", error.clone())
+                });
+            status.enabled = true;
+            status.state = "error".to_owned();
+            status.message = error.clone();
+            status.can_retry = true;
             emit_embedding_runtime_status(&app_handle, &account_id, status);
             Err(error)
         }
@@ -4064,7 +4087,7 @@ async fn batch_generate_repository_ai_documents(
 ) -> Result<BatchAiDocumentSummary, String> {
     let progress_handle = app_handle.clone();
     run_background_task_with_failure_progress(
-        "批量 AI 摘要生成",
+        "增量 AI 摘要生成",
         progress_handle,
         "batch-generate-ai-documents",
         "ai",
@@ -4088,15 +4111,19 @@ fn batch_generate_repository_ai_documents_worker(
         repository_ids,
     } = request;
     let ai_config = hydrate_ai_request_config(&app_handle, ai_config)?;
+    let only_missing = only_missing.unwrap_or(true);
     let repositories = filter_repositories_by_ids(
-        storage.list_active_repositories(Some(&account_id))?,
+        if only_missing {
+            storage.list_repositories_requiring_ai_document(&account_id)?
+        } else {
+            storage.list_active_repositories(Some(&account_id))?
+        },
         repository_ids,
     );
     let processing_limit = limit.map(|value| value.clamp(1, 1000));
     let progress_total = processing_limit
         .map(|limit| limit.min(repositories.len()))
         .unwrap_or(repositories.len());
-    let only_missing = only_missing.unwrap_or(true);
     let mut scanned_count = 0_usize;
     let mut generated_count = 0_usize;
     let mut skipped_count = 0_usize;
@@ -4111,7 +4138,9 @@ fn batch_generate_repository_ai_documents_worker(
             "batch",
             0,
             progress_total,
-            if processing_limit.is_some() {
+            if only_missing {
+                "正在增量解析缺失或内容已更新的 README"
+            } else if processing_limit.is_some() {
                 "正在按本次上限批量解析 README"
             } else {
                 "正在批量解析全部 Stars 的 README"
@@ -4253,10 +4282,14 @@ fn batch_generate_repository_ai_documents_worker(
             ),
         );
     }
-    let completion_message = format!(
-        "批量 AI 完成：生成 {generated_count} 个，跳过 {skipped_count} 个，缺少 README {missing_readme_count} 个，失败 {} 个",
-        failures.len(),
-    );
+    let completion_message = if only_missing && progress_total == 0 {
+        "AI 解析已是最新，无需重复处理。".to_owned()
+    } else {
+        format!(
+            "增量 AI 完成：生成 {generated_count} 个，跳过 {skipped_count} 个，缺少 README {missing_readme_count} 个，失败 {} 个",
+            failures.len(),
+        )
+    };
     let completion_progress = if failures.is_empty() {
         TaskProgressEvent::succeeded(
             "batch-generate-ai-documents",
@@ -4477,7 +4510,18 @@ fn search_repositories_worker(
         &context_queries,
         ai_config.clone(),
     )?;
+    let should_ai_filter = metadata.ai_enhanced && ai_config.is_some();
+    let fallback_metadata = metadata.clone();
 
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "vector",
+        "started",
+        "正在从本地向量索引召回候选仓库",
+        None,
+    );
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::running(
@@ -4496,15 +4540,38 @@ fn search_repositories_worker(
         &request.account_id,
         &effective_query,
         request.embedding_config,
+        should_ai_filter,
     ) {
         Ok(result) => result,
         Err(error) => VectorSearchOutcome {
             scores: HashMap::new(),
+            strict_scores: HashMap::new(),
             error: Some(format!("向量检索已降级：{error}")),
             max_results: 8,
         },
     };
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "vector",
+        "finished",
+        format!(
+            "向量召回完成，获得 {} 个候选仓库",
+            vector_search.scores.len()
+        ),
+        None,
+    );
 
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "analyze",
+        "started",
+        "正在核对仓库名称、描述、Topics 和本地摘要",
+        None,
+    );
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::running(
@@ -4517,20 +4584,47 @@ fn search_repositories_worker(
             Some(original_query.clone()),
         ),
     );
+    let search_limit = if should_ai_filter {
+        AI_SEARCH_CANDIDATE_LIMIT
+    } else {
+        request.limit.unwrap_or(vector_search.max_results)
+    };
+    let search_max_results = if should_ai_filter {
+        AI_SEARCH_CANDIDATE_LIMIT
+    } else {
+        vector_search.max_results
+    };
     let mut response = storage.search_repositories(storage::RepositorySearchOptions {
         query: &effective_query,
         context_queries: &context_queries,
         context_repository_ids: &context_repository_ids,
-        limit: request.limit.unwrap_or(vector_search.max_results),
-        offset: request.offset.unwrap_or(0),
-        max_results: vector_search.max_results,
+        limit: search_limit,
+        offset: if should_ai_filter {
+            0
+        } else {
+            request.offset.unwrap_or(0)
+        },
+        max_results: search_max_results,
+        candidate_limit: should_ai_filter.then_some(AI_SEARCH_CANDIDATE_LIMIT),
         account_id: Some(&request.account_id),
         vector_scores: &vector_search.scores,
-        vector_error: vector_search.error,
+        vector_error: vector_search.error.clone(),
         metadata: Some(metadata),
     })?;
-    let local_answer = build_local_search_answer(&original_query, &response);
-    response.answer_zh = Some(local_answer.clone());
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "analyze",
+        "finished",
+        format!(
+            "本地证据核对完成，保留 {} 个待筛选候选",
+            response.total_count
+        ),
+        None,
+    );
+    let mut ai_answer_applied = false;
+    let mut ai_answer_error = None;
     if response.ai_enhanced && !response.results.is_empty() {
         if let Some(config) = ai_config {
             emit_ai_stream_status(
@@ -4556,7 +4650,9 @@ fn search_repositories_worker(
                 .and_then(|config| ai::answer_search_results(&config, &original_query, &evidence))
             {
                 Ok(answer) => {
-                    response.answer_zh = Some(answer);
+                    retain_ai_selected_search_results(&mut response, &answer.repository_full_names);
+                    response.answer_zh = Some(answer.answer_zh);
+                    ai_answer_applied = true;
                     emit_ai_stream_status(
                         &app_handle,
                         &request_id,
@@ -4568,11 +4664,11 @@ fn search_repositories_worker(
                     );
                 }
                 Err(error) => {
-                    let answer_error = format!("AI 回答生成失败，已使用本地证据回答：{error}");
-                    response.ai_error = Some(match response.ai_error.take() {
-                        Some(existing) => format!("{existing}；{answer_error}"),
-                        None => answer_error.clone(),
-                    });
+                    eprintln!("AI 搜索筛选失败，已降级到本地证据：{error}");
+                    let answer_error =
+                        "AI 筛选未完成，已改用本地证据生成结果。可在设置中测试 AI 连接后重试。"
+                            .to_owned();
+                    ai_answer_error = Some(answer_error.clone());
                     emit_ai_stream_status(
                         &app_handle,
                         &request_id,
@@ -4586,15 +4682,31 @@ fn search_repositories_worker(
             }
         }
     }
-    emit_ai_stream_status(
-        &app_handle,
-        &request_id,
-        "ai-search",
-        "analyze",
-        "finished",
-        format!("本地知识库已完成匹配，找到 {} 个仓库", response.total_count),
-        None,
-    );
+    if !ai_answer_applied {
+        if should_ai_filter && ai_answer_error.is_some() {
+            response = storage.search_repositories(storage::RepositorySearchOptions {
+                query: &effective_query,
+                context_queries: &context_queries,
+                context_repository_ids: &context_repository_ids,
+                limit: request.limit.unwrap_or(vector_search.max_results),
+                offset: request.offset.unwrap_or(0),
+                max_results: vector_search.max_results,
+                candidate_limit: None,
+                account_id: Some(&request.account_id),
+                vector_scores: &vector_search.strict_scores,
+                vector_error: vector_search.error.clone(),
+                metadata: Some(fallback_metadata),
+            })?;
+        }
+        if let Some(answer_error) = ai_answer_error {
+            response.ai_error = Some(match response.ai_error.take() {
+                Some(existing) => format!("{existing}；{answer_error}"),
+                None => answer_error,
+            });
+        }
+        limit_search_results(&mut response, AI_SEARCH_FINAL_LIMIT);
+        response.answer_zh = Some(build_local_search_answer(&original_query, &response));
+    }
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::succeeded(
@@ -4615,6 +4727,62 @@ fn search_repositories_worker(
         None,
     );
     Ok(response)
+}
+
+fn retain_ai_selected_search_results(
+    response: &mut storage::AiSearchResponseData,
+    repository_full_names: &[String],
+) {
+    let selected_order = repository_full_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.to_ascii_lowercase(), index))
+        .collect::<HashMap<_, _>>();
+    response.results.retain(|result| {
+        selected_order.contains_key(&result.repository.full_name.to_ascii_lowercase())
+    });
+    response.results.sort_by_key(|result| {
+        selected_order
+            .get(&result.repository.full_name.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    refresh_search_response_result_state(response);
+}
+
+fn limit_search_results(response: &mut storage::AiSearchResponseData, limit: usize) {
+    response.results.truncate(limit);
+    refresh_search_response_result_state(response);
+}
+
+fn refresh_search_response_result_state(response: &mut storage::AiSearchResponseData) {
+    response.total_count = response.results.len();
+    response.context_applied = response.results.iter().any(|result| {
+        result
+            .reasons
+            .iter()
+            .any(|reason| reason.label.starts_with("上下文") || reason.label == "上一轮结果命中")
+    });
+    response.vector_applied = response.results.iter().any(|result| {
+        result
+            .reasons
+            .iter()
+            .any(|reason| reason.label == "语义相似命中")
+    });
+    response.retrieval_mode = if response.vector_applied {
+        "vector+keyword".to_owned()
+    } else {
+        "keyword".to_owned()
+    };
+    response.mode = if response.vector_applied && response.ai_enhanced {
+        "hybrid".to_owned()
+    } else if response.vector_applied {
+        "vector".to_owned()
+    } else if response.ai_enhanced {
+        "ai_enhanced".to_owned()
+    } else {
+        "local_knowledge".to_owned()
+    };
 }
 
 fn conversational_query_reply(query: &str) -> Option<String> {
@@ -4645,6 +4813,7 @@ fn conversational_query_reply(query: &str) -> Option<String> {
 
 struct VectorSearchOutcome {
     scores: HashMap<String, f64>,
+    strict_scores: HashMap<String, f64>,
     error: Option<String>,
     max_results: usize,
 }
@@ -4655,10 +4824,12 @@ fn build_vector_search_scores(
     account_id: &str,
     query: &str,
     embedding_config: Option<ai::EmbeddingRequestConfig>,
+    allow_broad_candidates: bool,
 ) -> Result<VectorSearchOutcome, String> {
     let Some(config) = hydrate_embedding_request_config(app_handle, embedding_config)? else {
         return Ok(VectorSearchOutcome {
             scores: HashMap::new(),
+            strict_scores: HashMap::new(),
             error: None,
             max_results: 8,
         });
@@ -4681,12 +4852,8 @@ fn build_vector_search_scores(
         account_id: account_id.to_owned(),
         model: storage_model.clone(),
         vector: query_vector,
-        limit: config.max_results.saturating_mul(3).clamp(10, 30),
-        min_score: if is_local {
-            embedding::raw_local_similarity_threshold(config.min_score)
-        } else {
-            config.min_score
-        },
+        limit: AI_SEARCH_CANDIDATE_LIMIT,
+        min_score: vector_candidate_min_score(is_local, config.min_score, allow_broad_candidates),
     };
     let sqlite_state = storage.get_repository_embedding_state(
         account_id,
@@ -4746,14 +4913,36 @@ fn build_vector_search_scores(
             (hit.repo_id, f64::from(score))
         })
         .collect::<HashMap<_, _>>();
+    let strict_scores = scores
+        .iter()
+        .filter(|(_, score)| **score >= f64::from(config.min_score))
+        .map(|(repo_id, score)| (repo_id.clone(), *score))
+        .collect::<HashMap<_, _>>();
     let message = scores
         .is_empty()
         .then(|| "向量索引尚无达到阈值的候选，已使用严格关键词检索。".to_owned());
     Ok(VectorSearchOutcome {
         scores,
+        strict_scores,
         error: message,
         max_results: config.max_results.clamp(1, 10),
     })
+}
+
+fn vector_candidate_min_score(
+    is_local: bool,
+    configured_min_score: f32,
+    allow_broad_candidates: bool,
+) -> f32 {
+    if allow_broad_candidates && is_local {
+        embedding::raw_local_similarity_threshold(0.0)
+    } else if allow_broad_candidates {
+        0.0
+    } else if is_local {
+        embedding::raw_local_similarity_threshold(configured_min_score)
+    } else {
+        configured_min_score
+    }
 }
 
 fn vector_index_needs_restore(
@@ -4818,7 +5007,7 @@ fn build_ai_search_query(
     if ai_config.provider.trim().eq_ignore_ascii_case("none") {
         return Ok((original_query, metadata));
     }
-    if is_short_exact_technical_query(&original_query) {
+    if storage::requires_exact_ascii_query_anchor(&original_query) {
         metadata.ai_enhanced = true;
         metadata.ai_query = Some(original_query.clone());
         metadata.ai_rationale_zh =
@@ -4901,14 +5090,6 @@ fn build_ai_search_query(
             Ok((original_query, metadata))
         }
     }
-}
-
-fn is_short_exact_technical_query(query: &str) -> bool {
-    let normalized = query.trim();
-    (1..=3).contains(&normalized.len())
-        && normalized
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
 }
 
 #[tauri::command]
@@ -6205,6 +6386,60 @@ mod tests {
     }
 
     #[test]
+    fn ai_search_uses_broad_vector_candidates_before_strict_fallback() {
+        let broad_local = vector_candidate_min_score(true, 0.72, true);
+        let strict_local = vector_candidate_min_score(true, 0.72, false);
+        let broad_remote = vector_candidate_min_score(false, 0.72, true);
+        let strict_remote = vector_candidate_min_score(false, 0.72, false);
+
+        assert!((broad_local - 0.70).abs() < f32::EPSILON);
+        assert!((strict_local - 0.916).abs() < f32::EPSILON);
+        assert_eq!(broad_remote, 0.0);
+        assert_eq!(strict_remote, 0.72);
+    }
+
+    #[test]
+    fn ai_selected_repositories_drive_visible_result_order() {
+        let mut response = storage::AiSearchResponseData {
+            query: "测试".to_owned(),
+            mode: "hybrid".to_owned(),
+            results: vec![
+                test_search_result("owner/first", true),
+                test_search_result("owner/second", false),
+                test_search_result("owner/noise", true),
+            ],
+            total_count: 3,
+            context_queries_used: Vec::new(),
+            context_applied: false,
+            ai_enhanced: true,
+            ai_query: Some("expanded query".to_owned()),
+            ai_rationale_zh: None,
+            ai_error: None,
+            answer_zh: None,
+            retrieval_mode: "vector+keyword".to_owned(),
+            vector_applied: true,
+            vector_error: None,
+        };
+
+        retain_ai_selected_search_results(
+            &mut response,
+            &["OWNER/SECOND".to_owned(), "owner/first".to_owned()],
+        );
+
+        assert_eq!(response.total_count, 2);
+        assert_eq!(
+            response
+                .results
+                .iter()
+                .map(|result| result.repository.full_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner/second", "owner/first"]
+        );
+        assert!(response.vector_applied);
+        assert_eq!(response.mode, "hybrid");
+    }
+
+    #[test]
     fn conversational_queries_do_not_trigger_repository_retrieval() {
         for query in [
             "你好",
@@ -6223,11 +6458,63 @@ mod tests {
 
     #[test]
     fn short_technical_queries_keep_exact_semantics() {
-        for query in ["AI", "ai", "RAG", "UI", "Go"] {
-            assert!(is_short_exact_technical_query(query));
+        for query in ["AI", "ai", "RAG", "UI", "Go", "Grok", "OpenAI"] {
+            assert!(storage::requires_exact_ascii_query_anchor(query));
         }
-        for query in ["OpenAI", "AI agent", "向量", "C++"] {
-            assert!(!is_short_exact_technical_query(query));
+        for query in [
+            "grok",
+            "obscure",
+            "AI agent",
+            "向量",
+            "C++",
+            "verylongquery",
+        ] {
+            assert!(!storage::requires_exact_ascii_query_anchor(query));
+        }
+    }
+
+    fn test_search_result(
+        repository_full_name: &str,
+        vector_match: bool,
+    ) -> storage::AiSearchResultData {
+        let (owner, name) = repository_full_name
+            .split_once('/')
+            .expect("测试仓库名应包含 owner/name");
+        storage::AiSearchResultData {
+            repository: storage::RepositoryListItem {
+                id: repository_full_name.to_owned(),
+                account_id: "account".to_owned(),
+                owner: owner.to_owned(),
+                name: name.to_owned(),
+                full_name: repository_full_name.to_owned(),
+                description: None,
+                language: None,
+                topics: Vec::new(),
+                html_url: format!("https://github.com/{repository_full_name}"),
+                stars_count: 0,
+                forks_count: 0,
+                starred_at: "2026-01-01T00:00:00Z".to_owned(),
+                pushed_at: None,
+                has_readme: false,
+                ai_summary: None,
+                ai_keywords: Vec::new(),
+                suggested_tags: Vec::new(),
+                tag_ids: Vec::new(),
+                tag_names: Vec::new(),
+                ai_generated_at: None,
+            },
+            score: 0.0,
+            explanation_zh: String::new(),
+            reasons: vector_match
+                .then(|| storage::SearchMatchReasonData {
+                    label: "语义相似命中".to_owned(),
+                    detail: String::new(),
+                })
+                .into_iter()
+                .collect(),
+            citations: Vec::new(),
+            keywords: Vec::new(),
+            ai_summary: None,
         }
     }
 

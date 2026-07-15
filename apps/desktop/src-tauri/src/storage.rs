@@ -877,6 +877,32 @@ ORDER BY starred_at DESC;
         parse_json_rows::<StoredRepository>(&self.query_sql(&sql)?, "SQLite 活跃仓库列表解析失败")
     }
 
+    /// 列出缺少 AI 文档、缺少 README 或 README 内容已变化的活跃仓库。
+    pub fn list_repositories_requiring_ai_document(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<StoredRepository>, String> {
+        let sql = format!(
+            r#"
+.mode json
+SELECT r.id, r.full_name
+FROM repositories r
+LEFT JOIN repo_readmes rr ON rr.repo_id = r.id
+LEFT JOIN repo_ai_documents ai ON ai.repo_id = r.id
+WHERE r.sync_status = 'active'
+  AND r.account_id = {account_id}
+  AND (
+    ai.repo_id IS NULL
+    OR rr.repo_id IS NULL
+    OR ai.source_hash != rr.content_hash
+  )
+ORDER BY r.starred_at DESC;
+"#,
+            account_id = sql_text(account_id),
+        );
+        parse_json_rows::<StoredRepository>(&self.query_sql(&sql)?, "SQLite AI 增量候选解析失败")
+    }
+
     pub fn get_readme_hash(&self, repo_id: &str) -> Result<Option<String>, String> {
         let sql = format!(
             r#"
@@ -3266,6 +3292,7 @@ ON CONFLICT(repo_id) DO UPDATE SET
             limit,
             offset,
             max_results,
+            candidate_limit,
             account_id,
             vector_scores,
             vector_error,
@@ -3363,15 +3390,20 @@ ORDER BY r.starred_at DESC;
             .take(30)
             .collect::<HashSet<_>>();
         let context_tokens = tokenize_query(&context_text);
-        let query_tokens = tokenize_query(normalized_query);
-        let query_coverage_tokens = tokenize_query_coverage(normalized_query);
+        let scoring_query = if requires_exact_ascii_query_anchor(&metadata.original_query) {
+            metadata.original_query.trim()
+        } else {
+            normalized_query
+        };
+        let query_tokens = tokenize_query(scoring_query);
+        let query_coverage_tokens = tokenize_query_coverage(scoring_query);
         let mut results = rows
             .into_iter()
             .filter_map(|row| {
                 let vector_score = vector_scores.get(&row.id).copied();
                 score_search_row(
                     row,
-                    normalized_query,
+                    scoring_query,
                     &query_tokens,
                     &query_coverage_tokens,
                     &context_tokens,
@@ -3388,9 +3420,12 @@ ORDER BY r.starred_at DESC;
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| b.repository.stars_count.cmp(&a.repository.stars_count))
         });
-        results.truncate(max_results.clamp(1, 10));
+        let result_cap = candidate_limit
+            .map(|value| value.clamp(1, 30))
+            .unwrap_or_else(|| max_results.clamp(1, 10));
+        results.truncate(result_cap);
         let total_count = results.len();
-        let page_limit = limit.clamp(1, 10);
+        let page_limit = limit.clamp(1, result_cap);
         results = results.into_iter().skip(offset).take(page_limit).collect();
         let context_applied = results.iter().any(search_result_uses_context);
         let vector_applied = results.iter().any(search_result_uses_vector);
@@ -3983,6 +4018,7 @@ pub struct AiSearchResponseData {
     pub vector_error: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct AiSearchMetadata {
     pub original_query: String,
     pub ai_enhanced: bool,
@@ -3998,6 +4034,7 @@ pub struct RepositorySearchOptions<'a> {
     pub limit: usize,
     pub offset: usize,
     pub max_results: usize,
+    pub candidate_limit: Option<usize>,
     pub account_id: Option<&'a str>,
     pub vector_scores: &'a HashMap<String, f64>,
     pub vector_error: Option<String>,
@@ -4288,7 +4325,7 @@ fn score_search_row(
         && (matched_coverage_tokens >= required_token_matches
             || full_name_query_match
             || summary_query_match);
-    let requires_exact_lexical_match = is_short_ascii_search_term(query);
+    let requires_exact_lexical_match = requires_exact_ascii_query_anchor(query);
     if !has_direct_match && (vector_score.is_none() || requires_exact_lexical_match) {
         return Ok(None);
     }
@@ -4513,12 +4550,18 @@ fn find_search_term_byte_index(content: &str, term: &str) -> Option<usize> {
     content.to_lowercase().find(&normalized_term.to_lowercase())
 }
 
-fn is_short_ascii_search_term(query: &str) -> bool {
+/// 判断单个 ASCII 技术名是否必须由原始词法证据确认。
+pub(crate) fn requires_exact_ascii_query_anchor(query: &str) -> bool {
     let normalized = query.trim();
-    (1..=3).contains(&normalized.len())
-        && normalized
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
+    let is_ascii_term = normalized
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric());
+    is_ascii_term
+        && ((1..=3).contains(&normalized.len())
+            || ((1..=12).contains(&normalized.len())
+                && normalized
+                    .chars()
+                    .any(|character| character.is_ascii_uppercase() || character.is_ascii_digit())))
 }
 
 fn tokenize_query(query: &str) -> Vec<String> {
@@ -5235,6 +5278,48 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
         assert_eq!(repositories[0].id, "1001:42");
         assert_eq!(repositories[0].full_name, "new-owner/new-name");
 
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    #[test]
+    fn ai_document_candidates_only_include_missing_or_changed_sources() {
+        let (storage, database_path) = temp_storage("ai-document-candidates");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, description, language, topics_json, html_url, stars_count, forks_count, starred_at)
+VALUES
+  ('1001:1', '1001', 'owner', 'current', 'owner/current', 'Current document', 'Rust', '[]', 'https://github.com/owner/current', 10, 1, '2026-01-04T00:00:00Z'),
+  ('1001:2', '1001', 'owner', 'changed', 'owner/changed', 'Changed README', 'Rust', '[]', 'https://github.com/owner/changed', 10, 1, '2026-01-03T00:00:00Z'),
+  ('1001:3', '1001', 'owner', 'missing-ai', 'owner/missing-ai', 'Missing AI', 'Rust', '[]', 'https://github.com/owner/missing-ai', 10, 1, '2026-01-02T00:00:00Z'),
+  ('1001:4', '1001', 'owner', 'missing-readme', 'owner/missing-readme', 'Missing README', 'Rust', '[]', 'https://github.com/owner/missing-readme', 10, 1, '2026-01-01T00:00:00Z');
+INSERT INTO repo_readmes (repo_id, raw_markdown, content_hash, source_path, fetched_at)
+VALUES
+  ('1001:1', '# Current', 'hash-current', 'README.md', '2026-01-04T00:00:00Z'),
+  ('1001:2', '# Changed', 'hash-new', 'README.md', '2026-01-03T00:00:00Z'),
+  ('1001:3', '# Missing AI', 'hash-missing-ai', 'README.md', '2026-01-02T00:00:00Z');
+INSERT INTO repo_ai_documents (repo_id, summary_zh, model, prompt_version, source_hash, generated_at)
+VALUES
+  ('1001:1', '已是最新', 'test-model', 'v1', 'hash-current', '2026-01-04T00:00:00Z'),
+  ('1001:2', '旧摘要', 'test-model', 'v1', 'hash-old', '2026-01-03T00:00:00Z'),
+  ('1001:4', '等待补抓 README', 'test-model', 'v1', 'hash-old-readme', '2026-01-01T00:00:00Z');
+"#,
+            )
+            .expect("写入 AI 增量候选测试数据");
+
+        let candidates = storage
+            .list_repositories_requiring_ai_document("1001")
+            .expect("应能读取 AI 增量候选");
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|repository| repository.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1001:2", "1001:3", "1001:4"]
+        );
         let _ = remove_sqlite_database_files(&database_path);
     }
 
@@ -6310,6 +6395,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
                 limit: 20,
                 offset: 0,
                 max_results: 8,
+                candidate_limit: None,
                 account_id: Some("1001"),
                 vector_scores: &HashMap::new(),
                 vector_error: None,
@@ -6343,6 +6429,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
                 limit: 20,
                 offset: 0,
                 max_results: 8,
+                candidate_limit: None,
                 account_id: Some("1001"),
                 vector_scores: &HashMap::new(),
                 vector_error: None,
@@ -6704,6 +6791,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
                 limit: 100,
                 offset: 0,
                 max_results: 100,
+                candidate_limit: None,
                 account_id: Some("1001"),
                 vector_scores: &HashMap::new(),
                 vector_error: None,
@@ -6713,6 +6801,24 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
 
         assert_eq!(response.total_count, 10);
         assert_eq!(response.results.len(), 10);
+
+        let candidate_response = storage
+            .search_repositories(RepositorySearchOptions {
+                query: "React animation",
+                context_queries: &[],
+                context_repository_ids: &[],
+                limit: 30,
+                offset: 0,
+                max_results: 10,
+                candidate_limit: Some(30),
+                account_id: Some("1001"),
+                vector_scores: &HashMap::new(),
+                vector_error: None,
+                metadata: None,
+            })
+            .expect("AI 候选池应允许读取更多高相关仓库");
+        assert_eq!(candidate_response.total_count, 15);
+        assert_eq!(candidate_response.results.len(), 15);
         let _ = std::fs::remove_file(database_path);
     }
 
@@ -6748,6 +6854,7 @@ VALUES ('1001:2', 'Build available utility classes and maintain design tokens.',
                 limit: 10,
                 offset: 0,
                 max_results: 8,
+                candidate_limit: None,
                 account_id: Some("1001"),
                 vector_scores: &vector_scores,
                 vector_error: None,
@@ -6761,6 +6868,64 @@ VALUES ('1001:2', 'Build available utility classes and maintain design tokens.',
             .results
             .iter()
             .any(|result| result.repository.full_name == "owner/tailwind-kit"));
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn product_name_search_anchors_ai_expansion_to_original_query() {
+        let (storage, database_path) = temp_storage("search-product-anchor");
+        storage
+            .execute_sql(
+                r#"
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, description, language, topics_json, html_url, stars_count, forks_count, starred_at)
+VALUES
+  ('1001:1', '1001', 'SunkenCost', 'grok-regkit', 'SunkenCost/grok-regkit', 'Toolkit for Grok integrations', 'Python', '["grok","xai"]', 'https://github.com/SunkenCost/grok-regkit', 120, 5, '2026-01-03T00:00:00Z'),
+  ('1001:2', '1001', 'router-for-me', 'CLIProxyAPI', 'router-for-me/CLIProxyAPI', 'OpenAI-compatible gateway with Grok support', 'Go', '["proxy","api"]', 'https://github.com/router-for-me/CLIProxyAPI', 900, 40, '2026-01-02T00:00:00Z'),
+  ('1001:3', '1001', 'owner', 'ai-novel', 'owner/ai-novel', 'AI assisted novel writing platform', 'TypeScript', '["ai","writing"]', 'https://github.com/owner/ai-novel', 9000, 400, '2026-01-01T00:00:00Z');
+"#,
+            )
+            .expect("写入产品名检索测试数据");
+        let vector_scores = HashMap::from([
+            ("1001:1".to_owned(), 0.86),
+            ("1001:2".to_owned(), 0.83),
+            ("1001:3".to_owned(), 0.99),
+        ]);
+        let response = storage
+            .search_repositories(RepositorySearchOptions {
+                query: "Grok AI xAI chatbot",
+                context_queries: &[],
+                context_repository_ids: &[],
+                limit: 30,
+                offset: 0,
+                max_results: 8,
+                candidate_limit: Some(30),
+                account_id: Some("1001"),
+                vector_scores: &vector_scores,
+                vector_error: None,
+                metadata: Some(AiSearchMetadata {
+                    original_query: "Grok".to_owned(),
+                    ai_enhanced: true,
+                    ai_query: Some("Grok AI xAI chatbot".to_owned()),
+                    ai_rationale_zh: None,
+                    ai_error: None,
+                }),
+            })
+            .expect("产品名检索应可执行");
+
+        assert_eq!(response.total_count, 2);
+        assert!(response
+            .results
+            .iter()
+            .any(|result| result.repository.full_name == "SunkenCost/grok-regkit"));
+        assert!(response
+            .results
+            .iter()
+            .any(|result| result.repository.full_name == "router-for-me/CLIProxyAPI"));
+        assert!(!response
+            .results
+            .iter()
+            .any(|result| result.repository.full_name == "owner/ai-novel"));
         let _ = std::fs::remove_file(database_path);
     }
 
@@ -7030,6 +7195,7 @@ VALUES
                 limit: 20,
                 offset: 0,
                 max_results: 8,
+                candidate_limit: None,
                 account_id: Some("1001"),
                 vector_scores: &HashMap::new(),
                 vector_error: None,
@@ -7044,6 +7210,7 @@ VALUES
                 limit: 20,
                 offset: 0,
                 max_results: 8,
+                candidate_limit: None,
                 account_id: Some("1001"),
                 vector_scores: &HashMap::new(),
                 vector_error: None,
@@ -7096,6 +7263,7 @@ VALUES
                 limit: 20,
                 offset: 0,
                 max_results: 8,
+                candidate_limit: None,
                 account_id: Some("1001"),
                 vector_scores: &HashMap::new(),
                 vector_error: None,
