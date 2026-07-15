@@ -212,6 +212,23 @@ type VectorIndexStatus = {
   message: string;
 };
 
+type EmbeddingRuntimeStatus = {
+  accountId: string;
+  enabled: boolean;
+  provider: string;
+  state: 'disabled' | 'missing' | 'downloading' | 'verifying' | 'loading' | 'indexing' | 'ready' | 'partial' | 'error';
+  model: string;
+  revision: string | null;
+  profileId: string;
+  dimensions: number;
+  cacheBytes: number;
+  indexedCount: number;
+  totalCount: number;
+  failedCount: number;
+  message: string;
+  canRetry: boolean;
+};
+
 type VectorIndexBuildSummary = {
   totalCount: number;
   indexedCount: number;
@@ -1528,12 +1545,13 @@ function EmbeddingSettingsPanel({
   const [isTesting, setIsTesting] = useState(false);
   const [isRebuilding, setIsRebuilding] = useState(false);
   const [isLoadingStatus, setIsLoadingStatus] = useState(false);
-  const [status, setStatus] = useState<VectorIndexStatus | null>(null);
+  const [status, setStatus] = useState<EmbeddingRuntimeStatus | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isPreparing, setIsPreparing] = useState(false);
   const effectiveApiKey = apiKeyDraft.trim() ? apiKeyDraft : embedding.apiKey;
   const effectiveEmbedding = { ...embedding, apiKey: effectiveApiKey };
   const configMessage = getEmbeddingConfigMessage(effectiveEmbedding);
-  const canUseEmbedding = Boolean(accountId && !configMessage);
+  const canUseEmbedding = Boolean(accountId && embedding.enabled && !configMessage);
   const keySaveMessage = getAiKeySaveMessage(settingsHook.embeddingKeySaveStatus);
 
   useEffect(() => {
@@ -1545,13 +1563,71 @@ function EmbeddingSettingsPanel({
     setMessage(null);
   }, [accountId, embedding.enabled, embedding.provider, embedding.baseUrl, embedding.model, embedding.dimensions]);
 
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void listen<EmbeddingRuntimeStatus>('embedding-runtime-status', (event) => {
+      if (!accountId || event.payload.accountId !== accountId) {
+        return;
+      }
+      setStatus(event.payload);
+      setIsPreparing(['downloading', 'verifying', 'loading', 'indexing'].includes(event.payload.state));
+    }).then((dispose) => {
+      unlisten = dispose;
+    }).catch(() => undefined);
+    return () => {
+      unlisten?.();
+    };
+  }, [accountId]);
+
+  useEffect(() => {
+    if (!accountId) {
+      setIsLoadingStatus(false);
+      return;
+    }
+    let cancelled = false;
+    setIsLoadingStatus(true);
+    void invoke<EmbeddingRuntimeStatus>('get_embedding_runtime_status', {
+      request: {
+        accountId,
+        embeddingConfig: toBackendEmbeddingRequestConfig(embedding),
+      },
+    })
+      .then((result) => {
+        if (!cancelled) {
+          setStatus(result);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setMessage({ type: 'error', text: toErrorMessage(error) });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingStatus(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    accountId,
+    embedding.enabled,
+    embedding.provider,
+    embedding.baseUrl,
+    embedding.model,
+    embedding.dimensions,
+    embedding.minScore,
+    embedding.maxResults,
+  ]);
+
   async function persistEmbeddingKey() {
     if (shouldFlushEmbeddingApiKey(effectiveEmbedding)) {
       await settingsHook.flushEmbeddingKey(effectiveApiKey);
     }
   }
 
-  async function loadStatus() {
+  async function loadStatus(preserveMessage = false) {
     if (!accountId) {
       setMessage({ type: 'error', text: '请先连接 GitHub 账号并同步 Stars。' });
       return;
@@ -1559,16 +1635,16 @@ function EmbeddingSettingsPanel({
     setIsLoadingStatus(true);
     try {
       await persistEmbeddingKey();
-      const result = await invoke<VectorIndexStatus>('get_vector_index_status', {
+      const result = await invoke<EmbeddingRuntimeStatus>('get_embedding_runtime_status', {
         request: {
           accountId,
-          embeddingConfig: embedding.enabled
-            ? toBackendEmbeddingRequestConfig(effectiveEmbedding)
-            : null,
+          embeddingConfig: toBackendEmbeddingRequestConfig(effectiveEmbedding),
         },
       });
       setStatus(result);
-      setMessage(null);
+      if (!preserveMessage) {
+        setMessage(null);
+      }
     } catch (error) {
       setMessage({ type: 'error', text: toErrorMessage(error) });
     } finally {
@@ -1599,6 +1675,59 @@ function EmbeddingSettingsPanel({
     }
   }
 
+  async function handleToggle(checked: boolean) {
+    if (!checked) {
+      setMessage(null);
+      try {
+        await settingsHook.updateEmbedding({ enabled: false });
+        if (accountId && embedding.provider === 'local') {
+          await invoke('disable_embedding_runtime', { request: { accountId, embeddingConfig: null } });
+        }
+        setMessage({ type: 'success', text: '向量检索已关闭，当前使用关键词检索。' });
+      } catch (error) {
+        setMessage({ type: 'error', text: toErrorMessage(error) });
+      }
+      return;
+    }
+    if (!accountId) {
+      setMessage({ type: 'error', text: '请先连接 GitHub 账号并同步 Stars。' });
+      return;
+    }
+    const nextEmbedding = {
+      ...effectiveEmbedding,
+      enabled: true,
+      provider: embedding.provider === 'none' ? 'local' : embedding.provider,
+    } as EmbeddingSettingsValue;
+    setMessage(null);
+    try {
+      if (nextEmbedding.provider === 'local') {
+        const runtime = await invoke<EmbeddingRuntimeStatus>('get_embedding_runtime_status', {
+          request: { accountId, embeddingConfig: toBackendEmbeddingRequestConfig(nextEmbedding) },
+        });
+        if (runtime.state === 'missing' && !window.confirm('本地 Embedding 模型约占 490 MB，将保存到本机应用缓存，下载完成后可断网使用。现在开始下载吗？')) {
+          return;
+        }
+        await settingsHook.updateEmbedding({ enabled: true, provider: 'local' });
+        setIsPreparing(true);
+        const result = await invoke<EmbeddingRuntimeStatus>('enable_local_embedding', {
+          request: { accountId, embeddingConfig: toBackendEmbeddingRequestConfig(nextEmbedding) },
+        });
+        setStatus(result);
+        setMessage(result.state === 'partial'
+          ? { type: 'error', text: result.message }
+          : { type: 'success', text: '本地向量检索已就绪。' });
+      } else {
+        await settingsHook.updateEmbedding({ enabled: true, provider: nextEmbedding.provider });
+        setMessage({ type: 'success', text: '远程 Embedding 已启用，请在高级设置中检查连接。' });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: toErrorMessage(error) });
+    } finally {
+      setIsPreparing(false);
+      await loadStatus(true).catch(() => undefined);
+    }
+  }
+
   async function handleRebuildIndex() {
     if (!accountId) {
       setMessage({ type: 'error', text: '请先连接 GitHub 账号并同步 Stars。' });
@@ -1625,11 +1754,44 @@ function EmbeddingSettingsPanel({
           ? `向量索引已处理 ${result.totalCount} 个仓库，成功 ${succeeded} 个，失败 ${result.failedCount} 个。${result.failures[0] ? ` 首个错误：${result.failures[0]}` : ''}`
           : `向量索引已就绪：新生成 ${result.indexedCount} 个，从 SQLite 恢复 ${result.restoredCount} 个。`,
       });
-      await loadStatus();
+      await loadStatus(true);
     } catch (error) {
       setMessage({ type: 'error', text: toErrorMessage(error) });
     } finally {
       setIsRebuilding(false);
+    }
+  }
+
+  async function handleRetry() {
+    if (!accountId) return;
+    setIsPreparing(true);
+    setMessage(null);
+    try {
+      const result = await invoke<EmbeddingRuntimeStatus>('retry_embedding_setup', {
+        request: { accountId, embeddingConfig: toBackendEmbeddingRequestConfig(effectiveEmbedding) },
+      });
+      setStatus(result);
+      setMessage(result.state === 'partial'
+        ? { type: 'error', text: result.message }
+        : { type: 'success', text: '本地 Embedding 已完成重试。' });
+    } catch (error) {
+      setMessage({ type: 'error', text: toErrorMessage(error) });
+    } finally {
+      setIsPreparing(false);
+      await loadStatus(true).catch(() => undefined);
+    }
+  }
+
+  async function handleDeleteModel() {
+    if (!accountId) return;
+    try {
+      await invoke<EmbeddingRuntimeStatus>('delete_local_embedding_model', {
+        request: { accountId, embeddingConfig: null },
+      });
+      await loadStatus();
+      setMessage({ type: 'success', text: '本地模型已删除。' });
+    } catch (error) {
+      setMessage({ type: 'error', text: toErrorMessage(error) });
     }
   }
 
@@ -1645,114 +1807,75 @@ function EmbeddingSettingsPanel({
         <div className="min-w-0">
           <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">向量检索</h3>
           <p className="mt-1 max-w-3xl font-body-md text-sm text-on-surface-variant">
-            使用独立的 Embedding 服务生成仓库向量，并由本机 zvec 索引完成语义召回。仓库笔记不会发送到远程服务。
+            默认使用本地模型生成中英双语向量，由本机 zvec 完成语义召回；远程服务仅在高级设置中启用。
           </p>
         </div>
         <ToggleSwitch
           checked={embedding.enabled}
-          onChange={(checked) => void settingsHook.updateEmbedding({
-            enabled: checked,
-            provider: checked && embedding.provider === 'none' ? 'openai' : embedding.provider,
-            baseUrl: checked && embedding.provider === 'none' ? 'https://api.openai.com/v1' : embedding.baseUrl,
-          })}
+          onChange={(checked) => void handleToggle(checked)}
+          disabled={isPreparing}
         />
       </div>
 
       <div className="space-y-5 border-t border-card-border pt-5">
-        <div className="grid gap-4 lg:grid-cols-2">
-          <label className="grid gap-2 font-body-md text-sm font-medium text-on-surface">
-            Embedding 服务
-            <select
-              value={embedding.provider}
-              onChange={(event) => {
-                const provider = event.target.value as EmbeddingSettingsValue['provider'];
-                void settingsHook.updateEmbedding({
-                  provider,
-                  enabled: provider !== 'none' && embedding.enabled,
-                  baseUrl: provider === 'openai'
-                    ? 'https://api.openai.com/v1'
-                    : provider === 'none'
-                      ? ''
-                      : embedding.baseUrl,
-                });
-              }}
-              disabled={!embedding.enabled}
-              className="rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 font-body-md text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
-            >
-              <option value="openai">OpenAI</option>
-              <option value="openai-compatible">OpenAI 兼容接口</option>
-              <option value="none">不使用向量检索</option>
-            </select>
-          </label>
-          <label className="grid gap-2 font-body-md text-sm font-medium text-on-surface">
-            请求地址
-            <input
-              type="url"
-              autoComplete="off"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              value={embedding.baseUrl}
-              onChange={(event) => void settingsHook.updateEmbedding({ baseUrl: event.target.value })}
-              disabled={!embedding.enabled}
-              placeholder="https://api.openai.com/v1"
-              className="rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 font-body-md text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
-            />
-          </label>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <div className="rounded-lg border border-card-border bg-surface-container-low px-3 py-3">
+            <p className="font-body-md text-xs text-on-surface-variant">当前模式</p>
+            <p className="mt-1 font-body-md text-sm font-medium text-on-surface">{embedding.provider === 'local' ? '本地模型' : '远程服务'}</p>
+          </div>
+          <div className="rounded-lg border border-card-border bg-surface-container-low px-3 py-3">
+            <p className="font-body-md text-xs text-on-surface-variant">模型</p>
+            <p className="mt-1 break-all font-body-md text-sm font-medium text-on-surface">{embedding.provider === 'local' ? 'multilingual-e5-small' : embedding.model || '未配置'}</p>
+          </div>
+          <div className="rounded-lg border border-card-border bg-surface-container-low px-3 py-3">
+            <p className="font-body-md text-xs text-on-surface-variant">向量维度</p>
+            <p className="mt-1 font-body-md text-sm font-medium text-on-surface">{embedding.provider === 'local' ? 384 : embedding.dimensions}</p>
+          </div>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-2">
-          <label className="grid gap-2 font-body-md text-sm font-medium text-on-surface">
-            API Key
-            <input
-              type="password"
-              autoComplete="off"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              value={apiKeyDraft}
-              onChange={(event) => setApiKeyDraft(event.target.value)}
-              onBlur={() => void persistEmbeddingKey().catch(() => undefined)}
-              disabled={!embedding.enabled}
-              placeholder={hasSavedApiKey ? '已保存，输入新 Key 可替换' : '输入 Embedding API Key'}
-              className="rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 font-body-md text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
-            />
-            <span className="font-body-md text-xs font-normal text-on-surface-variant">
-              {embedding.provider === 'openai-compatible'
-                ? '本机兼容服务可留空；填写后仅保存到系统凭据管理器。'
-                : '仅保存到系统凭据管理器，不写入设置文件。'}
-            </span>
-            {hasSavedApiKey && !apiKeyDraft.trim() && (
-              <button
-                type="button"
-                onClick={() => void handleClearSavedKey()}
-                className="w-fit rounded-lg border border-card-border bg-surface-container-high px-3 py-1.5 font-body-md text-xs font-normal text-on-surface transition-colors hover:bg-surface-container-highest"
-              >
-                清除已保存 Key
-              </button>
-            )}
-            {keySaveMessage && (
-              <span className={`font-body-md text-xs font-normal ${settingsHook.embeddingKeySaveStatus === 'error' ? 'text-error' : 'text-on-surface-variant'}`}>
-                {keySaveMessage}
-              </span>
-            )}
-          </label>
-          <label className="grid gap-2 font-body-md text-sm font-medium text-on-surface">
-            模型 ID
-            <input
-              type="text"
-              autoComplete="off"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              value={embedding.model}
-              onChange={(event) => void settingsHook.updateEmbedding({ model: event.target.value })}
-              disabled={!embedding.enabled}
-              placeholder="text-embedding-3-small"
-              className="rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 font-body-md text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
-            />
-          </label>
-        </div>
+        <details className="rounded-lg border border-card-border bg-surface-container-low px-4 py-3" open={embedding.provider !== 'local' && embedding.provider !== 'none'}>
+            <summary className="cursor-pointer font-body-md text-sm font-medium text-on-surface">高级远程 Embedding 设置</summary>
+            <div className="mt-4 space-y-4">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <label className="grid gap-2 font-body-md text-sm font-medium text-on-surface">
+                  Embedding 服务
+                  <select
+                    value={embedding.provider}
+                    onChange={(event) => {
+                      const provider = event.target.value as EmbeddingSettingsValue['provider'];
+                      void settingsHook.updateEmbedding({
+                        provider,
+                        enabled: false,
+                        baseUrl: provider === 'openai' ? 'https://api.openai.com/v1' : embedding.baseUrl,
+                      });
+                    }}
+                    className="rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 font-body-md text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                  >
+                    <option value="local">本地模型</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="openai-compatible">OpenAI 兼容接口</option>
+                  </select>
+                </label>
+                <label className="grid gap-2 font-body-md text-sm font-medium text-on-surface">
+                  请求地址
+                  <input type="url" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={embedding.baseUrl} onChange={(event) => void settingsHook.updateEmbedding({ baseUrl: event.target.value })} disabled={!embedding.enabled || embedding.provider === 'local'} placeholder="https://api.openai.com/v1" className="rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 font-body-md text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60" />
+                </label>
+              </div>
+              <div className="grid gap-4 lg:grid-cols-2">
+                <label className="grid gap-2 font-body-md text-sm font-medium text-on-surface">
+                  API Key
+                  <input type="password" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} onBlur={() => void persistEmbeddingKey().catch(() => undefined)} disabled={!embedding.enabled || embedding.provider === 'local'} placeholder={hasSavedApiKey ? '已保存，输入新 Key 可替换' : '输入 Embedding API Key'} className="rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 font-body-md text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60" />
+                  <span className="font-body-md text-xs font-normal text-on-surface-variant">只发送仓库知识文本，不发送个人笔记；Key 仅保存到系统凭据管理器。</span>
+                  {hasSavedApiKey && !apiKeyDraft.trim() && <button type="button" onClick={() => void handleClearSavedKey()} className="w-fit rounded-lg border border-card-border bg-surface-container-high px-3 py-1.5 font-body-md text-xs text-on-surface">清除已保存 Key</button>}
+                  {keySaveMessage && <span className="font-body-md text-xs text-on-surface-variant">{keySaveMessage}</span>}
+                </label>
+                <label className="grid gap-2 font-body-md text-sm font-medium text-on-surface">
+                  模型 ID
+                  <input type="text" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={embedding.model} onChange={(event) => void settingsHook.updateEmbedding({ model: event.target.value })} disabled={!embedding.enabled || embedding.provider === 'local'} placeholder="text-embedding-3-small" className="rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 font-body-md text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60" />
+                </label>
+              </div>
+            </div>
+          </details>
 
         <div className="grid gap-4 sm:grid-cols-3">
           <label className="grid gap-2 font-body-md text-sm font-medium text-on-surface">
@@ -1762,9 +1885,9 @@ function EmbeddingSettingsPanel({
               min={1}
               max={8192}
               step={1}
-              value={embedding.dimensions}
+              value={embedding.provider === 'local' ? 384 : embedding.dimensions}
               onChange={(event) => void settingsHook.updateEmbedding({ dimensions: Number(event.target.value) })}
-              disabled={!embedding.enabled}
+              disabled={!embedding.enabled || embedding.provider === 'local'}
               className="rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 font-body-md text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
             />
           </label>
@@ -1800,11 +1923,11 @@ function EmbeddingSettingsPanel({
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <p className="font-body-md text-sm font-medium text-on-surface">
-                {status?.message ?? (embedding.enabled ? '可测试连接并检查本机索引状态。' : '启用后可生成并使用语义向量。')}
+                {status?.message ?? (embedding.enabled ? '可检查本机索引状态。' : '启用后可生成并使用语义向量。')}
               </p>
               {status?.enabled && (
                 <p className="mt-1 font-body-md text-xs text-on-surface-variant">
-                  SQLite 向量 {status.sqliteCount} 个 · zvec 索引 {status.zvecCount} 个 · {status.model} / {status.dimensions} 维
+                  已索引 {status.indexedCount} / {status.totalCount} 个仓库 · {status.model} / {status.dimensions} 维 · 缓存 {(status.cacheBytes / 1024 / 1024).toFixed(0)} MB
                 </p>
               )}
             </div>
@@ -1812,7 +1935,7 @@ function EmbeddingSettingsPanel({
               <button
                 type="button"
                 onClick={() => void handleTestConnection()}
-                disabled={!canUseEmbedding || isTesting || isRebuilding}
+                disabled={!canUseEmbedding || embedding.provider === 'local' || isTesting || isRebuilding || isPreparing}
                 className="rounded-lg border border-card-border bg-surface-container-high px-3 py-2 font-body-md text-sm text-on-surface transition-colors hover:bg-surface-container-highest disabled:opacity-60"
               >
                 {isTesting ? '测试中…' : '测试连接'}
@@ -1820,7 +1943,7 @@ function EmbeddingSettingsPanel({
               <button
                 type="button"
                 onClick={() => void loadStatus()}
-                disabled={!accountId || isLoadingStatus || isRebuilding}
+                disabled={!accountId || isLoadingStatus || isRebuilding || isPreparing}
                 className="rounded-lg border border-card-border bg-surface-container-high px-3 py-2 font-body-md text-sm text-on-surface transition-colors hover:bg-surface-container-highest disabled:opacity-60"
               >
                 {isLoadingStatus ? '检查中…' : '检查状态'}
@@ -1828,11 +1951,17 @@ function EmbeddingSettingsPanel({
               <button
                 type="button"
                 onClick={() => void handleRebuildIndex()}
-                disabled={!canUseEmbedding || isTesting || isRebuilding}
+                disabled={!canUseEmbedding || isTesting || isRebuilding || isPreparing}
                 className="gsat-primary-button rounded-lg bg-primary px-3 py-2 font-body-md text-sm font-medium text-white transition-colors hover:bg-primary-container disabled:opacity-60"
               >
                 {isRebuilding ? '重建中…' : '重建索引'}
               </button>
+              {embedding.provider === 'local' && status?.canRetry && (
+                <button type="button" onClick={() => void handleRetry()} disabled={isPreparing} className="rounded-lg border border-card-border bg-surface-container-high px-3 py-2 font-body-md text-sm text-on-surface disabled:opacity-60">重试准备</button>
+              )}
+              {embedding.provider === 'local' && !embedding.enabled && Boolean(status?.cacheBytes) && (
+                <button type="button" onClick={() => void handleDeleteModel()} className="rounded-lg border border-card-border bg-surface-container-high px-3 py-2 font-body-md text-sm text-on-surface">删除本地模型</button>
+              )}
             </div>
           </div>
           {!canUseEmbedding && (
