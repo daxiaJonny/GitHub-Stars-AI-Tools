@@ -22,6 +22,7 @@ import type {
   ReadingStatus,
   RepositoryAnnotationView,
   RepositoryDetailView,
+  RepositoryFilterCounts,
   RepositoryFilters,
   RepositoryListItem,
   RepositoryListPage,
@@ -42,6 +43,12 @@ const emptyRepositoryPage: RepositoryListPage = {
   totalCount: 0,
   limit: REPOSITORY_PAGE_SIZE,
   offset: 0,
+};
+
+const emptyRepositoryFilterCounts: RepositoryFilterCounts = {
+  totalCount: 0,
+  languageCounts: {},
+  tagCounts: {},
 };
 
 class ReadmePostProcessWarning extends Error {
@@ -99,6 +106,7 @@ export function useStarsWorkspace() {
   const [readmeSummary, setReadmeSummary] = useState<ReadmeFetchSummary | null>(null);
   const [repositoryPage, setRepositoryPage] = useState<RepositoryListPage | null>(null);
   const [repositoryLanguages, setRepositoryLanguages] = useState<string[]>([]);
+  const [repositoryFilterCounts, setRepositoryFilterCounts] = useState<RepositoryFilterCounts>(emptyRepositoryFilterCounts);
   const [repositoryFilters, setRepositoryFilters] = useState<RepositoryFilters>(emptyRepositoryFilters);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<string | null>(null);
   const [tags, setTags] = useState<TagItem[]>([]);
@@ -297,13 +305,15 @@ export function useStarsWorkspace() {
       const accountId = accountIdOverride ?? (authState.user ? String(authState.user.id) : undefined);
       if (!accountId) {
         setRepositoryLanguages([]);
+        setRepositoryFilterCounts(emptyRepositoryFilterCounts);
         return;
       }
-      const languages = await invoke<string[]>(
-        'list_repository_languages',
-        { request: { accountId } },
-      );
+      const [languages, counts] = await Promise.all([
+        invoke<string[]>('list_repository_languages', { request: { accountId } }),
+        invoke<RepositoryFilterCounts>('get_repository_filter_counts', { request: { accountId } }),
+      ]);
       setRepositoryLanguages(languages);
+      setRepositoryFilterCounts(counts);
     } catch (reason) {
       setError(toErrorMessage(reason));
     }
@@ -550,6 +560,7 @@ export function useStarsWorkspace() {
       if (didClearDatabase) {
         setRepositoryPage(emptyRepositoryPage);
         setRepositoryLanguages([]);
+        setRepositoryFilterCounts(emptyRepositoryFilterCounts);
         setRepositoryFilters(emptyRepositoryFilters);
         setSelectedRepositoryId(null);
         setTags([]);
@@ -1536,6 +1547,7 @@ export function useStarsWorkspace() {
     repositoryAiStream,
     repositoryReadmeError,
     repositoryLanguages,
+    repositoryFilterCounts,
     repositoryPage,
     repositoryStats,
     resetRepositoryFilters,

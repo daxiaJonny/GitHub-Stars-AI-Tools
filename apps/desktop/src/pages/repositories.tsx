@@ -609,10 +609,10 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
                 onChange={(e) => setSelectedLanguage(e.target.value)}
                 className="min-w-0 flex-1 cursor-pointer rounded border border-outline-variant/30 bg-surface px-2 py-1 text-on-surface-variant hover:border-outline-variant"
               >
-                <option value="">全部语言</option>
+                <option value="">全部语言 ({workspace.repositoryFilterCounts.totalCount})</option>
                 {workspace.repositoryLanguages.map((lang) => (
                   <option key={lang} value={lang}>
-                    {lang}
+                    {lang} ({workspace.repositoryFilterCounts.languageCounts[lang] ?? 0})
                   </option>
                 ))}
               </select>
@@ -621,37 +621,14 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
                 onChange={(e) => setSelectedTagId(e.target.value)}
                 className="min-w-0 flex-1 cursor-pointer rounded border border-outline-variant/30 bg-surface px-2 py-1 text-on-surface-variant hover:border-outline-variant"
               >
-                <option value="">全部标签</option>
+                <option value="">全部标签 ({workspace.repositoryFilterCounts.totalCount})</option>
                 {workspace.tags.map((tag) => (
                   <option key={tag.id} value={tag.id}>
-                    {tag.name}
+                    {tag.name} ({workspace.repositoryFilterCounts.tagCounts[tag.id] ?? 0})
                   </option>
                 ))}
               </select>
             </div>
-          </div>
-
-          {/* 快捷标签 */}
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            <button
-              onClick={() => setSelectedTagId('')}
-              className="whitespace-nowrap rounded-full bg-primary-container px-2 py-0.5 text-[11px] font-medium text-white transition-all cursor-pointer hover:brightness-110"
-            >
-              全部 ({workspace.repositoryStats.total})
-            </button>
-            {workspace.tags.slice(0, 5).map((tag) => (
-              <button
-                key={tag.id}
-                onClick={() => setSelectedTagId(selectedTagId === tag.id ? '' : tag.id)}
-                className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium transition-all cursor-pointer ${
-                  selectedTagId === tag.id
-                    ? 'border-primary bg-primary text-white hover:brightness-110'
-                    : 'border-outline-variant/30 text-on-surface hover:bg-surface-variant/50'
-                }`}
-              >
-                {tag.name}
-              </button>
-            ))}
           </div>
         </div>
 

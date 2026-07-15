@@ -10,6 +10,7 @@ describe('Embedding 配置', () => {
   it('新用户默认使用关闭的本地模型配置', () => {
     expect(DEFAULT_SETTINGS.embedding.enabled).toBe(false);
     expect(DEFAULT_SETTINGS.embedding.provider).toBe('local');
+    expect(DEFAULT_SETTINGS.embedding.downloadSource).toBe('modelscope');
     expect(DEFAULT_SETTINGS.embedding.model).toBe('intfloat/multilingual-e5-small');
     expect(DEFAULT_SETTINGS.embedding.dimensions).toBe(384);
   });
@@ -64,6 +65,20 @@ describe('Embedding 配置', () => {
     expect(normalized.apiKey).toBe('');
   });
 
+  it('保留官方下载源并将未知下载源回退到国内源', () => {
+    const official = normalizeEmbeddingSettings({
+      ...DEFAULT_SETTINGS.embedding,
+      downloadSource: 'huggingface',
+    });
+    const fallback = normalizeEmbeddingSettings({
+      ...DEFAULT_SETTINGS.embedding,
+      downloadSource: 'unknown' as 'modelscope',
+    });
+
+    expect(official.downloadSource).toBe('huggingface');
+    expect(fallback.downloadSource).toBe('modelscope');
+  });
+
   it('后端配置不携带明文 API Key', () => {
     const backend = toBackendEmbeddingRequestConfig({
       ...DEFAULT_SETTINGS.embedding,
@@ -74,6 +89,7 @@ describe('Embedding 配置', () => {
     });
 
     expect(backend.apiKey).toBe('');
+    expect(backend.downloadSource).toBe('modelscope');
     expect(backend.maxResults).toBe(8);
   });
 

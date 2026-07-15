@@ -167,6 +167,12 @@ export type RepositoryFilters = {
   tagId: string;
 };
 
+export type RepositoryFilterCounts = {
+  totalCount: number;
+  languageCounts: Record<string, number>;
+  tagCounts: Record<string, number>;
+};
+
 export type TagItem = {
   id: string;
   accountId: string;
