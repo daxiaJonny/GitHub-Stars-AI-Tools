@@ -340,7 +340,8 @@ jobs:
             throw "未找到 NSIS 安装包。"
           }
           $listing = & 7z l $installer.FullName
-          if ($LASTEXITCODE -ne 0 -or $listing -notmatch "zvec_c_api.dll") {
+          $listingText = $listing -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $listingText -notmatch "zvec_c_api.dll") {
             throw "NSIS 安装包未包含 zvec_c_api.dll。"
           }
 
