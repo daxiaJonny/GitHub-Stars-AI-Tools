@@ -3,6 +3,7 @@
   "bundle": {
     "macOS": {
       "signingIdentity": "-",
+      "entitlements": "entitlements.plist",
       "files": {
         "Frameworks/libzvec_c_api.dylib": "runtime/libzvec_c_api.dylib"
       }

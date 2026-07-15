@@ -383,6 +383,8 @@ jobs:
           app_path="apps/desktop/src-tauri/target/$RUST_TARGET/release/bundle/macos/GitHub-Stars-AI-Tools.app"
           test -f "$app_path/Contents/Frameworks/libzvec_c_api.dylib"
           codesign --verify --deep --strict "$app_path"
+          codesign -d --entitlements - "$app_path/Contents/MacOS/gsat-desktop" 2>&1 \
+            | grep -F 'com.apple.security.cs.disable-library-validation'
           otool -l "$app_path/Contents/MacOS/gsat-desktop" | grep -F '@executable_path/../Frameworks'
           dmg_path="$(pnpm --filter @gsat/desktop package:dmg -- --target "$RUST_TARGET" | tail -n 1)"
           expected_name="GitHub-Stars-AI-Tools_${RELEASE_VERSION}_aarch64.dmg"
