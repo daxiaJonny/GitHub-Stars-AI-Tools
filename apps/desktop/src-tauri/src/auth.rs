@@ -508,12 +508,147 @@ fn is_github_token_scope_message(message: &str) -> bool {
         || normalized.contains("permission")
 }
 
+fn read_github_token() -> Result<Option<String>, String> {
+    read_password_from_secure_store(GITHUB_TOKEN_SERVICE, GITHUB_TOKEN_ACCOUNT)
+}
+
+fn save_github_token_to_secure_store(token: &str) -> Result<(), String> {
+    save_password_to_secure_store(GITHUB_TOKEN_SERVICE, GITHUB_TOKEN_ACCOUNT, token)
+}
+
+fn delete_github_token_from_secure_store() -> Result<(), String> {
+    delete_password_from_secure_store(GITHUB_TOKEN_SERVICE, GITHUB_TOKEN_ACCOUNT)
+}
+
+fn read_password_from_secure_store(service: &str, account: &str) -> Result<Option<String>, String> {
+    let cache_key = secure_password_cache_key(service, account);
+    let cache = SECURE_PASSWORD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache
+        .lock()
+        .map_err(|_| "安全凭据缓存已损坏".to_owned())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(cached);
+    }
+
+    let entry = secure_password_entry(service, account)?;
+    let password = match entry.get_password() {
+        Ok(password) => Some(password),
+        Err(keyring::Error::NoEntry) => None,
+        Err(error) => {
+            return Err(format_secure_store_error("读取", error));
+        }
+    };
+    cache
+        .lock()
+        .map_err(|_| "安全凭据缓存已损坏".to_owned())?
+        .insert(cache_key, password.clone());
+    Ok(password)
+}
+
+fn save_password_to_secure_store(
+    service: &str,
+    account: &str,
+    password: &str,
+) -> Result<(), String> {
+    let entry = secure_password_entry(service, account)?;
+    entry
+        .set_password(password)
+        .map_err(|error| format_secure_store_error("写入", error))?;
+    update_secure_password_cache(service, account, Some(password.to_owned()))
+}
+
+fn delete_password_from_secure_store(service: &str, account: &str) -> Result<(), String> {
+    let entry = secure_password_entry(service, account)?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => {}
+        Err(error) => {
+            return Err(format_secure_store_error("清除", error));
+        }
+    }
+    update_secure_password_cache(service, account, None)
+}
+
+fn secure_password_cache_key(service: &str, account: &str) -> String {
+    format!("{service}\n{account}")
+}
+
+fn update_secure_password_cache(
+    service: &str,
+    account: &str,
+    password: Option<String>,
+) -> Result<(), String> {
+    SECURE_PASSWORD_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "安全凭据缓存已损坏".to_owned())?
+        .insert(secure_password_cache_key(service, account), password);
+    Ok(())
+}
+
+fn secure_password_entry(service: &str, account: &str) -> Result<keyring::Entry, String> {
+    ensure_secure_store_initialized()?;
+    keyring::Entry::new(service, account)
+        .map_err(|error| format_secure_store_error("初始化", error))
+}
+
+fn ensure_secure_store_initialized() -> Result<(), String> {
+    SECURE_STORE_INIT
+        .get_or_init(|| {
+            initialize_native_secure_store()
+                .map_err(|error| format_secure_store_error("初始化", error))
+        })
+        .clone()
+}
+
+fn initialize_native_secure_store() -> keyring::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let store = apple_native_keyring_store::keychain::Store::new()?;
+        keyring_core::set_default_store(store);
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let store = windows_native_keyring_store::Store::new()?;
+        keyring_core::set_default_store(store);
+        return Ok(());
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    {
+        let store = zbus_secret_service_keyring_store::Store::new()?;
+        keyring_core::set_default_store(store);
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(keyring::Error::NoDefaultStore)
+}
+
+fn format_secure_store_error(action: &str, error: keyring::Error) -> String {
+    format!(
+        "安全凭据{action}失败：{error}。请确认系统凭据管理器可用，macOS 需要 Keychain，Windows 需要 Credential Manager，Linux 需要 Secret Service。"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    type HttpResponseSpec = (
+        &'static str,
+        &'static str,
+        Vec<(&'static str, &'static str)>,
+    );
 
     #[test]
     fn github_api_get_sends_bearer_accept_and_api_version() {
@@ -738,11 +873,7 @@ mod tests {
     }
 
     fn spawn_sequence_http_server(
-        responses: Vec<(
-            &'static str,
-            &'static str,
-            Vec<(&'static str, &'static str)>,
-        )>,
+        responses: Vec<HttpResponseSpec>,
     ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("应能启动本地测试 HTTP 服务");
         let address = listener.local_addr().expect("应能读取本地监听地址");
@@ -808,133 +939,4 @@ mod tests {
 
         Some(header_end + 4 + content_length)
     }
-}
-
-fn read_github_token() -> Result<Option<String>, String> {
-    read_password_from_secure_store(GITHUB_TOKEN_SERVICE, GITHUB_TOKEN_ACCOUNT)
-}
-
-fn save_github_token_to_secure_store(token: &str) -> Result<(), String> {
-    save_password_to_secure_store(GITHUB_TOKEN_SERVICE, GITHUB_TOKEN_ACCOUNT, token)
-}
-
-fn delete_github_token_from_secure_store() -> Result<(), String> {
-    delete_password_from_secure_store(GITHUB_TOKEN_SERVICE, GITHUB_TOKEN_ACCOUNT)
-}
-
-fn read_password_from_secure_store(service: &str, account: &str) -> Result<Option<String>, String> {
-    let cache_key = secure_password_cache_key(service, account);
-    let cache = SECURE_PASSWORD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(cached) = cache
-        .lock()
-        .map_err(|_| "安全凭据缓存已损坏".to_owned())?
-        .get(&cache_key)
-        .cloned()
-    {
-        return Ok(cached);
-    }
-
-    let entry = secure_password_entry(service, account)?;
-    let password = match entry.get_password() {
-        Ok(password) => Some(password),
-        Err(keyring::Error::NoEntry) => None,
-        Err(error) => {
-            return Err(format_secure_store_error("读取", error));
-        }
-    };
-    cache
-        .lock()
-        .map_err(|_| "安全凭据缓存已损坏".to_owned())?
-        .insert(cache_key, password.clone());
-    Ok(password)
-}
-
-fn save_password_to_secure_store(
-    service: &str,
-    account: &str,
-    password: &str,
-) -> Result<(), String> {
-    let entry = secure_password_entry(service, account)?;
-    entry
-        .set_password(password)
-        .map_err(|error| format_secure_store_error("写入", error))?;
-    update_secure_password_cache(service, account, Some(password.to_owned()))
-}
-
-fn delete_password_from_secure_store(service: &str, account: &str) -> Result<(), String> {
-    let entry = secure_password_entry(service, account)?;
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => {}
-        Err(error) => {
-            return Err(format_secure_store_error("清除", error));
-        }
-    }
-    update_secure_password_cache(service, account, None)
-}
-
-fn secure_password_cache_key(service: &str, account: &str) -> String {
-    format!("{service}\n{account}")
-}
-
-fn update_secure_password_cache(
-    service: &str,
-    account: &str,
-    password: Option<String>,
-) -> Result<(), String> {
-    SECURE_PASSWORD_CACHE
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .map_err(|_| "安全凭据缓存已损坏".to_owned())?
-        .insert(secure_password_cache_key(service, account), password);
-    Ok(())
-}
-
-fn secure_password_entry(service: &str, account: &str) -> Result<keyring::Entry, String> {
-    ensure_secure_store_initialized()?;
-    keyring::Entry::new(service, account)
-        .map_err(|error| format_secure_store_error("初始化", error))
-}
-
-fn ensure_secure_store_initialized() -> Result<(), String> {
-    SECURE_STORE_INIT
-        .get_or_init(|| {
-            initialize_native_secure_store()
-                .map_err(|error| format_secure_store_error("初始化", error))
-        })
-        .clone()
-}
-
-fn initialize_native_secure_store() -> keyring::Result<()> {
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    {
-        let store = apple_native_keyring_store::keychain::Store::new()?;
-        keyring_core::set_default_store(store);
-        return Ok(());
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let store = windows_native_keyring_store::Store::new()?;
-        keyring_core::set_default_store(store);
-        return Ok(());
-    }
-
-    #[cfg(all(
-        unix,
-        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
-    ))]
-    {
-        let store = zbus_secret_service_keyring_store::Store::new()?;
-        keyring_core::set_default_store(store);
-        return Ok(());
-    }
-
-    #[allow(unreachable_code)]
-    Err(keyring::Error::NoDefaultStore)
-}
-
-fn format_secure_store_error(action: &str, error: keyring::Error) -> String {
-    format!(
-        "安全凭据{action}失败：{error}。请确认系统凭据管理器可用，macOS 需要 Keychain，Windows 需要 Credential Manager，Linux 需要 Secret Service。"
-    )
 }
