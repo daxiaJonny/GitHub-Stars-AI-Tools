@@ -51,21 +51,26 @@ const hostPlatform = normalizePlatform(process.env.TAURI_ENV_PLATFORM ?? process
 const hostArchitecture = normalizeArchitecture(process.env.TAURI_ENV_ARCH ?? process.arch);
 const targetTriple = requestedTarget ?? targetTripleFor(hostPlatform, hostArchitecture);
 const artifact = ZVEC_ARTIFACTS[targetTriple];
-if (!artifact) {
-  throw new Error(`不支持的 zvec 原生运行库目标：${targetTriple}`);
-}
 
 const runtimeDir = path.join(tauriDir, 'runtime');
-const destination = path.join(runtimeDir, artifact.libraryName);
+const libraryName = artifact?.libraryName
+  ?? (hostPlatform === 'windows' ? 'zvec_c_api.dll' : hostPlatform === 'macos' ? 'libzvec_c_api.dylib' : 'libzvec_c_api.so');
+const destination = path.join(runtimeDir, libraryName);
 
 mkdirSync(runtimeDir, { recursive: true });
 if (bootstrap) {
-  await bootstrapZvecLibrary(targetTriple, artifact, destination);
+  if (!artifact) {
+    console.log(`没有 ${targetTriple} 的预编译 zvec 运行库，跳过预下载，将由 Cargo 从源码构建。`);
+  } else {
+    await bootstrapZvecLibrary(targetTriple, artifact, destination);
+  }
 } else {
-  const source = findZvecLibrary(targetDir, targetTriple, artifact.libraryName);
-  verifyFileSha256(source, artifact.librarySha256, 'Cargo 构建输出中的 zvec 运行库');
+  const source = findZvecLibrary(targetDir, targetTriple, libraryName);
+  if (artifact?.librarySha256) {
+    verifyFileSha256(source, artifact.librarySha256, 'Cargo 构建输出中的 zvec 运行库');
+  }
   installRuntimeLibrary(source, destination);
-  patchExecutableRuntimePath(targetDir, targetTriple, artifact.platform);
+  patchExecutableRuntimePath(targetDir, targetTriple, hostPlatform);
   console.log(`已准备 ${targetTriple} zvec 运行库：${destination}`);
 }
 

@@ -8,7 +8,6 @@ mod storage;
 mod upstream;
 mod vector_index;
 
-use embedding::EmbeddingProviderPort;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -6265,8 +6264,6 @@ fn mark_upstream_updates_seen(app_handle: tauri::AppHandle, sha: String) -> Resu
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             start_embedding_maintenance(app.handle().clone());
             let app_data_dir = app

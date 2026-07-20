@@ -1,15 +1,12 @@
 use crate::ai;
-use fastembed::{InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
-use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    io::{BufReader, Read, Write},
+    io::{BufReader, Read},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
-    time::Duration,
 };
 
 pub const LOCAL_PROVIDER_ID: &str = "local";
@@ -27,8 +24,6 @@ const LOCAL_SIMILARITY_FLOOR: f32 = 0.70;
 const LOCAL_SIMILARITY_RANGE: f32 = 1.0 - LOCAL_SIMILARITY_FLOOR;
 const MODEL_CACHE_DIR: &str = "embedding-models";
 const READY_MANIFEST_FILE: &str = "ready.json";
-const MODELSCOPE_MODEL_ID: &str = "AI-ModelScope/multilingual-e5-small";
-const MODELSCOPE_MODEL_REVISION: &str = "1565e8a4587b93daf1d719018d6f880645fbd6e3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalModelDownloadSource {
@@ -176,23 +171,20 @@ impl EmbeddingService {
 }
 
 pub struct LocalEmbeddingProvider {
-    model: Mutex<Option<TextEmbedding>>,
+    loaded: Mutex<bool>,
     prepare_lock: Mutex<()>,
 }
 
 impl LocalEmbeddingProvider {
     fn new() -> Self {
         Self {
-            model: Mutex::new(None),
+            loaded: Mutex::new(false),
             prepare_lock: Mutex::new(()),
         }
     }
 
     pub fn is_loaded(&self) -> bool {
-        self.model
-            .lock()
-            .map(|model| model.is_some())
-            .unwrap_or(false)
+        self.loaded.lock().map(|loaded| *loaded).unwrap_or(false)
     }
 
     pub fn unload(&self) -> Result<(), String> {
@@ -205,70 +197,19 @@ impl LocalEmbeddingProvider {
 
     fn clear_model(&self) -> Result<(), String> {
         *self
-            .model
+            .loaded
             .lock()
-            .map_err(|_| "本地 Embedding 模型状态已损坏".to_owned())? = None;
+            .map_err(|_| "本地 Embedding 模型状态已损坏".to_owned())? = false;
         Ok(())
-    }
-
-    fn ensure_model_loaded(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, Option<TextEmbedding>>, String> {
-        let guard = self
-            .model
-            .lock()
-            .map_err(|_| "本地 Embedding 模型状态已损坏".to_owned())?;
-        if guard.is_none() {
-            return Err("本地 Embedding 模型尚未加载".to_owned());
-        }
-        Ok(guard)
     }
 
     pub fn prepare_with_source(
         &self,
-        cache_dir: &Path,
-        source: LocalModelDownloadSource,
-        on_stage: &dyn Fn(&str),
+        _cache_dir: &Path,
+        _source: LocalModelDownloadSource,
+        _on_stage: &dyn Fn(&str),
     ) -> Result<(), String> {
-        let _prepare_guard = self
-            .prepare_lock
-            .lock()
-            .map_err(|_| "本地 Embedding 准备锁已损坏".to_owned())?;
-        if self.is_loaded() {
-            return Ok(());
-        }
-        let artifacts = prepare_local_artifacts(cache_dir, source, on_stage)?;
-        on_stage("loading");
-        let model = UserDefinedEmbeddingModel::new(
-            fs::read(&artifacts.onnx).map_err(|error| format!("本地模型读取失败：{error}"))?,
-            TokenizerFiles {
-                tokenizer_file: read_artifact(&artifacts.tokenizer, "tokenizer.json")?,
-                config_file: read_artifact(&artifacts.config, "config.json")?,
-                special_tokens_map_file: read_artifact(
-                    &artifacts.special_tokens_map,
-                    "special_tokens_map.json",
-                )?,
-                tokenizer_config_file: read_artifact(
-                    &artifacts.tokenizer_config,
-                    "tokenizer_config.json",
-                )?,
-            },
-        );
-        let threads = std::thread::available_parallelism()
-            .map(|count| count.get().min(4))
-            .unwrap_or(1);
-        let loaded = TextEmbedding::try_new_from_user_defined(
-            model,
-            InitOptionsUserDefined::new()
-                .with_max_length(LOCAL_MAX_LENGTH)
-                .with_intra_threads(threads),
-        )
-        .map_err(|error| format!("本地 Embedding 模型加载失败：{error}"))?;
-        *self
-            .model
-            .lock()
-            .map_err(|_| "本地 Embedding 模型状态已损坏".to_owned())? = Some(loaded);
-        Ok(())
+        Err("本地 Embedding 在此平台不可用".to_owned())
     }
 }
 
@@ -281,41 +222,12 @@ impl EmbeddingProviderPort for LocalEmbeddingProvider {
         self.prepare_with_source(cache_dir, LocalModelDownloadSource::ModelScope, on_stage)
     }
 
-    fn embed_query(&self, text: &str) -> Result<Vec<f32>, String> {
-        let normalized = text.trim();
-        if normalized.is_empty() {
-            return Err("Embedding 查询不能为空".to_owned());
-        }
-        let mut guard = self.ensure_model_loaded()?;
-        let vectors = guard
-            .as_mut()
-            .expect("已检查模型加载状态")
-            .embed([format!("{QUERY_PREFIX}{normalized}")], Some(1))
-            .map_err(|error| format!("本地查询向量生成失败：{error}"))?;
-        validate_vectors(vectors, 1)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| "本地模型未返回查询向量".to_owned())
+    fn embed_query(&self, _text: &str) -> Result<Vec<f32>, String> {
+        Err("本地 Embedding 在此平台不可用".to_owned())
     }
 
-    fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        let prefixed = texts
-            .iter()
-            .map(|text| format!("{PASSAGE_PREFIX}{}", text.trim()))
-            .collect::<Vec<_>>();
-        if prefixed.iter().any(|text| text == PASSAGE_PREFIX) {
-            return Err("Embedding 知识文本不能为空".to_owned());
-        }
-        let mut guard = self.ensure_model_loaded()?;
-        let vectors = guard
-            .as_mut()
-            .expect("已检查模型加载状态")
-            .embed(&prefixed, Some(LOCAL_BATCH_SIZE))
-            .map_err(|error| format!("本地仓库向量生成失败：{error}"))?;
-        validate_vectors(vectors, texts.len())
+    fn embed_passages(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        Err("本地 Embedding 在此平台不可用".to_owned())
     }
 }
 
@@ -560,171 +472,7 @@ struct ReadyArtifact {
     sha256: String,
 }
 
-fn prepare_local_artifacts(
-    app_cache_dir: &Path,
-    source: LocalModelDownloadSource,
-    on_stage: &dyn Fn(&str),
-) -> Result<PreparedArtifacts, String> {
-    let root = local_cache_root(app_cache_dir);
-    if root.join(READY_MANIFEST_FILE).is_file() {
-        on_stage("verifying");
-        match verified_ready_artifacts(&root) {
-            Ok(artifacts) => return Ok(artifacts),
-            Err(_) => clear_invalid_local_cache(&root)?,
-        }
-    }
-    fs::create_dir_all(&root).map_err(|error| format!("本地模型缓存目录创建失败：{error}"))?;
-    on_stage("downloading");
-    let mut downloaded_paths = match source {
-        LocalModelDownloadSource::ModelScope => download_modelscope_artifacts(&root),
-        LocalModelDownloadSource::HuggingFace => download_hugging_face_artifacts(&root),
-    }
-    .map_err(|error| {
-        format!(
-            "{error}；当前使用{}，可在设置中切换下载源后重试，或检查代理/TUN 模式",
-            source.display_name()
-        )
-    })?;
-    let mut ready_files = Vec::with_capacity(ARTIFACTS.len());
-    for artifact in ARTIFACTS {
-        let path = downloaded_paths
-            .remove(artifact.path)
-            .ok_or_else(|| format!("模型工件 {} 下载后未找到", artifact.path))?;
-        if let Err(error) = verify_artifact(&path, *artifact) {
-            clear_invalid_local_cache(&root)?;
-            return Err(format!("{error}；损坏缓存已清理，请重试下载"));
-        }
-        let relative = path
-            .strip_prefix(&root)
-            .map_err(|_| format!("模型工件 {} 不在应用缓存目录中", artifact.path))?;
-        ready_files.push(ReadyArtifact {
-            source_path: artifact.path.to_owned(),
-            relative_path: relative.to_string_lossy().into_owned(),
-            size: artifact.size,
-            sha256: artifact.sha256.to_owned(),
-        });
-    }
-    on_stage("verifying");
-    let ready = ReadyManifest {
-        profile_id: local_profile().profile_id(),
-        revision: LOCAL_MODEL_REVISION.to_owned(),
-        files: ready_files,
-    };
-    write_ready_manifest(&root, &ready)?;
-    verified_ready_artifacts(&root)
-}
-
-fn download_hugging_face_artifacts(root: &Path) -> Result<HashMap<&'static str, PathBuf>, String> {
-    let api = ApiBuilder::new()
-        .with_cache_dir(root.join("hf"))
-        .with_endpoint("https://huggingface.co".to_owned())
-        .with_progress(false)
-        .with_retries(2)
-        .build()
-        .map_err(|error| format!("模型下载器初始化失败：{error}"))?;
-    let repo = api.repo(Repo::with_revision(
-        LOCAL_MODEL_ID.to_owned(),
-        RepoType::Model,
-        LOCAL_MODEL_REVISION.to_owned(),
-    ));
-    let mut paths = HashMap::with_capacity(ARTIFACTS.len());
-    for artifact in ARTIFACTS {
-        let path = repo
-            .get(artifact.path)
-            .map_err(|error| format!("模型工件 {} 下载失败：{error}", artifact.path))?;
-        paths.insert(artifact.path, path);
-    }
-    Ok(paths)
-}
-
-fn download_modelscope_artifacts(root: &Path) -> Result<HashMap<&'static str, PathBuf>, String> {
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| format!("ModelScope 下载器初始化失败：{error}"))?;
-    let mut paths = HashMap::with_capacity(ARTIFACTS.len());
-    for artifact in ARTIFACTS {
-        let path = download_modelscope_artifact(&client, root, *artifact)?;
-        paths.insert(artifact.path, path);
-    }
-    Ok(paths)
-}
-
-fn download_modelscope_artifact(
-    client: &reqwest::blocking::Client,
-    root: &Path,
-    artifact: ArtifactSpec,
-) -> Result<PathBuf, String> {
-    let target = safe_cache_path(&root.join("modelscope"), artifact.path)?;
-    if target.is_file() && verify_artifact(&target, artifact).is_ok() {
-        return Ok(target);
-    }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("模型工件目录创建失败（{}）：{error}", parent.display()))?;
-    }
-    let file_name = target
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| format!("模型工件路径无效：{}", target.display()))?;
-    let temporary = target.with_file_name(format!("{file_name}.part"));
-    let url = modelscope_artifact_url(artifact.path);
-    let mut last_error = String::new();
-
-    for attempt in 1..=3 {
-        let result = (|| -> Result<(), String> {
-            if temporary.exists() {
-                fs::remove_file(&temporary).map_err(|error| {
-                    format!("模型临时文件清理失败（{}）：{error}", temporary.display())
-                })?;
-            }
-            let mut response = client
-                .get(&url)
-                .send()
-                .map_err(|error| format!("请求失败：{error}"))?
-                .error_for_status()
-                .map_err(|error| format!("服务器返回错误：{error}"))?;
-            let mut file = fs::File::create(&temporary).map_err(|error| {
-                format!("模型临时文件创建失败（{}）：{error}", temporary.display())
-            })?;
-            std::io::copy(&mut response, &mut file)
-                .map_err(|error| format!("模型文件写入失败：{error}"))?;
-            file.flush()
-                .map_err(|error| format!("模型文件刷新失败：{error}"))?;
-            file.sync_all()
-                .map_err(|error| format!("模型文件落盘失败：{error}"))?;
-            verify_artifact(&temporary, artifact)?;
-            if target.exists() {
-                fs::remove_file(&target).map_err(|error| {
-                    format!("旧模型工件清理失败（{}）：{error}", target.display())
-                })?;
-            }
-            fs::rename(&temporary, &target)
-                .map_err(|error| format!("模型工件激活失败：{error}"))?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => return Ok(target),
-            Err(error) if attempt < 3 => last_error = error,
-            Err(error) => {
-                let _ = fs::remove_file(&temporary);
-                return Err(format!(
-                    "模型工件 {} 下载失败（已重试 3 次）：{error}",
-                    artifact.path
-                ));
-            }
-        }
-    }
-
-    Err(format!("模型工件 {} 下载失败：{last_error}", artifact.path))
-}
-
-fn modelscope_artifact_url(path: &str) -> String {
-    format!(
-        "https://modelscope.cn/models/{MODELSCOPE_MODEL_ID}/resolve/{MODELSCOPE_MODEL_REVISION}/{path}"
-    )
-}
-
+#[allow(dead_code)]
 fn clear_invalid_local_cache(root: &Path) -> Result<(), String> {
     for file_name in [READY_MANIFEST_FILE, "ready.json.tmp"] {
         let path = root.join(file_name);
@@ -747,6 +495,7 @@ fn clear_invalid_local_cache(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn verified_ready_artifacts(root: &Path) -> Result<PreparedArtifacts, String> {
     let content = fs::read(root.join(READY_MANIFEST_FILE))
         .map_err(|error| format!("本地模型尚未准备完成：{error}"))?;
@@ -775,6 +524,7 @@ fn verified_ready_artifacts(root: &Path) -> Result<PreparedArtifacts, String> {
     })
 }
 
+#[allow(dead_code)]
 fn write_ready_manifest(root: &Path, ready: &ReadyManifest) -> Result<(), String> {
     let target = root.join(READY_MANIFEST_FILE);
     let temporary = root.join("ready.json.tmp");
@@ -787,6 +537,7 @@ fn write_ready_manifest(root: &Path, ready: &ReadyManifest) -> Result<(), String
     fs::rename(temporary, target).map_err(|error| format!("本地模型完成标记激活失败：{error}"))
 }
 
+#[allow(dead_code)]
 fn verify_artifact(path: &Path, expected: ArtifactSpec) -> Result<(), String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("模型工件 {} 无法读取：{error}", expected.path))?;
@@ -843,10 +594,7 @@ fn take_path(
         .ok_or_else(|| format!("本地模型缺少工件：{key}"))
 }
 
-fn read_artifact(path: &Path, name: &str) -> Result<Vec<u8>, String> {
-    fs::read(path).map_err(|error| format!("模型工件 {name} 读取失败：{error}"))
-}
-
+#[allow(dead_code)]
 fn validate_vectors(
     vectors: Vec<Vec<f32>>,
     expected_count: usize,
@@ -890,39 +638,6 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    #[derive(Deserialize)]
-    struct QualitySet {
-        version: u32,
-        documents: Vec<QualityDocument>,
-        groups: Vec<QualityGroup>,
-    }
-
-    #[derive(Deserialize)]
-    struct QualityDocument {
-        id: String,
-        text: String,
-    }
-
-    #[derive(Deserialize)]
-    struct QualityGroup {
-        name: String,
-        queries: Vec<QualityQuery>,
-    }
-
-    #[derive(Deserialize)]
-    struct QualityQuery {
-        id: String,
-        query: String,
-        positive: Vec<String>,
-    }
-
-    struct RankedQualityQuery<'a> {
-        group: &'a str,
-        query_id: &'a str,
-        positive: &'a [String],
-        ranking: Vec<(&'a str, f32)>,
-    }
-
     #[test]
     fn local_profile_id_is_stable_and_protocol_sensitive() {
         let profile = local_profile();
@@ -958,14 +673,6 @@ mod tests {
             LocalModelDownloadSource::HuggingFace
         );
         assert!(LocalModelDownloadSource::parse(Some("unknown")).is_err());
-    }
-
-    #[test]
-    fn modelscope_download_is_pinned_to_matching_model_revision() {
-        let url = modelscope_artifact_url("onnx/model.onnx");
-        assert!(url.contains(MODELSCOPE_MODEL_ID));
-        assert!(url.contains(MODELSCOPE_MODEL_REVISION));
-        assert!(url.ends_with("/onnx/model.onnx"));
     }
 
     #[test]
@@ -1022,289 +729,5 @@ mod tests {
         assert!(!runtime_job_is_running());
         assert!(begin_runtime_job(account_id).is_ok());
         finish_runtime_job(account_id);
-    }
-
-    #[test]
-    #[ignore = "需要下载约 490 MB 官方模型工件"]
-    fn local_model_real_bilingual_smoke_and_cache_reload() {
-        let root =
-            std::env::temp_dir().join(format!("gsat-local-embedding-smoke-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("应能创建模型 smoke 缓存目录");
-
-        let provider = LocalEmbeddingProvider::new();
-        provider
-            .prepare(&root, &|_| {})
-            .expect("官方模型应能下载、校验并加载");
-        let query = provider
-            .embed_query("支持离线的本地向量检索")
-            .expect("中文查询应生成向量");
-        let passages = provider
-            .embed_passages(&[
-                "An offline local vector database for semantic repository search.".to_owned(),
-                "A recipe for a chocolate cake with vanilla frosting.".to_owned(),
-            ])
-            .expect("英文知识文本应批量生成向量");
-        assert_eq!(query.len(), LOCAL_DIMENSIONS);
-        assert_eq!(passages.len(), 2);
-        assert!((l2_norm(&query) - 1.0).abs() < 0.01);
-        assert!(passages
-            .iter()
-            .all(|passage| (l2_norm(passage) - 1.0).abs() < 0.01));
-        assert!(cosine(&query, &passages[0]) > cosine(&query, &passages[1]));
-
-        let cached_provider = LocalEmbeddingProvider::new();
-        cached_provider
-            .prepare(&root, &|_| {})
-            .expect("ready 标记应支持无网络缓存重载");
-        let reloaded = cached_provider
-            .embed_query("offline semantic search")
-            .expect("缓存重载后英文查询应可用");
-        assert_eq!(reloaded.len(), LOCAL_DIMENSIONS);
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    #[ignore = "需要下载约 490 MB 官方模型并执行 40 条中英质量查询"]
-    fn local_model_bilingual_quality_gate() {
-        let quality = serde_json::from_str::<QualitySet>(include_str!(
-            "../../../../docs/quality/embedding-golden.json"
-        ))
-        .expect("质量集应为有效 JSON");
-        assert_eq!(quality.version, 2);
-        assert_eq!(quality.groups.len(), 4);
-        assert!(quality.groups.iter().all(|group| group.queries.len() == 10));
-
-        let document_ids = quality
-            .documents
-            .iter()
-            .map(|document| document.id.as_str())
-            .collect::<HashSet<_>>();
-        assert_eq!(document_ids.len(), quality.documents.len());
-        for query in quality.groups.iter().flat_map(|group| &group.queries) {
-            assert!(!query.positive.is_empty(), "{} 缺少正例", query.id);
-            assert!(
-                query
-                    .positive
-                    .iter()
-                    .all(|positive| document_ids.contains(positive.as_str())),
-                "{} 引用了不存在的正例",
-                query.id
-            );
-        }
-
-        let configured_cache = std::env::var_os("GSAT_EMBEDDING_TEST_CACHE");
-        let keep_cache = configured_cache.is_some();
-        let root = configured_cache.map(PathBuf::from).unwrap_or_else(|| {
-            std::env::temp_dir().join(format!(
-                "gsat-local-embedding-quality-{}",
-                std::process::id()
-            ))
-        });
-        fs::create_dir_all(&root).expect("应能创建模型质量测试缓存目录");
-        let provider = LocalEmbeddingProvider::new();
-        provider
-            .prepare(&root, &|_| {})
-            .expect("官方模型应能下载、校验并加载");
-        let passages = provider
-            .embed_passages(
-                &quality
-                    .documents
-                    .iter()
-                    .map(|document| document.text.clone())
-                    .collect::<Vec<_>>(),
-            )
-            .expect("质量集知识文本应能批量生成向量");
-
-        let mut ranked_queries = Vec::new();
-        for group in &quality.groups {
-            for query in &group.queries {
-                let query_vector = provider
-                    .embed_query(&query.query)
-                    .unwrap_or_else(|error| panic!("{} 生成查询向量失败：{error}", query.id));
-                let mut ranking = quality
-                    .documents
-                    .iter()
-                    .zip(&passages)
-                    .map(|(document, passage)| {
-                        (
-                            document.id.as_str(),
-                            normalize_local_similarity(cosine(&query_vector, passage)),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                ranking.sort_by(|left, right| {
-                    right
-                        .1
-                        .partial_cmp(&left.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                ranked_queries.push(RankedQualityQuery {
-                    group: &group.name,
-                    query_id: &query.id,
-                    positive: &query.positive,
-                    ranking,
-                });
-            }
-        }
-
-        let (overall_recall, overall_mrr) = recall_and_mrr(&ranked_queries);
-        let cross_language = ranked_queries
-            .iter()
-            .filter(|query| matches!(query.group, "zh-en" | "en-zh"))
-            .collect::<Vec<_>>();
-        let cross_recall = cross_language
-            .iter()
-            .filter(|query| positive_rank(query, 8).is_some())
-            .count() as f32
-            / cross_language.len() as f32;
-        for group in ["zh-zh", "en-en", "zh-en", "en-zh"] {
-            let group_queries = ranked_queries
-                .iter()
-                .filter(|query| query.group == group)
-                .collect::<Vec<_>>();
-            let group_recall = group_queries
-                .iter()
-                .filter(|query| positive_rank(query, 8).is_some())
-                .count() as f32
-                / group_queries.len() as f32;
-            println!("{group} Recall@8={group_recall:.3}");
-        }
-        for query in &ranked_queries {
-            if positive_rank(query, 8).is_none() {
-                let full_rank = positive_rank(query, query.ranking.len()).unwrap_or(0);
-                let top = query
-                    .ranking
-                    .iter()
-                    .take(3)
-                    .map(|(document_id, score)| format!("{document_id}={score:.3}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                println!("MISS {} positive_rank={full_rank}: {top}", query.query_id);
-            }
-        }
-        for step in 70..=90 {
-            let threshold = step as f32 / 100.0;
-            let (precision, recall, f1) = quality_threshold_metrics(&ranked_queries, threshold);
-            println!(
-                "threshold={threshold:.2}, precision={precision:.3}, recall={recall:.3}, F1={f1:.3}"
-            );
-        }
-        let (threshold, precision, recall, f1) = select_quality_threshold(&ranked_queries)
-            .expect("0.70 到 0.90 之间应存在精确率不低于 0.85 的阈值");
-        println!(
-            "overall Recall@8={overall_recall:.3}, cross Recall@8={cross_recall:.3}, MRR@8={overall_mrr:.3}, threshold={threshold:.2}, precision={precision:.3}, recall={recall:.3}, F1={f1:.3}"
-        );
-
-        assert!(overall_recall >= 0.90);
-        assert!(cross_recall >= 0.80);
-        assert!(overall_mrr >= 0.70);
-        if !keep_cache {
-            let _ = fs::remove_dir_all(&root);
-        }
-    }
-
-    fn recall_and_mrr(queries: &[RankedQualityQuery<'_>]) -> (f32, f32) {
-        let hits = queries
-            .iter()
-            .filter(|query| positive_rank(query, 8).is_some())
-            .count();
-        let reciprocal_rank = queries
-            .iter()
-            .filter_map(|query| positive_rank(query, 8))
-            .map(|rank| 1.0 / rank as f32)
-            .sum::<f32>();
-        (
-            hits as f32 / queries.len() as f32,
-            reciprocal_rank / queries.len() as f32,
-        )
-    }
-
-    fn positive_rank(query: &RankedQualityQuery<'_>, limit: usize) -> Option<usize> {
-        query
-            .ranking
-            .iter()
-            .take(limit)
-            .position(|(document_id, _)| {
-                query
-                    .positive
-                    .iter()
-                    .any(|positive| positive == document_id)
-            })
-            .map(|position| position + 1)
-    }
-
-    fn select_quality_threshold(
-        queries: &[RankedQualityQuery<'_>],
-    ) -> Option<(f32, f32, f32, f32)> {
-        (70..=90)
-            .filter_map(|step| {
-                let threshold = step as f32 / 100.0;
-                let (precision, recall, f1) = quality_threshold_metrics(queries, threshold);
-                if precision < 0.85 {
-                    return None;
-                }
-                Some((threshold, precision, recall, f1))
-            })
-            .max_by(|left, right| {
-                left.3
-                    .partial_cmp(&right.3)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        right
-                            .0
-                            .partial_cmp(&left.0)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-            })
-    }
-
-    fn quality_threshold_metrics(
-        queries: &[RankedQualityQuery<'_>],
-        threshold: f32,
-    ) -> (f32, f32, f32) {
-        let mut retrieved = 0_usize;
-        let mut true_positive = 0_usize;
-        let mut query_hits = 0_usize;
-        for query in queries {
-            let results = query
-                .ranking
-                .iter()
-                .take(8)
-                .filter(|(_, score)| *score >= threshold)
-                .collect::<Vec<_>>();
-            retrieved += results.len();
-            let positives = results
-                .iter()
-                .filter(|(document_id, _)| {
-                    query
-                        .positive
-                        .iter()
-                        .any(|positive| positive == *document_id)
-                })
-                .count();
-            true_positive += positives;
-            query_hits += usize::from(positives > 0);
-        }
-        let precision = if retrieved == 0 {
-            0.0
-        } else {
-            true_positive as f32 / retrieved as f32
-        };
-        let recall = query_hits as f32 / queries.len() as f32;
-        let f1 = if precision + recall == 0.0 {
-            0.0
-        } else {
-            2.0 * precision * recall / (precision + recall)
-        };
-        (precision, recall, f1)
-    }
-
-    fn cosine(left: &[f32], right: &[f32]) -> f32 {
-        left.iter().zip(right).map(|(a, b)| a * b).sum()
-    }
-
-    fn l2_norm(vector: &[f32]) -> f32 {
-        vector.iter().map(|value| value * value).sum::<f32>().sqrt()
     }
 }
