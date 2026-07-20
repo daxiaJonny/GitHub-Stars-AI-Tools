@@ -5,6 +5,7 @@ mod embedding_state;
 mod github;
 mod ranking_query;
 mod storage;
+mod upstream;
 mod vector_index;
 
 use embedding::EmbeddingProviderPort;
@@ -198,6 +199,18 @@ impl TaskProgressEvent {
 }
 
 fn emit_task_progress(app_handle: &tauri::AppHandle, payload: TaskProgressEvent) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Users/lijiayi/Documents/aiProject/GitHub-Stars-AI-Tools/progress_debug.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            file,
+            "TASK: {} TYPE: {} STATUS: {} MESSAGE: {}",
+            payload.task_id, payload.task_type, payload.status, payload.message
+        );
+    }
     let _ = app_handle.emit(TASK_PROGRESS_EVENT, payload);
 }
 
@@ -704,6 +717,7 @@ struct UpdateGithubRecommendationCandidateRequest {
 struct StarGithubRecommendationCandidateRequest {
     account_id: String,
     full_name: String,
+    unstar: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -756,6 +770,7 @@ struct FetchGithubRankingReadmeRequest {
 struct StarGithubRankingRepositoryRequest {
     account_id: String,
     full_name: String,
+    unstar: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -5304,17 +5319,27 @@ async fn fetch_github_ranking_readme(
 async fn star_github_ranking_repository(
     request: StarGithubRankingRepositoryRequest,
 ) -> Result<RankingStarResult, String> {
-    run_background_task("加入 GitHub Stars", move || {
+    let unstar = request.unstar.unwrap_or(false);
+    let task_title = if unstar {
+        "取消 GitHub Stars"
+    } else {
+        "加入 GitHub Stars"
+    };
+    run_background_task(task_title, move || {
         let token = auth::require_github_token()?;
         let user = auth::verify_github_token(&token)?;
         if request.account_id != user.id.to_string() {
             return Err("当前 GitHub 账号与排行榜所属账号不一致，请重新连接后再操作。".to_owned());
         }
         let full_name = request.full_name.trim().to_owned();
-        github::star_repository(&token, &full_name)?;
+        if unstar {
+            github::unstar_repository(&token, &full_name)?;
+        } else {
+            github::star_repository(&token, &full_name)?;
+        }
         Ok(RankingStarResult {
             full_name,
-            is_starred: true,
+            is_starred: !unstar,
         })
     })
     .await
@@ -5530,8 +5555,14 @@ async fn star_github_recommendation_candidate(
     request: StarGithubRecommendationCandidateRequest,
 ) -> Result<storage::GithubRecommendationCandidateState, String> {
     let progress_handle = app_handle.clone();
+    let unstar = request.unstar.unwrap_or(false);
+    let task_title = if unstar {
+        "取消 GitHub Stars"
+    } else {
+        "加入 GitHub Stars"
+    };
     run_background_task_with_failure_progress(
-        "加入 GitHub Stars",
+        task_title,
         progress_handle,
         "star-github-recommendation-candidate",
         "sync",
@@ -5555,6 +5586,9 @@ fn star_github_recommendation_candidate_worker(
 
     let storage = AppStorage::from_app_handle(&app_handle)?;
     let full_name = request.full_name.trim().to_owned();
+    let unstar = request.unstar.unwrap_or(false);
+    let action_verb = if unstar { "取消" } else { "加入" };
+
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::running(
@@ -5580,16 +5614,33 @@ fn star_github_recommendation_candidate_worker(
             "github-star",
             1,
             2,
-            format!("正在加入 {} 到 GitHub Stars", candidate.full_name),
+            format!(
+                "正在{} {} 到 GitHub Stars",
+                action_verb, candidate.full_name
+            ),
             Some(candidate.full_name.clone()),
         ),
     );
-    github::star_repository(&token, &full_name)?;
+
+    if unstar {
+        github::unstar_repository(&token, &full_name)?;
+    } else {
+        github::star_repository(&token, &full_name)?;
+    }
+
+    let next_status = if unstar { "new" } else { "starred" };
     let next_candidate = storage.update_github_recommendation_candidate_status(
         &account_id,
         &candidate.full_name,
-        "starred",
+        next_status,
     )?;
+
+    let succeeded_msg = if unstar {
+        format!("{} 已从 GitHub Stars 取消", candidate.full_name)
+    } else {
+        format!("{} 已加入 GitHub Stars", candidate.full_name)
+    };
+
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::succeeded(
@@ -5597,7 +5648,7 @@ fn star_github_recommendation_candidate_worker(
             "sync",
             2,
             2,
-            format!("{} 已加入 GitHub Stars", candidate.full_name),
+            succeeded_msg,
         ),
     );
 
@@ -6184,12 +6235,46 @@ fn import_repository_library_gist_worker(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+fn app_data_dir_from_handle(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("数据目录获取失败：{error}"))
+}
+
+#[tauri::command]
+async fn check_upstream_updates(
+    app_handle: tauri::AppHandle,
+) -> Result<upstream::UpstreamUpdateReport, String> {
+    run_background_task("检查上游更新", move || {
+        let app_data_dir = app_data_dir_from_handle(&app_handle)?;
+        Ok(upstream::check_upstream_commits(&app_data_dir))
+    })
+    .await
+}
+
+#[tauri::command]
+fn mark_upstream_updates_seen(app_handle: tauri::AppHandle, sha: String) -> Result<(), String> {
+    let app_data_dir = app_data_dir_from_handle(&app_handle)?;
+    let sha = sha.trim();
+    if sha.is_empty() {
+        return Err("缺少提交 SHA".to_owned());
+    }
+    upstream::mark_upstream_seen(&app_data_dir, sha)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             start_embedding_maintenance(app.handle().clone());
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            auth::init_credentials_file_path(&app_data_dir)
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -6255,6 +6340,12 @@ pub fn run() {
             fetch_github_recommendation_readme,
             translate_github_recommendation_readme,
             star_github_recommendation_candidate,
+            list_github_rankings,
+            list_personal_rankings,
+            fetch_github_ranking_readme,
+            star_github_ranking_repository,
+            check_upstream_updates,
+            mark_upstream_updates_seen,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用运行失败");

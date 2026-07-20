@@ -117,7 +117,8 @@ export function DiscoverPage(props: DiscoverPageProps) {
   }
 
   function starCandidate(repository: GithubRepositoryRecommendation) {
-    return runCandidateAction(repository, 'star', () => workspace.handleStarRecommendationCandidate(repository.fullName));
+    const isStarred = repository.candidateStatus === 'starred';
+    return runCandidateAction(repository, 'star', () => workspace.handleStarRecommendationCandidate(repository.fullName, isStarred));
   }
 
   async function handleRefresh() {

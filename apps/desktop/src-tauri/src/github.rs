@@ -1,4 +1,7 @@
-use crate::auth::{github_api_get, github_api_get_optional, github_api_post, github_api_put_empty};
+use crate::auth::{
+    github_api_delete_empty, github_api_get, github_api_get_optional, github_api_post,
+    github_api_put_empty,
+};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -333,6 +336,16 @@ pub fn star_repository(token: &str, full_name: &str) -> Result<(), String> {
         name = percent_encode(name),
     );
     github_api_put_empty(token, &url, README_ACCEPT)
+}
+
+pub fn unstar_repository(token: &str, full_name: &str) -> Result<(), String> {
+    let (owner, name) = split_repository_full_name(full_name)?;
+    let url = format!(
+        "{STAR_REPOSITORY_API}/{owner}/{name}",
+        owner = percent_encode(owner),
+        name = percent_encode(name),
+    );
+    github_api_delete_empty(token, &url, README_ACCEPT)
 }
 
 fn build_repository_search_page_url(

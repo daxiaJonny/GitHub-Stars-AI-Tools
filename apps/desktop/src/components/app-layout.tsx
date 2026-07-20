@@ -16,8 +16,6 @@ type AppLayoutProps = {
   isBatchGeneratingAiDocuments: boolean;
   onGenerateAiTagNetwork: () => void;
   isGeneratingTagNetwork: boolean;
-  onCheckForUpdate: () => void;
-  isCheckingUpdate: boolean;
   syncSummary: StarSyncSummary | null;
   onGlobalSearch: (query: string) => void;
   taskProgress: TaskProgressEvent | null;
@@ -124,15 +122,15 @@ export function AppLayout(props: AppLayoutProps) {
           )}
         </div>
 
+        {/* 悬浮在分割线上的圆钮收起/展开拉手 */}
         <button
           type="button"
           onClick={() => setIsSidebarCollapsed((current) => !current)}
-          className="flex h-10 items-center justify-center gap-2 rounded-lg border border-outline-variant/30 bg-surface text-sm text-on-surface-variant transition-colors hover:border-primary/40 hover:text-primary"
+          className="absolute top-1/2 -right-3 z-50 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-outline-variant/40 bg-surface text-on-surface-variant shadow-md transition-all hover:bg-primary/10 hover:text-primary active:scale-90 cursor-pointer"
           title={isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
           aria-label={isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
         >
-          <Icon name={isSidebarCollapsed ? 'left_panel_open' : 'left_panel_close'} size={20} />
-          {!isSidebarCollapsed && <span>收起侧栏</span>}
+          <Icon name={isSidebarCollapsed ? 'chevron_right' : 'chevron_left'} size={16} />
         </button>
 
         {/* 导航标签 */}
@@ -142,11 +140,11 @@ export function AppLayout(props: AppLayoutProps) {
               key={item.key}
               onClick={() => props.onNavigate(item.key)}
               title={item.label}
-              className={`flex items-center rounded-lg py-2.5 transition-all duration-200 active:scale-[0.98] group ${
+              className={`sidebar-nav-item flex items-center rounded-lg py-2.5 transition-all duration-200 active:scale-[0.98] group ${
                 isSidebarCollapsed ? 'justify-center px-0' : 'gap-3 px-3'
               } ${
                 props.currentPage === item.key
-                  ? 'bg-primary/10 text-primary font-semibold'
+                  ? 'active bg-primary/10 text-primary font-semibold'
                   : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low hover:scale-[1.02] hover:brightness-110'
               }`}
             >
@@ -161,7 +159,7 @@ export function AppLayout(props: AppLayoutProps) {
           ))}
         </nav>
 
-        {props.taskProgress && !isSidebarCollapsed && (
+        {props.taskProgress && (props.taskProgress.status === 'running' || props.taskProgress.status === 'failed' || props.taskProgress.status === 'partial') && !isSidebarCollapsed && (
           <TaskProgressCard
             progress={props.taskProgress}
             onRetry={props.onRetryTask}
@@ -175,7 +173,7 @@ export function AppLayout(props: AppLayoutProps) {
           onClick={() => (props.user ? props.onSyncStars() : props.onNavigate('settings'))}
           disabled={props.isSyncing}
           title={props.user ? '同步 GitHub Stars' : '请先连接 GitHub 账号'}
-          className={`interactive-btn mb-2 flex w-full items-center justify-center gap-2 rounded-lg bg-primary font-body-md text-body-md font-semibold text-white shadow-[0_10px_22px_-14px_var(--color-primary)] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 ${
+          className={`premium-btn-primary mb-2 flex w-full items-center justify-center gap-2 rounded-lg font-body-md text-body-md font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60 ${
             isSidebarCollapsed ? 'h-10 px-0' : 'py-2.5'
           }`}
         >
@@ -311,12 +309,48 @@ export function AppLayout(props: AppLayoutProps) {
                   props.onGenerateAiTagNetwork();
                 }}
                 isGeneratingTagNetwork={props.isGeneratingTagNetwork}
-                onCheckForUpdate={() => {
-                  setIsQuickActionsOpen(false);
-                  props.onCheckForUpdate();
-                }}
-                isCheckingUpdate={props.isCheckingUpdate}
               />
+            )}
+            {props.taskProgress && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsNotificationOpen(true);
+                  setIsQuickActionsOpen(false);
+                }}
+                className="relative flex h-9 w-9 items-center justify-center rounded-full hover:bg-surface-container-low transition-colors"
+                title={
+                  props.taskProgress.status === 'running'
+                    ? `后台任务执行中: ${props.taskProgress.message}`
+                    : props.taskProgress.status === 'succeeded'
+                      ? `任务已完成: ${props.taskProgress.message}`
+                      : props.taskProgress.status === 'failed'
+                        ? `任务失败: ${props.taskProgress.message}`
+                        : `任务状态: ${props.taskProgress.message}`
+                }
+                aria-label="后台任务状态"
+              >
+                <span className="relative flex h-3 w-3">
+                  {props.taskProgress.status === 'running' && (
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+                  )}
+                  {props.taskProgress.status === 'succeeded' && (
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
+                  )}
+                  {props.taskProgress.status === 'failed' && (
+                    <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-error opacity-75"></span>
+                  )}
+                  <span className={`relative inline-flex rounded-full h-3 w-3 ${
+                    props.taskProgress.status === 'running'
+                      ? 'bg-primary'
+                      : props.taskProgress.status === 'succeeded'
+                        ? 'bg-success shadow-[0_0_8px_rgba(34,197,94,0.7)]'
+                        : props.taskProgress.status === 'failed'
+                          ? 'bg-error shadow-[0_0_8px_rgba(239,68,68,0.7)]'
+                          : 'bg-warning shadow-[0_0_8px_rgba(245,158,11,0.7)]'
+                  }`}></span>
+                </span>
+              </button>
             )}
             <button
               type="button"
@@ -330,7 +364,7 @@ export function AppLayout(props: AppLayoutProps) {
               aria-expanded={isNotificationOpen}
             >
               <Icon name="notifications" size={20} />
-              {(props.syncSummary || props.taskProgress || props.statusMessage || props.errorMessage) && (
+              {(props.syncSummary || props.statusMessage || props.errorMessage) && (
                 <span className="absolute top-2 right-2 w-2 h-2 bg-error rounded-full border border-surface" />
               )}
             </button>
@@ -407,7 +441,7 @@ export function AppLayout(props: AppLayoutProps) {
           />
         )}
 
-        {props.taskProgress && (
+        {props.taskProgress && (props.taskProgress.status === 'running' || props.taskProgress.status === 'failed' || props.taskProgress.status === 'partial') && (
           <div className="shrink-0 border-b border-card-border bg-surface/90 px-3 py-2 backdrop-blur-md sm:px-4 lg:hidden">
             <TaskProgressCard
               progress={props.taskProgress}
@@ -456,8 +490,6 @@ function TopbarQuickActionsMenu(props: {
   isBatchGeneratingAiDocuments: boolean;
   onGenerateAiTagNetwork: () => void;
   isGeneratingTagNetwork: boolean;
-  onCheckForUpdate: () => void;
-  isCheckingUpdate: boolean;
 }) {
   const needsGitHub = !props.hasGitHubUser;
 
@@ -499,14 +531,6 @@ function TopbarQuickActionsMenu(props: {
           disabled={needsGitHub || props.isGeneratingTagNetwork}
           loading={props.isGeneratingTagNetwork}
           onClick={props.onGenerateAiTagNetwork}
-        />
-        <QuickActionMenuItem
-          icon="system_update_alt"
-          label="检查更新"
-          description="查看是否有新的桌面应用版本。"
-          disabled={props.isCheckingUpdate}
-          loading={props.isCheckingUpdate}
-          onClick={props.onCheckForUpdate}
         />
       </div>
       {needsGitHub && (

@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { configDefaults, defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import path from 'node:path';
@@ -11,6 +11,9 @@ export default defineConfig({
     },
   },
   clearScreen: false,
+  test: {
+    exclude: [...configDefaults.exclude, 'src-tauri/target/**'],
+  },
   server: {
     host: '127.0.0.1',
     port: 1420,

@@ -223,6 +223,13 @@ textarea {
   outline-offset: 2px;
 }
 
+/* 避免输入控件产生双重边框（全局 focus-visible 与 Tailwind focus ring 冲突） */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none !important;
+}
+
 ::selection {
   background: var(--color-primary-container);
   color: var(--color-on-primary-container);

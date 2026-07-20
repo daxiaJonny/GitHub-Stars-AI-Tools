@@ -1424,7 +1424,7 @@ export function useStarsWorkspace() {
     }
   }
 
-  async function handleStarRecommendationCandidate(fullName: string) {
+  async function handleStarRecommendationCandidate(fullName: string, unstar?: boolean) {
     const accountId = authState.user ? String(authState.user.id) : null;
     setLastStarRecommendationCandidateFullName(fullName);
     if (!accountId) {
@@ -1437,7 +1437,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'star-github-recommendation-candidate',
       'sync',
-      `正在加入 ${fullName} 到 GitHub Stars`,
+      `正在${unstar ? '取消' : '加入'} ${fullName} ${unstar ? '的' : '到'} GitHub Stars`,
       fullName,
       'github-star',
     ));
@@ -1450,6 +1450,7 @@ export function useStarsWorkspace() {
           request: {
             accountId,
             fullName,
+            unstar: !!unstar,
           },
         },
       );
@@ -1468,10 +1469,10 @@ export function useStarsWorkspace() {
     setTaskProgress(buildSucceededTaskProgress(
       'star-github-recommendation-candidate',
       'sync',
-      `${candidate.fullName} 已加入 GitHub Stars，正在同步本地数据。`,
+      `${candidate.fullName} 已${unstar ? '从 GitHub Stars 取消' : '加入 GitHub Stars'}，正在同步本地数据。`,
     ));
     await handleSyncStars().catch((reason) => {
-      const message = `已加入 GitHub Stars，但本地同步暂未完成：${toErrorMessage(reason)}`;
+      const message = `已${unstar ? '从 GitHub Stars 取消' : '加入 GitHub Stars'}，但本地同步暂未完成：${toErrorMessage(reason)}`;
       setError(message);
     });
   }

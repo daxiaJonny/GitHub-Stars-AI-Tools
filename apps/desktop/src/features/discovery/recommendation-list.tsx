@@ -123,75 +123,92 @@ function CandidateActions(props: {
   onStar: (repository: GithubRepositoryRecommendation) => Promise<void>;
   onUpdateStatus: (repository: GithubRepositoryRecommendation, status: 'new' | 'marked' | 'ignored') => Promise<void>;
 }) {
-  if (props.status === 'starred') {
-    return (
-      <div className="flex flex-wrap items-center gap-2 xl:justify-end">
-        <Button size="sm" variant="outline" onClick={() => props.onOpenDetails(props.repository)}>
-          <Icon name="menu_book" size={15} />
-          查看介绍
-        </Button>
-        <Button asChild size="sm" variant="ghost">
-          <a href={props.repository.htmlUrl} target="_blank" rel="noreferrer">
-            <Icon name="open_in_new" size={15} />
-            GitHub
-          </a>
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={props.disabled}
-          onClick={() => void props.onUpdateStatus(props.repository, 'new')}
-          title="重新放回待处理列表，不会取消 GitHub Star"
-        >
-          <Icon name={props.pendingAction === 'restore' ? 'progress_activity' : 'restart_alt'} size={15} className={props.pendingAction === 'restore' ? 'animate-spin' : ''} />
-          {props.pendingAction === 'restore' ? '恢复中' : '重新评估'}
-        </Button>
-      </div>
-    );
-  }
+  const isStarred = props.status === 'starred';
+  const isMarked = props.status === 'marked';
+  const isIgnored = props.status === 'ignored';
 
   return (
-    <div className="flex flex-wrap items-center gap-2 xl:justify-end">
-      <Button size="sm" variant="outline" disabled={props.disabled} onClick={() => props.onOpenDetails(props.repository)}>
+    <div className="flex flex-wrap items-center gap-1.5 xl:justify-end">
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={props.disabled}
+        onClick={() => props.onOpenDetails(props.repository)}
+        title="查看介绍"
+        aria-label="查看介绍"
+      >
         <Icon name="menu_book" size={15} />
-        查看介绍
       </Button>
-      <Button size="sm" disabled={props.disabled} onClick={() => void props.onStar(props.repository)}>
-        <Icon name={props.pendingAction === 'star' ? 'progress_activity' : 'star'} size={15} className={props.pendingAction === 'star' ? 'animate-spin' : ''} />
-        {props.pendingAction === 'star' ? '添加中' : '加入 Stars'}
+
+      <Button asChild size="sm" variant="ghost" title="在 GitHub 打开">
+        <a
+          href={props.repository.htmlUrl}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`在 GitHub 打开 ${props.repository.fullName}`}
+        >
+          <Icon name="open_in_new" size={15} />
+        </a>
+      </Button>
+
+      <Button
+        size="sm"
+        variant={isStarred ? 'ghost' : 'default'}
+        disabled={props.disabled}
+        onClick={() => void props.onStar(props.repository)}
+        title={isStarred ? '取消 Stars' : '加入 Stars'}
+        aria-label={isStarred ? '取消 Stars' : '加入 Stars'}
+      >
+        <Icon
+          name={props.pendingAction === 'star' ? 'progress_activity' : 'star'}
+          size={15}
+          className={props.pendingAction === 'star' ? 'animate-spin' : ''}
+          fill={isStarred}
+        />
       </Button>
 
       <Button
         size="sm"
         variant="outline"
-        disabled={props.disabled}
-        onClick={() => void props.onUpdateStatus(props.repository, props.status === 'marked' || props.status === 'ignored' ? 'new' : 'marked')}
+        disabled={props.disabled || isStarred}
+        onClick={() => void props.onUpdateStatus(props.repository, isMarked ? 'new' : 'marked')}
+        title={isMarked ? '取消标记' : '稍后研究'}
+        aria-label={isMarked ? '取消标记' : '稍后研究'}
       >
         <Icon
-          name={props.pendingAction === 'mark' || props.pendingAction === 'restore' ? 'progress_activity' : props.status === 'marked' ? 'bookmark_remove' : props.status === 'ignored' ? 'undo' : 'bookmark_add'}
+          name={props.pendingAction === 'mark' || props.pendingAction === 'restore' ? 'progress_activity' : isMarked ? 'bookmark' : 'bookmark_add'}
           size={15}
           className={props.pendingAction === 'mark' || props.pendingAction === 'restore' ? 'animate-spin' : ''}
         />
-        {props.pendingAction === 'mark' || props.pendingAction === 'restore'
-          ? '处理中'
-          : props.status === 'marked'
-            ? '取消标记'
-            : props.status === 'ignored'
-              ? '恢复候选'
-              : '稍后研究'}
       </Button>
 
-      {props.status !== 'ignored' ? (
+      {!isIgnored ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={props.disabled || isStarred}
+          onClick={() => void props.onUpdateStatus(props.repository, 'ignored')}
+          title="忽略"
+          aria-label="忽略"
+        >
+          <Icon name={props.pendingAction === 'ignore' ? 'progress_activity' : 'visibility_off'} size={15} className={props.pendingAction === 'ignore' ? 'animate-spin' : ''} />
+        </Button>
+      ) : (
         <Button
           size="sm"
           variant="ghost"
           disabled={props.disabled}
-          onClick={() => void props.onUpdateStatus(props.repository, 'ignored')}
+          onClick={() => void props.onUpdateStatus(props.repository, 'new')}
+          title="恢复候选"
+          aria-label="恢复候选"
         >
-          <Icon name={props.pendingAction === 'ignore' ? 'progress_activity' : 'visibility_off'} size={15} className={props.pendingAction === 'ignore' ? 'animate-spin' : ''} />
-          {props.pendingAction === 'ignore' ? '忽略中' : '忽略'}
+          <Icon
+            name={props.pendingAction === 'restore' ? 'progress_activity' : 'undo'}
+            size={15}
+            className={props.pendingAction === 'restore' ? 'animate-spin' : ''}
+          />
         </Button>
-      ) : null}
+      )}
     </div>
   );
 }

@@ -1331,17 +1331,18 @@ function SearchResultOverview({
           </span>
         )}
       </div>
-      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+      <div className="mt-3 flex flex-wrap gap-2">
         {followUps.map((action) => (
           <button
             key={action.label}
             type="button"
             onClick={() => onAskFollowUp(action.query)}
             disabled={isSearching}
-            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 py-2 text-xs font-medium text-on-surface transition-colors hover:border-primary/40 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+            className="premium-btn-secondary inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md disabled:cursor-not-allowed disabled:opacity-60"
+            title={action.label}
+            aria-label={action.label}
           >
             <Icon name={action.icon} size={15} />
-            {action.label}
           </button>
         ))}
       </div>
@@ -1405,7 +1406,7 @@ function SearchResultCard({
             <button
               type="button"
               onClick={() => onOpenRepository(repo)}
-              className={`min-w-0 flex-1 truncate text-left font-headline-md font-bold text-primary cursor-pointer group-hover:underline ${compact ? 'text-[15px]' : 'text-[18px] sm:text-[20px]'}`}
+              className={`min-w-0 flex-1 truncate text-left font-bold text-primary cursor-pointer group-hover:underline ${compact ? 'text-sm' : 'text-[15px] sm:text-[17px]'}`}
             >
               {repo.fullName}
             </button>
@@ -1430,7 +1431,25 @@ function SearchResultCard({
               <SearchMetric icon="star" label="Stars" value={compactNumber(repo.starsCount)} />
               <SearchMetric icon="fork_right" label="Forks" value={compactNumber(repo.forksCount)} />
               <SearchMetric icon="code_blocks" label="语言" value={repo.language ?? '未标注'} />
-              <SearchMetric icon={repo.aiSummary ? 'auto_awesome' : 'description'} label="知识状态" value={repo.aiSummary ? '已解析' : repo.hasReadme ? '可解析' : '待抓取'} />
+              <SearchMetric
+                icon={repo.aiSummary ? 'check_circle' : repo.hasReadme ? 'info' : 'cancel'}
+                label="知识状态"
+                value={
+                  repo.aiSummary ? (
+                    <span className="inline-flex items-center gap-0.5 text-success font-semibold">
+                      <Icon name="check" size={13} className="stroke-[3]" />已解析
+                    </span>
+                  ) : repo.hasReadme ? (
+                    <span className="inline-flex items-center gap-0.5 text-warning font-medium">
+                      <Icon name="info" size={13} />待解析
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-0.5 text-error font-medium">
+                      <Icon name="close" size={13} className="stroke-[2.5]" />未解析
+                    </span>
+                  )
+                }
+              />
             </div>
           </div>
 
@@ -1501,10 +1520,11 @@ function SearchResultCard({
             <button
               type="button"
               onClick={() => onOpenRepository(repo)}
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-white transition-all hover:brightness-110 active:scale-[0.98]"
+              className="premium-btn-primary inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-white disabled:opacity-60"
+              title="查看详情"
+              aria-label="查看详情"
             >
               <Icon name="visibility" size={15} />
-              查看详情
             </button>
             {followUpActions.map((action) => (
               <button
@@ -1512,22 +1532,22 @@ function SearchResultCard({
                 type="button"
                 onClick={() => onExplainTopic(action.topic, action.visibleQuestion)}
                 disabled={isSearching}
-                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 py-2 text-xs font-medium text-on-surface transition-colors hover:border-primary/40 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
-                title="让 AI 直接解释，不重新搜索仓库"
+                className="premium-btn-secondary inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md disabled:cursor-not-allowed disabled:opacity-60"
+                title={action.label}
+                aria-label={action.label}
               >
                 <Icon name={action.icon} size={15} />
-                {action.label}
               </button>
             ))}
             <button
               type="button"
               onClick={() => onFindSimilarRepository(repo)}
               disabled={!canFindSimilarOnGithub}
-              title={similarDiscoveryDisabledReason ?? '根据这个仓库在 GitHub 上寻找相似或更优项目'}
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-primary/25 bg-primary/10 px-3 py-2 text-xs font-medium text-primary transition-colors hover:bg-primary/15 disabled:cursor-not-allowed disabled:border-outline-variant/30 disabled:bg-surface-container-low disabled:text-on-surface-variant disabled:opacity-60"
+              title={similarDiscoveryDisabledReason ?? '在 GitHub 上寻找相似或更优项目'}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-primary/25 bg-primary/10 text-primary transition-colors hover:bg-primary/15 disabled:cursor-not-allowed disabled:border-outline-variant/30 disabled:bg-surface-container-low disabled:text-on-surface-variant disabled:opacity-60"
+              aria-label="相似发现"
             >
               <Icon name={isFindingSimilar ? 'progress_activity' : 'travel_explore'} size={15} className={isFindingSimilar ? 'animate-spin' : ''} />
-              {isFindingSimilar ? '发现中' : 'GitHub 相似发现'}
             </button>
             <CopyLinkButton url={repo.htmlUrl} compact />
             {similarDiscoveryDisabledReason && (
@@ -1539,10 +1559,11 @@ function SearchResultCard({
               href={repo.htmlUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 py-2 text-xs font-medium text-on-surface transition-colors hover:border-primary/40 hover:text-primary"
+              className="premium-btn-secondary inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-on-surface"
+              title="在 GitHub 打开"
+              aria-label="在 GitHub 打开"
             >
               <Icon name="open_in_new" size={15} />
-              GitHub
             </a>
           </div>
         </div>
@@ -1622,10 +1643,11 @@ function EmptySearchResults({
             type="button"
             onClick={() => onAskFollowUp(action.query)}
             disabled={isSearching}
-            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 py-2 text-xs font-medium text-on-surface transition-colors hover:border-primary/40 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+            className="premium-btn-secondary inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md disabled:cursor-not-allowed disabled:opacity-60"
+            title={action.label}
+            aria-label={action.label}
           >
             <Icon name={action.icon} size={15} />
-            {action.label}
           </button>
         ))}
       </div>
@@ -1633,14 +1655,16 @@ function EmptySearchResults({
   );
 }
 
-function SearchMetric(props: { icon: string; label: string; value: string }) {
+function SearchMetric(props: { icon: string; label: string; value: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-outline-variant/20 bg-surface-container-low px-3 py-2">
-      <div className="mb-1 flex items-center gap-1.5 text-[11px] text-on-surface-variant">
-        <Icon name={props.icon} size={14} />
-        {props.label}
+    <div className="flex items-center justify-between gap-2 rounded-lg border border-outline-variant/20 bg-surface-container-low px-3 py-1.5 min-w-0">
+      <div className="flex items-center gap-1.5 text-[11px] text-on-surface-variant shrink-0">
+        <Icon name={props.icon} size={13} className="opacity-80" />
+        <span>{props.label}</span>
       </div>
-      <p className="truncate text-sm font-semibold text-on-surface">{props.value}</p>
+      <div className="truncate text-xs font-semibold text-on-surface text-right flex-1 flex justify-end">
+        {props.value}
+      </div>
     </div>
   );
 }

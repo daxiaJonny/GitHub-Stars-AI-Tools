@@ -76,19 +76,29 @@ export function RankingList(props: {
                 <span>{repository.pushedAt ? `${formatDate(repository.pushedAt)} 更新` : '暂无更新时间'}</span>
               </div>
               <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
-                <Button size="sm" variant="outline" onClick={() => props.onOpenDetails(repository)}>
+                <Button size="sm" variant="outline" onClick={() => props.onOpenDetails(repository)} title="查看介绍" aria-label="查看介绍">
                   <Icon name="menu_book" size={15} />
-                  查看介绍
                 </Button>
-                <Button asChild size="sm" variant="ghost">
+                <Button asChild size="sm" variant="ghost" title="在 GitHub 打开">
                   <a href={repository.htmlUrl} target="_blank" rel="noreferrer" aria-label={`在 GitHub 打开 ${repository.fullName}`}>
                     <Icon name="open_in_new" size={15} />
                   </a>
                 </Button>
-                {props.allowStar && !repository.isStarred ? (
-                  <Button size="sm" disabled={isPending} onClick={() => props.onStar(repository)}>
-                    <Icon name={isPending ? 'progress_activity' : 'star'} size={15} className={isPending ? 'animate-spin' : ''} />
-                    {isPending ? '添加中' : '加入 Stars'}
+                {props.allowStar ? (
+                  <Button
+                    size="sm"
+                    variant={repository.isStarred ? 'ghost' : 'default'}
+                    disabled={isPending}
+                    onClick={() => props.onStar(repository)}
+                    title={repository.isStarred ? '取消 Stars' : '加入 Stars'}
+                    aria-label={repository.isStarred ? '取消 Stars' : '加入 Stars'}
+                  >
+                    <Icon
+                      name={isPending ? 'progress_activity' : 'star'}
+                      size={15}
+                      className={isPending ? 'animate-spin' : ''}
+                      fill={repository.isStarred}
+                    />
                   </Button>
                 ) : null}
               </div>

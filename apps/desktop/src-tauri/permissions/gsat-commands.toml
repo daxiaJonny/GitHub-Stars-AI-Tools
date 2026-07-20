@@ -63,4 +63,6 @@ commands.allow = [
   "import_annotation_gist",
   "export_repository_library_gist",
   "import_repository_library_gist",
+  "check_upstream_updates",
+  "mark_upstream_updates_seen",
 ]

@@ -1,12 +1,10 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AppLayout } from '@/components/app-layout';
-import { AppUpdateDialog } from '@/components/app-update-panel';
 import { Icon } from '@/components/ui/icon';
 import { WelcomeFlow } from '@/components/welcome-flow';
 import { WorkspaceProvider, useWorkspace } from '@/providers/workspace-provider';
 import { SettingsProvider, useAppSettings } from '@/providers/settings-provider';
-import { AppUpdateProvider, useAppUpdate } from '@/providers/app-update-provider';
 import { shouldFlushAiApiKey } from '@/lib/ai-config';
 import type { AppPage, RepositoryListItem } from '@/types';
 
@@ -30,12 +28,9 @@ type RepositoryNavigationState = {
 function AppContent() {
   const workspace = useWorkspace();
   const settingsHook = useAppSettings();
-  const appUpdate = useAppUpdate();
   const [currentPage, setCurrentPage] = useState<AppPage>('dashboard');
   const [showWelcome, setShowWelcome] = useState(false);
   const [hasDismissedWelcome, setHasDismissedWelcome] = useState(false);
-  const [hasDismissedUpdateNotice, setHasDismissedUpdateNotice] = useState(false);
-  const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
   const [notificationOpenSignal, setNotificationOpenSignal] = useState(0);
   const [repositoryNavigation, setRepositoryNavigation] = useState<RepositoryNavigationState>({
     query: '',
@@ -54,12 +49,6 @@ function AppContent() {
   const hasTriggeredAutoSyncRef = useRef(false);
   const autoSyncAccountIdRef = useRef<string | null>(null);
   const isSyncingStarsRef = useRef(false);
-
-  useEffect(() => {
-    if (appUpdate.status === 'available') {
-      setHasDismissedUpdateNotice(false);
-    }
-  }, [appUpdate.availableVersion, appUpdate.status]);
 
   useEffect(() => {
     isSyncingStarsRef.current = workspace.isSyncingStars;
@@ -338,16 +327,6 @@ function AppContent() {
     }
   }
 
-  function handleOpenUpdateDialog() {
-    setIsUpdateDialogOpen(true);
-    setHasDismissedUpdateNotice(true);
-  }
-
-  function handleCheckForUpdate() {
-    setIsUpdateDialogOpen(true);
-    void appUpdate.checkForUpdate();
-  }
-
   return (
     <>
       <AppLayout
@@ -362,8 +341,6 @@ function AppContent() {
         isBatchGeneratingAiDocuments={workspace.isBatchGeneratingAiDocuments}
         onGenerateAiTagNetwork={() => void handleQuickGenerateAiTagNetwork()}
         isGeneratingTagNetwork={workspace.isGeneratingTagNetwork}
-        onCheckForUpdate={handleCheckForUpdate}
-        isCheckingUpdate={appUpdate.status === 'checking'}
         syncSummary={workspace.syncSummary}
         onGlobalSearch={handleGlobalSearch}
         taskProgress={workspace.taskProgress}
@@ -378,61 +355,7 @@ function AppContent() {
           {renderPage()}
         </Suspense>
       </AppLayout>
-      {appUpdate.status === 'available' && appUpdate.availableVersion && !hasDismissedUpdateNotice && (
-        <StartupUpdateNotice
-          version={appUpdate.availableVersion}
-          onOpenUpdate={handleOpenUpdateDialog}
-          onDismiss={() => setHasDismissedUpdateNotice(true)}
-        />
-      )}
-      {isUpdateDialogOpen && (
-        <AppUpdateDialog appUpdate={appUpdate} onClose={() => setIsUpdateDialogOpen(false)} />
-      )}
     </>
-  );
-}
-
-function StartupUpdateNotice(props: { version: string; onOpenUpdate: () => void; onDismiss: () => void }) {
-  return (
-    <div className="fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] max-w-sm rounded-xl border border-primary/20 bg-surface p-4 shadow-xl shadow-black/15 backdrop-blur-md">
-      <div className="flex items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <Icon name="system_update_alt" size={20} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="font-body-md text-sm font-semibold text-on-surface">发现新版本 {props.version}</p>
-          <p className="mt-1 font-body-md text-xs leading-relaxed text-on-surface-variant">
-            可直接查看更新说明并安装，当前操作不会被打断。
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={props.onOpenUpdate}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-body-md text-xs font-medium text-white transition-colors hover:brightness-110"
-            >
-              <Icon name="system_update_alt" size={14} />
-              查看更新
-            </button>
-            <button
-              type="button"
-              onClick={props.onDismiss}
-              className="rounded-lg border border-card-border bg-surface-container-low px-3 py-1.5 font-body-md text-xs text-on-surface transition-colors hover:bg-surface-container-high"
-            >
-              稍后
-            </button>
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={props.onDismiss}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-on-surface-variant transition-colors hover:bg-surface-container-low hover:text-on-surface"
-          title="关闭更新提示"
-          aria-label="关闭更新提示"
-        >
-          <Icon name="close" size={16} />
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -656,13 +579,11 @@ function getFailureRepositoryIds(failures: { repositoryId: string }[] | undefine
 export function App() {
   return (
     <SettingsProvider>
-      <AppUpdateProvider>
-        <WorkspaceProvider>
-          <div className="flex h-dvh min-w-0 flex-col overflow-hidden bg-background">
-            <AppContent />
-          </div>
-        </WorkspaceProvider>
-      </AppUpdateProvider>
+      <WorkspaceProvider>
+        <div className="flex h-dvh min-w-0 flex-col overflow-hidden bg-background">
+          <AppContent />
+        </div>
+      </WorkspaceProvider>
     </SettingsProvider>
   );
 }

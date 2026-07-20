@@ -77,7 +77,7 @@ export function RankingsWorkspace(props: {
     setStarError(null);
     try {
       const result = await invoke<RankingStarResult>('star_github_ranking_repository', {
-        request: { accountId: props.accountId, fullName: repository.fullName },
+        request: { accountId: props.accountId, fullName: repository.fullName, unstar: repository.isStarred },
       });
       setPage((current) => current ? {
         ...current,

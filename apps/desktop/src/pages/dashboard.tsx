@@ -409,7 +409,7 @@ export function DashboardPage(props: DashboardPageProps) {
               onClick={() => (workspace.authState.user ? void workspace.handleSyncStars() : props.onOpenSettings())}
               disabled={workspace.isSyncingStars}
               title={workspace.authState.user ? '同步 GitHub Stars' : '前往设置连接 GitHub 账号'}
-              className="interactive-btn flex flex-1 items-center justify-center gap-2 rounded-lg border border-card-border bg-surface-container-high py-2 font-body-md text-sm font-medium text-on-surface hover:bg-surface-container-highest disabled:opacity-60"
+              className="premium-btn-secondary flex flex-1 items-center justify-center gap-2 rounded-lg py-2 font-body-md text-sm font-medium disabled:opacity-60"
             >
               <Icon name="sync" size={16} className={workspace.isSyncingStars ? 'animate-spin' : ''} />
               {workspace.isSyncingStars ? '同步中...' : workspace.authState.user ? '立即同步' : '先连接 GitHub'}
@@ -418,7 +418,7 @@ export function DashboardPage(props: DashboardPageProps) {
               type="button"
               onClick={props.onOpenNotifications}
               title="查看通知和任务状态"
-              className="flex shrink-0 items-center justify-center gap-0.5 rounded-lg px-2 py-2 font-label-sm text-xs text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+              className="premium-btn-ghost flex shrink-0 items-center justify-center gap-0.5 rounded-lg px-2 py-2 font-label-sm text-xs"
             >
               同步记录
               <Icon name="chevron_right" size={16} />
@@ -543,9 +543,9 @@ function StatCard(props: {
   progress?: React.ReactNode;
 }) {
   return (
-    <div className="glass-card group relative flex flex-col overflow-hidden rounded-xl p-5">
+    <div className="glass-card glass-card-glow group relative flex flex-col overflow-hidden rounded-xl p-5">
       <div className="mb-4 flex items-start justify-between gap-3">
-        <div className={`grid size-11 shrink-0 place-items-center rounded-lg ${props.iconBgClass} ${props.iconColorClass}`}>
+        <div className={`grid size-11 shrink-0 place-items-center rounded-lg ${props.iconBgClass} ${props.iconColorClass} group-hover:scale-110 group-hover:rotate-6 transition-transform duration-300`}>
           <Icon name={props.icon} size={22} className="block leading-none" />
         </div>
         {props.badge}

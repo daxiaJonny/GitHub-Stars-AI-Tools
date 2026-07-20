@@ -1267,6 +1267,7 @@ function RepoDetailPanel(props: {
     aiError,
   } = props;
   const aiDoc = detail?.aiDocument;
+  const [showAiPanel, setShowAiPanel] = useState(true);
   const selectedTagIds = new Set(annotation?.tags.map((tag) => tag.id) ?? []);
   const [editingTagId, setEditingTagId] = useState<string | null>(null);
   const [editingTagName, setEditingTagName] = useState('');
@@ -1389,6 +1390,19 @@ function RepoDetailPanel(props: {
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setShowAiPanel((show) => !show)}
+            className={`inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-medium leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+              showAiPanel
+                ? 'border-primary/20 bg-primary/10 text-primary hover:bg-primary/15'
+                : 'border-outline-variant/35 bg-surface-container-low text-on-surface-variant hover:border-primary/40 hover:text-primary'
+            }`}
+            title={showAiPanel ? '隐藏 AI 知识卡' : '显示 AI 知识卡'}
+          >
+            <Icon name={showAiPanel ? 'visibility_off' : 'auto_awesome'} size={15} />
+            <span>{showAiPanel ? '隐藏 AI 卡片' : '显示 AI 卡片'}</span>
+          </button>
           <CopyLinkButton url={repo.htmlUrl} />
           <a
             href={repo.htmlUrl}
@@ -1406,8 +1420,12 @@ function RepoDetailPanel(props: {
       <div className="bg-surface-container-lowest/30 p-2 md:min-h-0 md:flex-1 md:overflow-hidden xl:p-2.5">
         <div
           ref={detailLayoutRef}
-          style={{ '--ai-panel-width': `${aiPanelWidth}px` } as CSSProperties}
-          className="grid min-w-0 grid-cols-1 gap-2 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(0,1fr)_12px_var(--ai-panel-width)] xl:gap-0 xl:overflow-hidden 2xl:grid-cols-[112px_minmax(0,1fr)_12px_var(--ai-panel-width)]"
+          style={showAiPanel ? { '--ai-panel-width': `${aiPanelWidth}px` } as CSSProperties : undefined}
+          className={`grid min-w-0 grid-cols-1 gap-2 xl:h-full xl:min-h-0 xl:overflow-hidden ${
+            showAiPanel
+              ? 'xl:grid-cols-[minmax(0,1fr)_12px_var(--ai-panel-width)] xl:gap-0 2xl:grid-cols-[112px_minmax(0,1fr)_12px_var(--ai-panel-width)]'
+              : '2xl:grid-cols-[112px_minmax(0,1fr)]'
+          }`}
         >
         {/* README 目录 */}
         <nav className="hidden min-h-0 min-w-0 overflow-y-auto border-r border-outline-variant/20 pr-2 custom-scrollbar 2xl:block">
@@ -1488,21 +1506,24 @@ function RepoDetailPanel(props: {
           </div>
         </div>
 
-        <VerticalResizeHandle
-          value={aiPanelWidth}
-          min={AI_PANEL_MIN_WIDTH}
-          max={aiPanelMaxWidth}
-          defaultValue={Math.min(AI_PANEL_DEFAULT_WIDTH, aiPanelMaxWidth)}
-          label="调整 AI 项目知识卡宽度"
-          direction="reverse"
-          className="hidden xl:flex"
-          scale={REPOSITORY_PAGE_ZOOM}
-          onChange={(value) => setAiPanelWidth(clampNumber(value, AI_PANEL_MIN_WIDTH, aiPanelMaxWidth))}
-        />
+        {showAiPanel && (
+          <VerticalResizeHandle
+            value={aiPanelWidth}
+            min={AI_PANEL_MIN_WIDTH}
+            max={aiPanelMaxWidth}
+            defaultValue={Math.min(AI_PANEL_DEFAULT_WIDTH, aiPanelMaxWidth)}
+            label="调整 AI 项目知识卡宽度"
+            direction="reverse"
+            className="hidden xl:flex"
+            scale={REPOSITORY_PAGE_ZOOM}
+            onChange={(value) => setAiPanelWidth(clampNumber(value, AI_PANEL_MIN_WIDTH, aiPanelMaxWidth))}
+          />
+        )}
 
         {/* 右侧 AI 洞察栏 */}
-        <div className="min-h-[460px] min-w-0 xl:min-h-0">
-          <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-primary/20 bg-surface/80 p-2.5 shadow-sm backdrop-blur-sm">
+        {showAiPanel && (
+          <div className="min-h-[460px] min-w-0 animate-fade-in-up xl:min-h-0">
+            <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-primary/20 bg-surface/80 p-2.5 shadow-sm backdrop-blur-sm">
             <div className="mb-2 flex shrink-0 items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
@@ -1947,8 +1968,9 @@ function RepoDetailPanel(props: {
                 {isGeneratingAiDocument ? '解析中...' : aiDoc ? '更新 AI 解析' : 'AI 解析'}
               </button>
             </div>
+            </div>
           </div>
-        </div>
+        )}
         </div>
       </div>
     </div>

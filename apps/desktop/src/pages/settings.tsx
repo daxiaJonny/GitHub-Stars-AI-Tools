@@ -4,9 +4,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useWorkspace } from '@/providers/workspace-provider';
 import { useAppSettings } from '@/providers/settings-provider';
-import { useAppUpdate, type AppUpdateContextValue } from '@/providers/app-update-provider';
-import { AppUpdatePanel } from '@/components/app-update-panel';
 import { Icon } from '@/components/ui/icon';
+import { UpstreamUpdatePanel } from '@/components/upstream-update-panel';
 import {
   getAiConfigMessage,
   getEmbeddingConfigMessage,
@@ -281,7 +280,6 @@ type VectorIndexBuildSummary = {
 export function SettingsPage() {
   const workspace = useWorkspace();
   const settingsHook = useAppSettings();
-  const appUpdate = useAppUpdate();
   const [activeTab, setActiveTab] = useState<SettingsTab>('github');
 
   const tabs: { key: SettingsTab; icon: string; label: string; shortLabel: string }[] = [
@@ -346,7 +344,7 @@ export function SettingsPage() {
         )}
         {activeTab === 'general' && <GeneralSettings settingsHook={settingsHook} workspace={workspace} />}
         {activeTab === 'backup' && <BackupSettings workspace={workspace} />}
-        {activeTab === 'about' && <AboutSettings appUpdate={appUpdate} />}
+        {activeTab === 'about' && <AboutSettings />}
       </div>
     </div>
   );
@@ -808,6 +806,7 @@ function RuntimeReadinessPanel(props: {
       actionLabel: null,
       onAction: null,
       actionDisabled: false,
+      actionIcon: null,
     },
     {
       title: 'Stars 同步',
@@ -816,6 +815,7 @@ function RuntimeReadinessPanel(props: {
       actionLabel: props.isSyncingStars ? '同步中...' : '同步 Stars',
       onAction: props.isConnected ? props.onSyncStars : null,
       actionDisabled: props.isSyncingStars,
+      actionIcon: 'sync',
     },
     {
       title: 'README 缓存',
@@ -826,6 +826,7 @@ function RuntimeReadinessPanel(props: {
       actionLabel: props.isFetchingReadmes ? '抓取中...' : totalReadmes > 0 ? '补抓缺失 README' : '抓取 README',
       onAction: readmeNeedsTopUp ? props.onFetchReadmes : null,
       actionDisabled: isAiWorkflowBusy,
+      actionIcon: 'download',
     },
     {
       title: 'AI 引擎',
@@ -842,6 +843,7 @@ function RuntimeReadinessPanel(props: {
         ? aiNeedsTopUp ? props.onGenerateAi : null
         : props.onOpenAiSettings,
       actionDisabled: isAiWorkflowBusy,
+      actionIcon: aiReady ? 'auto_awesome' : 'settings',
     },
     {
       title: '标签网络',
@@ -854,6 +856,7 @@ function RuntimeReadinessPanel(props: {
       actionLabel: props.isGeneratingTagNetwork ? '生成中...' : totalTags > 0 ? '重新生成标签网络' : '生成标签网络',
       onAction: aiReady && totalAiSummaries > 0 ? props.onGenerateTagNetwork : aiReady ? null : props.onOpenAiSettings,
       actionDisabled: isAiWorkflowBusy,
+      actionIcon: 'hub',
     },
   ];
 
@@ -896,13 +899,13 @@ function RuntimeReadinessPanel(props: {
         {readinessItems.map((item) => (
           <div
             key={item.title}
-            className={`rounded-lg border px-4 py-3 ${
+            className={`relative rounded-lg border px-4 py-3 ${
               item.done
                 ? 'border-success/20 bg-success/10'
                 : 'border-card-border bg-surface-container-low'
             }`}
           >
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 pr-10">
               <Icon
                 name={item.done ? 'check_circle' : 'radio_button_unchecked'}
                 size={18}
@@ -910,7 +913,7 @@ function RuntimeReadinessPanel(props: {
               />
               <h4 className="font-body-md font-medium text-on-surface">{item.title}</h4>
             </div>
-            <p className="mt-1 pl-6 font-body-md text-xs leading-relaxed text-on-surface-variant">
+            <p className="mt-1 pl-6 pr-6 font-body-md text-xs leading-relaxed text-on-surface-variant">
               {item.detail}
             </p>
             {item.onAction && (
@@ -918,12 +921,15 @@ function RuntimeReadinessPanel(props: {
                 type="button"
                 onClick={item.onAction}
                 disabled={item.actionDisabled}
-                className="mt-3 ml-6 inline-flex items-center gap-1.5 rounded-lg border border-card-border bg-surface px-3 py-1.5 font-body-md text-xs text-on-surface transition-colors hover:bg-surface-container-high disabled:opacity-60"
+                className="absolute top-3 right-3 flex h-8 w-8 items-center justify-center rounded-lg border border-card-border bg-surface text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-primary disabled:opacity-60 premium-btn-secondary"
+                title={item.actionLabel ?? '继续'}
+                aria-label={item.actionLabel ?? '继续'}
               >
-                {item.actionLabel?.includes('中...') && (
+                {item.actionLabel?.includes('中...') ? (
                   <Icon name="progress_activity" size={14} className="animate-spin" />
+                ) : (
+                  <Icon name={item.actionIcon ?? 'bolt'} size={16} />
                 )}
-                {item.actionLabel ?? '继续'}
               </button>
             )}
           </div>
@@ -2771,7 +2777,7 @@ function GeneralSettings({
   );
 }
 
-function AboutSettings({ appUpdate }: { appUpdate: AppUpdateContextValue }) {
+function AboutSettings() {
   return (
     <section className="glass-panel rounded-xl p-6">
       <h3 className="mb-6 font-headline-md text-[20px] font-semibold text-on-surface">关于项目</h3>
@@ -2846,7 +2852,7 @@ function AboutSettings({ appUpdate }: { appUpdate: AppUpdateContextValue }) {
             </a>
           </div>
         </div>
-        <AppUpdatePanel appUpdate={appUpdate} />
+        <UpstreamUpdatePanel />
       </div>
     </section>
   );

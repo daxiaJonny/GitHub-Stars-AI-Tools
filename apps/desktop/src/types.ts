@@ -429,3 +429,25 @@ export type ProfileStats = {
 
 export type { AppSettings, ThemeSettings, SyncSettings, AISettings, EmbeddingSettings, GeneralSettings } from './types-settings';
 export { DEFAULT_SETTINGS, COLOR_PRESETS } from './types-settings';
+
+/* ===========================================================================
+ * 上游 fork 更新检查类型
+ * =========================================================================*/
+export type UpstreamCommit = {
+  sha: string;
+  shortSha: string;
+  message: string;
+  author: string | null;
+  date: string;
+  htmlUrl: string;
+};
+
+export type UpstreamUpdateReport = {
+  latestSha: string | null;
+  lastSeenSha: string | null;
+  newCount: number;
+  commits: UpstreamCommit[];
+  lastCheckedAt: string;
+  repoUrl: string;
+  error: string | null;
+};
