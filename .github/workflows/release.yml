@@ -30,7 +30,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.event.inputs.version }}
+  group: release-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
@@ -45,9 +45,10 @@ jobs:
       - name: Normalize version
         id: meta
         shell: bash
+        env:
+          RAW_VERSION: ${{ inputs.version }}
         run: |
-          raw_version="${{ github.event.inputs.version }}"
-          version="${raw_version#v}"
+          version="${RAW_VERSION#v}"
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
             echo "版本号必须类似 0.1.0、v0.1.0 或 0.1.0-beta.1" >&2
             exit 1
@@ -55,6 +56,21 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag_name=v$version" >> "$GITHUB_OUTPUT"
           echo "release_name=GitHub-Stars-AI-Tools v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify updater signing secrets
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+            echo "缺少 TAURI_SIGNING_PRIVATE_KEY，无法生成 updater 签名。" >&2
+            exit 1
+          fi
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "缺少 TAURI_SIGNING_PRIVATE_KEY_PASSWORD，无法解锁 updater 私钥。" >&2
+            exit 1
+          fi
 
   build:
     name: Build ${{ matrix.platform }}
@@ -67,22 +83,21 @@ jobs:
             os: macos-latest
             args: --target aarch64-apple-darwin --bundles app,dmg
             rust_targets: aarch64-apple-darwin
-          - platform: macOS Intel
-            os: macos-latest
-            args: --target x86_64-apple-darwin --bundles app,dmg
-            rust_targets: x86_64-apple-darwin
+            native_target: aarch64-apple-darwin
           - platform: Windows
             os: windows-latest
             args: --bundles nsis
             rust_targets: ""
+            native_target: x86_64-pc-windows-msvc
           - platform: Linux
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             args: ""
             rust_targets: ""
+            native_target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -104,12 +119,12 @@ jobs:
             xdg-utils
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.8.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -207,12 +222,18 @@ jobs:
       - name: Build shared packages
         run: pnpm build:packages
 
+      - name: Prepare zvec native runtime
+        run: node apps/desktop/scripts/prepare-native-runtime.mjs --bootstrap --target ${{ matrix.native_target }}
+
       - name: Resolve release notes
         id: release-notes
         shell: bash
+        env:
+          CHANGELOG_FILE: ${{ inputs.changelog_file }}
+          CHANGELOG: ${{ inputs.changelog }}
         run: |
-          changelog_file="${{ github.event.inputs.changelog_file }}"
-          changelog="${{ github.event.inputs.changelog }}"
+          changelog_file="$CHANGELOG_FILE"
+          changelog="$CHANGELOG"
 
           if [[ -n "$changelog_file" ]]; then
             if [[ "$changelog_file" = /* || "$changelog_file" == *".."* ]]; then
@@ -233,10 +254,14 @@ jobs:
             printf '%s\n' "$changelog" > "$notes_file"
           fi
 
+          delimiter="GSAT_RELEASE_NOTES_${RANDOM}_${RANDOM}"
+          while grep -Fxq "$delimiter" "$notes_file"; do
+            delimiter="${delimiter}_${RANDOM}"
+          done
           {
-            echo "body<<EOF"
+            echo "body<<$delimiter"
             cat "$notes_file"
-            echo "EOF"
+            echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
 
       - name: Import Windows signing certificate
@@ -296,10 +321,52 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag_name }}
           releaseName: ${{ needs.prepare.outputs.release_name }}
           releaseBody: ${{ steps.release-notes.outputs.body }}
-          releaseDraft: ${{ github.event.inputs.release_draft }}
-          prerelease: ${{ github.event.inputs.prerelease }}
+          releaseDraft: ${{ inputs.release_draft }}
+          prerelease: ${{ inputs.prerelease }}
           uploadPlainBinary: false
           args: ${{ matrix.args }} ${{ steps.windows-signing.outputs.tauri_config_arg }}
+
+      - name: Verify Windows native runtime package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $runtime = "apps/desktop/src-tauri/runtime/zvec_c_api.dll"
+          if (-not (Test-Path $runtime)) {
+            throw "未准备 Windows zvec 运行库：$runtime"
+          }
+          $installer = Get-ChildItem "apps/desktop/src-tauri/target/release/bundle/nsis" `
+            -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "未找到 NSIS 安装包。"
+          }
+          $listing = & 7z l $installer.FullName
+          $listingText = $listing -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $listingText -notmatch "zvec_c_api.dll") {
+            throw "NSIS 安装包未包含 zvec_c_api.dll。"
+          }
+
+      - name: Verify Linux native runtime packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          runtime="apps/desktop/src-tauri/runtime/libzvec_c_api.so"
+          test -f "$runtime"
+
+          bundle_root="apps/desktop/src-tauri/target/release/bundle"
+          deb="$(find "$bundle_root/deb" -name '*.deb' -print -quit)"
+          rpm_file="$(find "$bundle_root/rpm" -name '*.rpm' -print -quit)"
+          appimage="$(find "$bundle_root/appimage" -name '*.AppImage' -print -quit)"
+          test -n "$deb" && test -n "$rpm_file" && test -n "$appimage"
+          dpkg-deb --contents "$deb" | grep -F 'usr/lib/github-stars-ai-tools/libzvec_c_api.so'
+          rpm -qlp "$rpm_file" | grep -F '/usr/lib/github-stars-ai-tools/libzvec_c_api.so'
+
+          extract_dir="$RUNNER_TEMP/gsat-appimage"
+          mkdir -p "$extract_dir"
+          appimage_path="$GITHUB_WORKSPACE/$appimage"
+          chmod +x "$appimage_path"
+          cd "$extract_dir"
+          "$appimage_path" --appimage-extract > /dev/null
+          test -f "squashfs-root/usr/lib/github-stars-ai-tools/libzvec_c_api.so"
 
       - name: Repackage macOS DMG with large Finder icons
         if: runner.os == 'macOS'
@@ -307,40 +374,129 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           RUST_TARGET: ${{ matrix.rust_targets }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           pnpm --filter @gsat/desktop tauri build --target "$RUST_TARGET" --bundles app
+          app_path="apps/desktop/src-tauri/target/$RUST_TARGET/release/bundle/macos/GitHub-Stars-AI-Tools.app"
+          test -f "$app_path/Contents/Frameworks/libzvec_c_api.dylib"
+          codesign --verify --deep --strict "$app_path"
+          codesign -d --entitlements - "$app_path/Contents/MacOS/gsat-desktop" 2>&1 \
+            | grep -F 'com.apple.security.cs.disable-library-validation'
+          otool -l "$app_path/Contents/MacOS/gsat-desktop" | grep -F '@executable_path/../Frameworks'
           dmg_path="$(pnpm --filter @gsat/desktop package:dmg -- --target "$RUST_TARGET" | tail -n 1)"
+          expected_name="GitHub-Stars-AI-Tools_${RELEASE_VERSION}_aarch64.dmg"
           if [[ ! -f "$dmg_path" ]]; then
             echo "未生成 DMG：$dmg_path" >&2
             exit 1
           fi
+          if [[ "$(basename "$dmg_path")" != "$expected_name" ]]; then
+            echo "DMG 文件名不符合发布约定：$(basename "$dmg_path")，预期 $expected_name" >&2
+            exit 1
+          fi
+          hdiutil verify "$dmg_path"
           gh release upload "$TAG_NAME" "$dmg_path" --clobber
 
-  verify-updater-manifest:
-    name: Verify updater manifest asset
+  verify-release-assets:
+    name: Verify release assets
     needs: [prepare, build]
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-22.04
     steps:
-      - name: Verify updater manifest asset
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Test updater manifest normalization
+        run: node --test apps/desktop/scripts/normalize-updater-manifest.test.mjs
+
+      - name: Verify installers and updater manifest
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          expected_assets=(
+            "GitHub-Stars-AI-Tools_${RELEASE_VERSION}_aarch64.dmg"
+            "GitHub-Stars-AI-Tools_${RELEASE_VERSION}_aarch64.app.tar.gz"
+            "GitHub-Stars-AI-Tools_${RELEASE_VERSION}_aarch64.app.tar.gz.sig"
+            "GitHub-Stars-AI-Tools_${RELEASE_VERSION}_x64-setup.exe"
+            "GitHub-Stars-AI-Tools_${RELEASE_VERSION}_x64-setup.exe.sig"
+            "GitHub-Stars-AI-Tools_${RELEASE_VERSION}_amd64.AppImage"
+            "GitHub-Stars-AI-Tools_${RELEASE_VERSION}_amd64.AppImage.sig"
+            "GitHub-Stars-AI-Tools_${RELEASE_VERSION}_amd64.deb"
+            "GitHub-Stars-AI-Tools_${RELEASE_VERSION}_amd64.deb.sig"
+            "GitHub-Stars-AI-Tools-${RELEASE_VERSION}-1.x86_64.rpm"
+            "GitHub-Stars-AI-Tools-${RELEASE_VERSION}-1.x86_64.rpm.sig"
+            "latest.json"
+          )
+
+          assets_ready=false
           for attempt in {1..18}; do
             assets="$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' || true)"
-            if grep -Fxq 'latest.json' <<< "$assets"; then
-              echo "Release 已包含 Tauri updater 静态清单 latest.json。"
-              exit 0
+            missing_assets=()
+            for expected_asset in "${expected_assets[@]}"; do
+              if ! grep -Fxq "$expected_asset" <<< "$assets"; then
+                missing_assets+=("$expected_asset")
+              fi
+            done
+            if (( ${#missing_assets[@]} == 0 )); then
+              assets_ready=true
+              break
             fi
-            echo "等待 latest.json 上传完成，第 $attempt 次检查。"
+            echo "等待 Release 资产上传完成，第 $attempt 次检查；仍缺少：${missing_assets[*]}"
             sleep 10
           done
-          echo "Release 未找到 latest.json，请检查 Tauri updater artifacts 和签名密钥配置。" >&2
-          echo "当前 Release 资产："
-          gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' || true
-          exit 1
+
+          if [[ "$assets_ready" != true ]]; then
+            echo "Release 资产不完整，请检查各平台打包与 updater 签名。" >&2
+            echo "当前 Release 资产："
+            gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' || true
+            exit 1
+          fi
+
+          manifest_dir="$RUNNER_TEMP/updater-manifest"
+          mkdir -p "$manifest_dir"
+          gh release download "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern latest.json \
+            --dir "$manifest_dir" \
+            --clobber
+          manifest="$manifest_dir/latest.json"
+          node apps/desktop/scripts/normalize-updater-manifest.mjs \
+            "$manifest" \
+            "$GITHUB_REPOSITORY" \
+            "$TAG_NAME" \
+            "$RELEASE_VERSION"
+          gh release upload "$TAG_NAME" \
+            "$manifest" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          jq -e --arg version "$RELEASE_VERSION" '.version == $version' "$manifest" > /dev/null
+          public_download_prefix="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/"
+          jq -e --arg prefix "$public_download_prefix" '
+            [.platforms[].url | startswith($prefix)] | all
+          ' "$manifest" > /dev/null
+          for platform in darwin-aarch64 windows-x86_64 linux-x86_64; do
+            jq -e --arg platform "$platform" '
+              .platforms[$platform]
+              | (.url | type == "string" and length > 0)
+                and (.signature | type == "string" and length > 0)
+            ' "$manifest" > /dev/null
+          done
+          jq -e '.platforms["darwin-x86_64"] == null' "$manifest" > /dev/null
+          while IFS= read -r updater_url; do
+            curl --fail --silent --show-error --location \
+              --range 0-0 \
+              --output /dev/null \
+              "$updater_url"
+          done < <(jq -r '.platforms[].url' "$manifest" | sort -u)
+          echo "三平台安装包、签名文件和 updater 清单均已通过校验。"

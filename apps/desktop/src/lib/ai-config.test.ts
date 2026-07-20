@@ -7,6 +7,14 @@ import {
 } from './ai-config';
 
 describe('Embedding 配置', () => {
+  it('新用户默认使用关闭的本地模型配置', () => {
+    expect(DEFAULT_SETTINGS.embedding.enabled).toBe(false);
+    expect(DEFAULT_SETTINGS.embedding.provider).toBe('local');
+    expect(DEFAULT_SETTINGS.embedding.downloadSource).toBe('modelscope');
+    expect(DEFAULT_SETTINGS.embedding.model).toBe('intfloat/multilingual-e5-small');
+    expect(DEFAULT_SETTINGS.embedding.dimensions).toBe(384);
+  });
+
   it('归一化维度、阈值和结果上限', () => {
     const normalized = normalizeEmbeddingSettings({
       ...DEFAULT_SETTINGS.embedding,
@@ -26,14 +34,49 @@ describe('Embedding 配置', () => {
     expect(normalized.maxResults).toBe(10);
   });
 
-  it('关闭 provider 时强制关闭向量检索', () => {
+  it('旧版 none provider 迁移为关闭的本地模式', () => {
     const normalized = normalizeEmbeddingSettings({
       ...DEFAULT_SETTINGS.embedding,
       enabled: true,
       provider: 'none',
+      minScore: 0.72,
     });
 
     expect(normalized.enabled).toBe(false);
+    expect(normalized.provider).toBe('local');
+    expect(normalized.model).toBe('intfloat/multilingual-e5-small');
+    expect(normalized.dimensions).toBe(384);
+    expect(normalized.minScore).toBe(0.8);
+  });
+
+  it('本地 provider 固定 multilingual-e5-small 参数并清空 Key', () => {
+    const normalized = normalizeEmbeddingSettings({
+      ...DEFAULT_SETTINGS.embedding,
+      enabled: true,
+      provider: 'local',
+      apiKey: 'should-not-persist',
+      model: 'fake-model',
+      dimensions: 1536,
+    });
+
+    expect(normalized.provider).toBe('local');
+    expect(normalized.model).toBe('intfloat/multilingual-e5-small');
+    expect(normalized.dimensions).toBe(384);
+    expect(normalized.apiKey).toBe('');
+  });
+
+  it('保留官方下载源并将未知下载源回退到国内源', () => {
+    const official = normalizeEmbeddingSettings({
+      ...DEFAULT_SETTINGS.embedding,
+      downloadSource: 'huggingface',
+    });
+    const fallback = normalizeEmbeddingSettings({
+      ...DEFAULT_SETTINGS.embedding,
+      downloadSource: 'unknown' as 'modelscope',
+    });
+
+    expect(official.downloadSource).toBe('huggingface');
+    expect(fallback.downloadSource).toBe('modelscope');
   });
 
   it('后端配置不携带明文 API Key', () => {
@@ -46,6 +89,7 @@ describe('Embedding 配置', () => {
     });
 
     expect(backend.apiKey).toBe('');
+    expect(backend.downloadSource).toBe('modelscope');
     expect(backend.maxResults).toBe(8);
   });
 

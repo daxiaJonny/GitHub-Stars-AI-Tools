@@ -80,6 +80,14 @@ if (result.status !== 0) {
   throw new Error(`DMG 封装失败，退出码：${result.status ?? 'unknown'}`);
 }
 
+const verification = spawnSync('hdiutil', ['verify', outputDmg], {
+  cwd: repoRoot,
+  stdio: 'inherit',
+});
+if (verification.status !== 0) {
+  throw new Error(`DMG 完整性校验失败，退出码：${verification.status ?? 'unknown'}`);
+}
+
 console.log(outputDmg);
 
 function readArgValue(name) {
