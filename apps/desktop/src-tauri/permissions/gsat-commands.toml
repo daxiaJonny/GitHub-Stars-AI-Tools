@@ -34,6 +34,7 @@ commands.allow = [
   "list_repositories",
   "list_repository_languages",
   "get_repository_detail",
+  "get_repository_filter_counts",
   "list_tags",
   "create_tag",
   "update_tag",
